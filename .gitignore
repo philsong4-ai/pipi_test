@@ -1,0 +1,36 @@
+# 日志
+*.log
+
+# 数据库
+*.db
+*.sqlite
+
+# 备份
+*.bak
+*.backup
+
+# 证书/密钥
+*.pem
+*.key
+*.crt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# 环境变量
+.env
+.env.local
+
+# Claude internal
+.claude/
