@@ -1231,7 +1231,7 @@ def review_case_quality(case_data: Dict, dimension_info: Dict = None, user_facts
     # 格式化用户事实
     facts_text = ""
     if user_facts:
-        facts_lines = [f"- {f.get('category', '')}.{f.get('fact_key', '')}: {f.get('fact_value', '')}" for f in user_facts[:30]]
+        facts_lines = [f"- {f.get('category', '')}.{f.get('fact_key', '')}: {f.get('fact_value', '')}" for f in user_facts]
         facts_text = "\n".join(facts_lines)
 
     system_prompt = f"""你是测试用例质量审核专家。请审核以下AI陪伴对话测试用例的质量。

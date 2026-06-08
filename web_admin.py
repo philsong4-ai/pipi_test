@@ -7040,8 +7040,8 @@ def async_review_cases(case_ids, auto_regenerate=True):
                 user_facts = []
                 if persona_id:
                     fact_rows = execute_query(conn,
-                        "SELECT category, fact_key, fact_value FROM user_facts WHERE persona_id = %s AND is_active = 1 ORDER BY id DESC LIMIT 30" if USE_MYSQL else
-                        "SELECT category, fact_key, fact_value FROM user_facts WHERE persona_id = ? AND is_active = 1 ORDER BY id DESC LIMIT 30",
+                        "SELECT category, fact_key, fact_value FROM user_facts WHERE persona_id = %s AND is_active = 1 ORDER BY id DESC" if USE_MYSQL else
+                        "SELECT category, fact_key, fact_value FROM user_facts WHERE persona_id = ? AND is_active = 1 ORDER BY id DESC",
                         (persona_id,), fetch_all=True)
                     if fact_rows:
                         user_facts = [row_to_dict(r) for r in fact_rows]
