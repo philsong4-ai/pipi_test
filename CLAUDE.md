@@ -9,10 +9,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Architecture
 
 ```
-本地开发 (/tmp/)                    服务器部署 (<SERVER_IP>)
-├── web_admin.py  ─────────────────► /opt/pipi-test/web/web_admin.py
-├── pipi_api.py   ─────────────────► /opt/pipi-test/web/pipi_api.py
-└── index_current.html ────────────► /opt/pipi-test/web/index.html
+本地开发 (当前目录)                 服务器部署 (<SERVER_IP>)
+├── web_admin.py  ─── git bundle ──► /opt/pipi-test/web/
+├── pipi_api.py
+├── index.html
+├── start_web.sh
+└── ...
 ```
 
 - **web_admin.py**: Flask 后端，所有 API 路由、数据库操作、任务调度
@@ -32,9 +34,10 @@ cd /opt/pipi-test/web/
 ## Common Commands
 
 ```bash
-# 部署代码
-scp /tmp/web_admin.py root@<SERVER_IP>:/opt/pipi-test/web/web_admin.py
-scp /tmp/index_current.html root@<SERVER_IP>:/opt/pipi-test/web/index.html
+# 部署代码（通过 git bundle）
+git bundle create pipi.bundle --all
+scp pipi.bundle root@<SERVER_IP>:/opt/pipi-test/web/pipi.bundle
+ssh root@<SERVER_IP> "cd /opt/pipi-test/web && git fetch origin && git reset --hard origin/main && rm pipi.bundle"
 
 # 重启服务（必须用 start_web.sh，包含 LLM 代理环境变量）
 ssh root@<SERVER_IP> "cd /opt/pipi-test/web && ./start_web.sh restart"
@@ -44,6 +47,9 @@ ssh root@<SERVER_IP> "cd /opt/pipi-test/web && ./start_web.sh status"
 
 # 查看日志
 ssh root@<SERVER_IP> "tail -100 /opt/pipi-test/web/web_admin.log"
+
+# 查看服务器当前版本
+ssh root@<SERVER_IP> "cd /opt/pipi-test/web && git log --oneline -5"
 ```
 
 ## Database
