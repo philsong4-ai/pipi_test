@@ -5012,7 +5012,7 @@ def _save_test_case(conn, case_data, persona_id=None, device_id=None, dimension_
     # 校验必填字段（LLM生成的字段）
     REQUIRED_FIELDS = [
         "case_id", "test_point", "title", "input_text",
-        "expected_output", "failure_flags",
+        "expected_output", "failure_flags", "evaluation_points",
         "score_2_desc", "score_6_desc", "score_10_desc", "priority"
     ]
     missing_fields = []
@@ -5048,12 +5048,12 @@ def _save_test_case(conn, case_data, persona_id=None, device_id=None, dimension_
 
     cursor = execute_query(conn, """
         INSERT INTO test_cases (case_id, persona_id, device_id, dimension_code, test_point, title, priority,
-            input_text, expected_output, failure_flags, score_2_desc, score_6_desc, score_10_desc, status, quality_status, quality_issues)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s)
+            input_text, expected_output, evaluation_points, failure_flags, score_2_desc, score_6_desc, score_10_desc, status, quality_status, quality_issues)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s)
     """ if USE_MYSQL else """
         INSERT INTO test_cases (case_id, persona_id, device_id, dimension_code, test_point, title, priority,
-            input_text, expected_output, failure_flags, score_2_desc, score_6_desc, score_10_desc, status, quality_status, quality_issues)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+            input_text, expected_output, evaluation_points, failure_flags, score_2_desc, score_6_desc, score_10_desc, status, quality_status, quality_issues)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
     """, (
         clean_value(case_data.get("case_id")),
         clean_value(final_persona_id),
@@ -5064,6 +5064,7 @@ def _save_test_case(conn, case_data, persona_id=None, device_id=None, dimension_
         clean_value(case_data.get("priority", "P1")),
         clean_value(case_data.get("input_text", "")),
         clean_value(case_data.get("expected_output", "")),
+        clean_value(case_data.get("evaluation_points", "")),
         clean_value(case_data.get("failure_flags", "")),
         clean_value(case_data.get("score_2_desc", "")),
         clean_value(case_data.get("score_6_desc", "")),
@@ -5105,7 +5106,8 @@ def update_test_case(case_id):
 
     # 构建更新语句
     updatable = ["case_id", "persona_id", "device_id", "dimension_code", "title", "priority",
-                 "input_text", "expected_output", "failure_flags", "score_2_desc", "score_6_desc", "score_10_desc",
+                 "input_text", "expected_output", "evaluation_points", "failure_flags",
+                 "score_2_desc", "score_6_desc", "score_10_desc",
                  "actual_output", "score", "deduction_reason", "status"]
     set_clauses = []
     params = []
@@ -6915,6 +6917,15 @@ def validate_case_rules(case_data, dimension_code):
     expected = case_data.get("expected_output", "")
     if len(expected) < 10:
         issues.append("expected_output 过短，可能不完整")
+
+    # 6. expected_output 检测行为列表格式（应为具体回复文本）
+    if expected and re.match(r'^\s*\d+[\.、）)]', expected.strip()):
+        issues.append("expected_output 疑似行为原则列表，应为具体回复文本")
+
+    # 7. evaluation_points 不应为空
+    eval_points = case_data.get("evaluation_points", "")
+    if not eval_points or (isinstance(eval_points, str) and not eval_points.strip()):
+        issues.append("缺少 evaluation_points（关键评估点）")
     
     return {
         "passed": len(issues) == 0,
