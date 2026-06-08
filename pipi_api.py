@@ -85,7 +85,8 @@ def call_pipi_stream(
     device_id: str = "TEST_DEV_001",
     timeout: int = 30,
     api_url: str = None,
-    api_key: str = None
+    api_key: str = None,
+    extra_headers: dict = None
 ) -> Dict:
     """
     调用皮皮流式 API，返回完整响应。
@@ -128,11 +129,13 @@ def call_pipi_stream(
     full_text = ""
     sse_buffer = ""
 
-    # 构建请求头，支持自定义 api_key
+    # 构建请求头，支持自定义 api_key 和额外请求头
     req_headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}" if api_key else HEADERS["Authorization"]
     }
+    if extra_headers:
+        req_headers.update(extra_headers)
 
     # DEBUG: 打印完整请求
     print(f"[API REQUEST] URL: {url}", flush=True)

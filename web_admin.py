@@ -109,12 +109,12 @@ def get_api_url_by_code(api_code: str) -> str:
     return None
 
 
-def get_api_config_by_code(api_code: str) -> tuple:
-    """根据接口代码获取 API URL 和 API Key，返回 (url, key)
-    api_key 存储在 auth_config JSON 字段中，格式: {"api_key": "xxx"}
+def get_api_config_by_code(api_code: str):
+    """根据接口代码获取 API URL、API Key 和自定义请求头，返回 (url, key, headers)
+    auth_config JSON 格式: {"api_key": "xxx", "headers": {"X-Custom": "val"}}
     """
     if not api_code:
-        return None, None
+        return None, None, {}
     conn = get_db_connection()
     row = execute_query(conn,
         "SELECT base_url, auth_config FROM api_endpoints WHERE code = %s AND is_active = 1" if USE_MYSQL else
@@ -126,14 +126,16 @@ def get_api_config_by_code(api_code: str) -> tuple:
         base_url = row.get("base_url")
         auth_config = row.get("auth_config")
         api_key = None
+        headers = {}
         if auth_config:
             try:
                 config = json.loads(auth_config) if isinstance(auth_config, str) else auth_config
                 api_key = config.get("api_key")
+                headers = config.get("headers", {})
             except:
                 pass
-        return base_url, api_key
-    return None, None
+        return base_url, api_key, headers
+    return None, None, {}
 
 
 # ─── 数据库初始化 ─────────────────────────────────
@@ -568,7 +570,7 @@ def test_chat():
     target_api = override_target_api or persona_data.get("target_api", "pipi")
 
     # 获取目标接口配置
-    api_url, api_key = get_api_config_by_code(target_api)
+    api_url, api_key, api_headers = get_api_config_by_code(target_api)
 
     # 保存用户消息
     save_chat_msg(persona_id, "user", name, message)
@@ -580,7 +582,7 @@ def test_chat():
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": message},
     ]
-    result = pipi_api.call_pipi_stream(api_messages, device_id=device_id, api_url=api_url, api_key=api_key)
+    result = pipi_api.call_pipi_stream(api_messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers)
     _ttfb = result.get("ttfb_ms")
     _total = result.get("response_time_ms")
     print(f"[TIMING] {persona_id} SE-web: TTFB={_ttfb}ms total={_total}ms", flush=True)
@@ -1245,7 +1247,7 @@ def simulate_chat():
     device_id = persona_data.get("device_id", persona_id)
     name = persona_data.get("name", persona_id)
     target_api = persona_data.get("target_api", "pipi")
-    api_url, api_key = get_api_config_by_code(target_api)
+    api_url, api_key, api_headers = get_api_config_by_code(target_api)
 
     conversations = []
 
@@ -1266,7 +1268,7 @@ def simulate_chat():
         ]
 
         # 调用目标接口
-        result = pipi_api.call_pipi_stream(api_messages, device_id=device_id, api_url=api_url, api_key=api_key)
+        result = pipi_api.call_pipi_stream(api_messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers)
 
         reply_text = result.get("full_text", "")
         reply_id = None
@@ -1786,7 +1788,7 @@ def call_api(persona_id, message):
         device_id = persona_data["device_id"]
         name = persona_data["name"]
         target_api = persona_data.get("target_api", "pipi")
-        api_url, api_key = get_api_config_by_code(target_api)
+        api_url, api_key, api_headers = get_api_config_by_code(target_api)
 
     system_prompt = pipi_api.build_system_prompt(persona_data, device_id)
     messages = [
@@ -1795,7 +1797,7 @@ def call_api(persona_id, message):
     ]
 
     print(f"[CALL API] persona_id={persona_id} device_id={device_id} msg={message[:50]}", flush=True)
-    result = pipi_api.call_pipi_stream(messages, device_id=device_id, api_url=api_url, api_key=api_key)
+    result = pipi_api.call_pipi_stream(messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers)
     if result.get("full_text"):
         msg_id = save_chat_msg(persona_id or "guest", "pipi", "秋秋", result["full_text"])
         result["message_id"] = msg_id
@@ -3160,13 +3162,13 @@ def _growth_worker(task_id):
 
                 # 2. 调用玩偶接口
                 target_api = persona_data.get("target_api", "pipi")
-                api_url, api_key = get_api_config_by_code(target_api)
+                api_url, api_key, api_headers = get_api_config_by_code(target_api)
                 system_prompt = pipi_api.build_system_prompt(persona_data, device_id)
                 api_messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_message},
                 ]
-                result = pipi_api.call_pipi_stream(api_messages, device_id=device_id, api_url=api_url, api_key=api_key)
+                result = pipi_api.call_pipi_stream(api_messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers)
                 reply_text = result.get("full_text", "")
 
                 # 3. 保存玩偶回复
@@ -6754,12 +6756,20 @@ def create_endpoint():
     conn = get_db_connection()
     ph = "%s" if USE_MYSQL else "?"
     try:
+        # 合并 headers 到 auth_config
+        auth_config = data.get("auth_config", {})
+        if isinstance(auth_config, str):
+            auth_config = json.loads(auth_config)
+        headers = data.get("headers")
+        if headers and isinstance(headers, dict):
+            auth_config["headers"] = headers
+
         execute_query(conn, f"""
             INSERT INTO api_endpoints (name, code, base_url, auth_type, auth_config, request_template, timeout_sec)
             VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
         """, (name, code, base_url,
               data.get("auth_type", "none"),
-              json.dumps(data.get("auth_config", {}), ensure_ascii=False) if data.get("auth_config") else None,
+              json.dumps(auth_config, ensure_ascii=False) if auth_config else None,
               json.dumps(data.get("request_template", {}), ensure_ascii=False) if data.get("request_template") else None,
               data.get("timeout_sec", 30)))
         conn.commit()
@@ -6784,10 +6794,26 @@ def update_endpoint(eid):
         if field in data:
             updates.append(f"{field} = {ph}")
             params.append(data[field])
-    for field in ["auth_config", "request_template"]:
-        if field in data:
-            updates.append(f"{field} = {ph}")
-            params.append(json.dumps(data[field], ensure_ascii=False) if data[field] else None)
+    # headers 需合并到 auth_config
+    headers = data.get("headers")
+    if headers is not None:
+        existing = execute_query(conn, f"SELECT auth_config FROM api_endpoints WHERE id = {ph}", (eid,), fetch_one=True)
+        auth_config = {}
+        if existing and existing[0]:
+            try:
+                auth_config = json.loads(existing[0]) if isinstance(existing[0], str) else existing[0]
+            except:
+                pass
+        if isinstance(headers, dict):
+            auth_config["headers"] = headers
+        updates.append(f"auth_config = {ph}")
+        params.append(json.dumps(auth_config, ensure_ascii=False) if auth_config else None)
+    elif "auth_config" in data:
+        updates.append(f"auth_config = {ph}")
+        params.append(json.dumps(data["auth_config"], ensure_ascii=False) if data["auth_config"] else None)
+    if "request_template" in data:
+        updates.append(f"request_template = {ph}")
+        params.append(json.dumps(data["request_template"], ensure_ascii=False) if data["request_template"] else None)
 
     if not updates:
         conn.close()
@@ -6825,13 +6851,15 @@ def test_endpoint(eid):
     endpoint = row_to_dict(row)
     base_url = endpoint.get("base_url", "")
     timeout_sec = endpoint.get("timeout_sec", 30)
-    # api_key 从 auth_config JSON 中读取
+    # api_key 和自定义请求头从 auth_config JSON 中读取
     api_key = None
+    api_headers = {}
     auth_config = endpoint.get("auth_config")
     if auth_config:
         try:
             config = json.loads(auth_config) if isinstance(auth_config, str) else auth_config
             api_key = config.get("api_key")
+            api_headers = config.get("headers", {})
         except:
             pass
 
@@ -6847,7 +6875,8 @@ def test_endpoint(eid):
             test_messages,
             device_id="test_device_001",
             api_url=base_url,
-            api_key=api_key
+            api_key=api_key,
+            extra_headers=api_headers
         )
 
         # result 是 dict: {"full_text": "...", "response_time_ms": ..., "error": ...}

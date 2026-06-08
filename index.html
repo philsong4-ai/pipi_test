@@ -3322,6 +3322,17 @@ function showEndpointModal(endpoint) {
   h += '<label>超时时间（秒）</label>';
   h += '<input type="number" id="ep-timeout" value="' + (endpoint ? endpoint.timeout_sec : 30) + '" min="5" max="300" style="width:100px;padding:8px;border:1px solid #d2d2d7;border-radius:4px">';
   h += '</div>';
+  var existingHeaders = '';
+  if (endpoint && endpoint.auth_config) {
+    try {
+      var cfg = typeof endpoint.auth_config === 'string' ? JSON.parse(endpoint.auth_config) : endpoint.auth_config;
+      if (cfg.headers) existingHeaders = JSON.stringify(cfg.headers, null, 2);
+    } catch(e) {}
+  }
+  h += '<div class="form-group" style="margin-bottom:12px">';
+  h += '<label>请求头配置（JSON格式，可选。如 {"X-API-Key": "xxx"}）</label>';
+  h += '<textarea id="ep-headers" rows="3" placeholder=\'{"X-Custom-Header": "value"}\' style="width:100%;padding:8px;border:1px solid #d2d2d7;border-radius:4px;font-family:monospace;font-size:12px">' + existingHeaders + '</textarea>';
+  h += '</div>';
   if (isEdit) {
     h += '<div class="form-group" style="margin-bottom:12px">';
     h += '<label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="ep-active" ' + (endpoint.is_active ? 'checked' : '') + '> 启用</label>';
@@ -3357,6 +3368,11 @@ function saveEndpoint(id) {
   var activeEl = document.getElementById('ep-active');
   if (activeEl) {
     data.is_active = activeEl.checked ? 1 : 0;
+  }
+  var headersText = document.getElementById('ep-headers').value.trim();
+  if (headersText) {
+    try { data.headers = JSON.parse(headersText); }
+    catch(e) { alert('请求头 JSON 格式错误: ' + e.message); return; }
   }
 
   var url = id ? '/api/endpoints/' + id : '/api/endpoints';
