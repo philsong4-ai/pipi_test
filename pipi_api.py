@@ -1171,7 +1171,7 @@ def evaluate_chat_reply(
     )
     
     try:
-        result_text = call_llm_simple(system_prompt, user_prompt, timeout=30)
+        result_text = call_llm_simple(system_prompt, user_prompt, timeout=90)
         print(f"[CHAT EVAL] result_text len: {len(result_text) if result_text else 0}, content: {repr(result_text[:200]) if result_text else None}", flush=True)
         if not result_text:
             return _default_eval_result("LLM无响应")
