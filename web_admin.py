@@ -12,6 +12,16 @@ import random
 import threading
 import datetime
 
+# 给 print() 加时间戳
+import builtins
+_print = builtins.print
+
+def _tsprint(*args, **kwargs):
+    ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    _print(f"[{ts}]", *args, **kwargs)
+
+builtins.print = _tsprint
+
 from flask import Flask, request, jsonify, send_file
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
