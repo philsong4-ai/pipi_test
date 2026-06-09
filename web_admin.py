@@ -3439,9 +3439,8 @@ def create_test_task():
         conn.close()
         return jsonify({"error": "no test cases found for selected dimensions"}), 400
 
-    # 生成任务ID
-    import uuid
-    task_id = f"TASK-{datetime.datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6]}"
+    # 生成任务ID: 用户ID-日期时间
+    task_id = f"{persona_id}-{datetime.datetime.now().strftime('%Y%m%d%H%M')}"
 
     if not name:
         name = f"测试任务 {datetime.datetime.now().strftime('%m-%d %H:%M')}"
