@@ -447,6 +447,17 @@ body{background:#f5f5f7;color:#1d1d1f}
       <div style="color:#aeaeb2;text-align:center;padding:40px">加载中...</div>
     </div>
   </div>
+
+  <!-- LLM模型配置 -->
+  <div class="card" style="margin-top:20px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <h3 style="font-size:16px;margin:0">LLM 模型配置</h3>
+      <button class="btn btn-primary btn-sm" onclick="saveLlmConfig()">保存</button>
+    </div>
+    <div id="llm-config-list" style="font-size:13px">
+      <div style="color:#aeaeb2;text-align:center;padding:40px">加载中...</div>
+    </div>
+  </div>
 </div>
 
 <div id="panel-about" class="panel">
@@ -2060,6 +2071,7 @@ document.querySelectorAll('.nav-item').forEach(function(btn) {
     }
     if (btn.dataset.tab === 'endpoints') {
       loadEndpoints();
+      loadLlmConfig();
     }
     if (btn.dataset.tab === 'test-manage') {
       loadTestTasksV2();
@@ -3437,6 +3449,59 @@ function testEndpoint(id, btn) {
       setTimeout(function() { btn.innerText = originalText; btn.style.background = '#34c759'; }, 2000);
       alert('请求失败: ' + err);
     });
+}
+
+// ─── LLM 模型配置 ───
+
+var LLM_CONFIG_LABELS = {
+  "case_gen": "用例生成",
+  "case_regenerate": "用例重新生成",
+  "fact_extract": "事实提取",
+  "eval_batch": "批量评测",
+  "eval_case": "单用例评测",
+  "eval_realtime": "实时评测",
+  "case_review": "用例复核"
+};
+
+function loadLlmConfig() {
+  fetch('/api/llm/config')
+    .then(r => r.json())
+    .then(config => {
+      var list = document.getElementById('llm-config-list');
+      var html = '<table style="width:100%;border-collapse:collapse;font-size:13px">';
+      html += '<tr style="background:#f5f5f7"><th style="padding:10px;text-align:left">功能</th><th style="padding:10px;text-align:left">模型</th></tr>';
+      for (var key in LLM_CONFIG_LABELS) {
+        var val = config[key] || '';
+        html += '<tr style="border-bottom:1px solid #e8e8ed">';
+        html += '<td style="padding:10px;font-weight:500">' + LLM_CONFIG_LABELS[key] + '</td>';
+        html += '<td style="padding:10px"><input type="text" id="llm-' + key + '" value="' + val + '" placeholder="如 qwen3.6-plus" style="width:100%;max-width:300px;padding:6px 8px;border:1px solid #d2d2d7;border-radius:4px;font-family:monospace;font-size:12px"></td>';
+        html += '</tr>';
+      }
+      html += '</table>';
+      list.innerHTML = html;
+    });
+}
+
+function saveLlmConfig() {
+  var data = {};
+  for (var key in LLM_CONFIG_LABELS) {
+    var el = document.getElementById('llm-' + key);
+    if (el) data[key] = el.value.trim();
+  }
+  fetch('/api/llm/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(data)
+  })
+  .then(r => r.json())
+  .then(res => {
+    if (res.error) {
+      alert('保存失败: ' + res.error);
+    } else {
+      alert('LLM模型配置已保存');
+      loadLlmConfig();
+    }
+  });
 }
 
 // 加载接口下拉选项（供其他页面使用）
