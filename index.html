@@ -1877,8 +1877,13 @@ function refreshGrowthTasks() {
     var html = '<table style="width:100%;font-size:13px;border-collapse:collapse">';
     html += '<tr style="background:#f5f5f7"><th style="padding:8px;text-align:left">ID</th><th>用户ID</th><th>用户名</th><th>速度</th><th>状态</th><th>进度</th><th>事实数</th><th>耗时</th><th>操作</th></tr>';
     tasks.forEach(function(t) {
-      var statusColor = t.status === 'completed' ? '#34c759' : (t.status === 'running' ? '#0071e3' : (t.status === 'failed' ? '#ff3b30' : '#86868b'));
-      var statusText = {pending: '等待中', running: '运行中', completed: '已完成', failed: '失败'}[t.status] || t.status;
+      // 有进度的 pending 任务实际上是中断的，不是普通等待中
+      var displayStatus = t.status;
+      if (t.status === 'pending' && t.completed_messages > 0) {
+        displayStatus = 'interrupted';
+      }
+      var statusColor = displayStatus === 'completed' ? '#34c759' : (displayStatus === 'running' ? '#0071e3' : (displayStatus === 'failed' ? '#ff3b30' : (displayStatus === 'interrupted' ? '#ff9500' : '#86868b')));
+      var statusText = {pending: '等待中', running: '运行中', completed: '已完成', failed: '失败', interrupted: '已中断'}[displayStatus] || t.status;
       var duration = '-';
       if (t.started_at) {
         var start = new Date(t.started_at);
