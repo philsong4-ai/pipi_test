@@ -625,7 +625,7 @@ def test_chat():
                 _t_fact = _time.time()
                 llm_config = get_llm_config()
                 facts = pipi_api.extract_facts_from_message(
-                    message, persona_data, existing_facts, chat_history=chat_history_for_extract, model=llm_config["fact_extract"])
+                    message, persona_data, existing_facts, chat_history=chat_history_for_extract, **llm_config["fact_extract"])
                 _fact_elapsed = _time.time() - _t_fact
                 print(f"[TIMING] {persona_id} 事实提取: {_fact_elapsed:.1f}s", flush=True)
 
@@ -940,37 +940,57 @@ def set_eval_config():
 
 # ─── LLM 模型配置 API ───────────────────────────────
 
-DEFAULT_LLM_MODELS = {
-    "case_gen": "qwen3.6-plus",
-    "case_regenerate": "qwen3.6-plus",
-    "fact_extract": "qwen3.6-plus",
-    "eval_batch": "qwen3.6-plus",
-    "eval_case": "qwen3.6-plus",
-    "eval_realtime": "qwen3.6-plus",
-    "case_review": "deepseek-v4-pro",
+DEFAULT_LLM_CONFIG = {
+    "case_gen":       {"model": "qwen3.6-plus",  "temperature": 0.3, "max_tokens": 8192, "timeout": 180},
+    "case_regenerate": {"model": "qwen3.6-plus",  "temperature": 0.3, "max_tokens": 8192, "timeout": 180},
+    "fact_extract":   {"model": "qwen3.6-plus",  "temperature": 0.3, "max_tokens": 8192, "timeout": 60},
+    "eval_batch":     {"model": "qwen3.6-plus",  "temperature": 0.3, "max_tokens": 8192, "timeout": 90},
+    "eval_case":      {"model": "qwen3.6-plus",  "temperature": 0.3, "max_tokens": 8192, "timeout": 60},
+    "eval_realtime":  {"model": "qwen3.6-plus",  "temperature": 0.3, "max_tokens": 8192, "timeout": 90},
+    "case_review":    {"model": "deepseek-v4-pro","temperature": 0.3, "max_tokens": 8192, "timeout": 120},
 }
 
+# 兼容用：保留旧名称引用，旧版存的是纯字符串 model 名
+DEFAULT_LLM_MODELS = {k: v["model"] for k, v in DEFAULT_LLM_CONFIG.items()}
 
-def get_llm_config():
-    """读取 LLM 模型配置，返回 dict"""
+
+def get_llm_config(key=None):
+    """读取 LLM 配置，返回完整 dict 或单个方法的 dict。
+    兼容旧存储格式（值仅为字符串 model 名）。
+    """
     conn = get_db_connection()
     row = execute_query(conn, "SELECT value FROM eval_config WHERE `key`='llm_models'", fetch_one=True)
     conn.close()
+    config = {}
     if row and row[0]:
         try:
-            config = json.loads(row[0]) if isinstance(row[0], str) else row[0]
-            for k, v in DEFAULT_LLM_MODELS.items():
-                config.setdefault(k, v)
-            return config
+            raw = json.loads(row[0]) if isinstance(row[0], str) else row[0]
         except:
-            pass
-    return dict(DEFAULT_LLM_MODELS)
+            raw = {}
+        # 兼容旧格式：值可能是字符串，补齐为完整 dict
+        for k, v in DEFAULT_LLM_CONFIG.items():
+            stored = raw.get(k)
+            if stored is None:
+                config[k] = dict(v)
+            elif isinstance(stored, str):
+                # 旧格式：只有模型名字符串
+                config[k] = dict(v)
+                config[k]["model"] = stored
+            elif isinstance(stored, dict):
+                config[k] = dict(v)
+                config[k].update({kk: stored[kk] for kk in ("model", "temperature", "max_tokens", "timeout") if kk in stored})
+            else:
+                config[k] = dict(v)
+    else:
+        config = {k: dict(v) for k, v in DEFAULT_LLM_CONFIG.items()}
+    if key:
+        return config.get(key, dict(DEFAULT_LLM_CONFIG[key]))
+    return config
 
 
 @app.route("/api/llm/config", methods=["GET"])
 def api_get_llm_config():
-    config = get_llm_config()
-    return jsonify({k: config.get(k, DEFAULT_LLM_MODELS.get(k, "")) for k in DEFAULT_LLM_MODELS})
+    return jsonify(get_llm_config())
 
 
 @app.route("/api/llm/config", methods=["POST"])
@@ -978,11 +998,17 @@ def api_set_llm_config():
     data = request.get_json() or {}
     conn = get_db_connection()
     config = {}
-    for k in DEFAULT_LLM_MODELS:
-        if k in data and data[k] and isinstance(data[k], str) and data[k].strip():
-            config[k] = data[k].strip()
+    for k in DEFAULT_LLM_CONFIG:
+        entry = data.get(k)
+        if isinstance(entry, dict):
+            config[k] = {
+                "model": entry.get("model", DEFAULT_LLM_CONFIG[k]["model"]).strip() or DEFAULT_LLM_CONFIG[k]["model"],
+                "temperature": float(entry.get("temperature", DEFAULT_LLM_CONFIG[k]["temperature"])),
+                "max_tokens": int(entry.get("max_tokens", DEFAULT_LLM_CONFIG[k]["max_tokens"])),
+                "timeout": int(entry.get("timeout", DEFAULT_LLM_CONFIG[k]["timeout"])),
+            }
         else:
-            config[k] = DEFAULT_LLM_MODELS[k]
+            config[k] = dict(DEFAULT_LLM_CONFIG[k])
     if USE_MYSQL:
         execute_query(conn, "REPLACE INTO eval_config (`key`, value) VALUES ('llm_models', %s)",
                      (json.dumps(config, ensure_ascii=False),))
@@ -991,7 +1017,7 @@ def api_set_llm_config():
                      (json.dumps(config, ensure_ascii=False),))
     conn.commit()
     conn.close()
-    return jsonify({"ok": True, "models": config})
+    return jsonify({"ok": True, "config": config})
 
 
 @app.route("/api/eval/<int:message_id>", methods=["GET"])
@@ -1258,7 +1284,7 @@ def eval_score():
         chat_history=chat_history,
         user_facts=user_facts,
         persona_data=persona_data,
-        model=llm_config["eval_realtime"]
+        **llm_config["eval_realtime"]
     )
 
     return jsonify(result)
@@ -1365,7 +1391,7 @@ def simulate_chat():
 
                 llm_config = get_llm_config()
                 facts = pipi_api.extract_facts_from_message(
-                    user_message, persona_data, existing_facts, chat_history=chat_history_for_extract, model=llm_config["fact_extract"])
+                    user_message, persona_data, existing_facts, chat_history=chat_history_for_extract, **llm_config["fact_extract"])
 
                 if facts:
                     for f in facts:
@@ -1393,7 +1419,7 @@ def simulate_chat():
                     chat_history=context.get("chat_history", []),
                     user_facts=context.get("user_facts", []),
                     persona_data=context.get("persona_data"),
-                    model=llm_config2["eval_realtime"]
+                    **llm_config2["eval_realtime"]
                 )
 
                 if eval_result and eval_result.get("total_score") is not None:
@@ -1481,7 +1507,7 @@ def _batch_evaluate_worker(pending_msgs):
                 chat_history=context['chat_history'],
                 user_facts=context['user_facts'],
                 persona_data=context['persona_data'],
-                model=llm_config["eval_batch"]
+                **llm_config["eval_batch"]
             )
 
             # 保存结果
@@ -1911,7 +1937,7 @@ def _evaluate_and_save(msg_id, persona_id, user_message, reply_text, persona_dat
             chat_history=context['chat_history'],
             user_facts=context['user_facts'],
             persona_data=context['persona_data'],
-            model=llm_config["eval_realtime"]
+            **llm_config["eval_realtime"]
         )
 
         _save_evaluation(msg_id, persona_id, eval_result, context)
@@ -1940,7 +1966,7 @@ def _extract_and_save(persona_id, message, persona_data):
 
         llm_config = get_llm_config()
         facts = pipi_api.extract_facts_from_message(
-            message, persona_data, existing_facts, chat_history=chat_history, model=llm_config["fact_extract"])
+            message, persona_data, existing_facts, chat_history=chat_history, **llm_config["fact_extract"])
 
         print(f"[FACT EXTRACT] {persona_id} history_len: {len(chat_history)} msg: {repr(message[:50])} => {json.dumps(facts, ensure_ascii=False)}")
 
@@ -3272,7 +3298,7 @@ def _growth_worker(task_id):
 
                     llm_config = get_llm_config()
                     facts = pipi_api.extract_facts_from_message(
-                        user_message, persona_data, existing_facts, chat_history=chat_history, model=llm_config["fact_extract"])
+                        user_message, persona_data, existing_facts, chat_history=chat_history, **llm_config["fact_extract"])
 
                     if facts:
                         for f in facts:
@@ -3814,7 +3840,7 @@ def _evaluate_task_worker(task_id):
                 }
 
                 llm_config = get_llm_config()
-                eval_result = pipi_api.evaluate_test_case(case_data, model=llm_config["eval_case"])
+                eval_result = pipi_api.evaluate_test_case(case_data, **llm_config["eval_case"])
                 score = eval_result.get("score")
                 reason = eval_result.get("deduction_reason", "")
                 status = eval_result.get("status", "evaluated")
@@ -3919,7 +3945,7 @@ def reevaluate_single_result(result_id):
         }
 
         llm_config = get_llm_config()
-        eval_result = pipi_api.evaluate_test_case(case_data, model=llm_config["eval_case"])
+        eval_result = pipi_api.evaluate_test_case(case_data, **llm_config["eval_case"])
         score = eval_result.get("score")
         reason = eval_result.get("deduction_reason", "")
         status = eval_result.get("status", "evaluated")
@@ -4034,7 +4060,7 @@ def _reevaluate_failed_worker(task_id, result_ids):
             }
 
             llm_config = get_llm_config()
-            eval_result = pipi_api.evaluate_test_case(case_data, model=llm_config["eval_case"])
+            eval_result = pipi_api.evaluate_test_case(case_data, **llm_config["eval_case"])
             score = eval_result.get("score")
             reason = eval_result.get("deduction_reason", "")
             status = eval_result.get("status", "evaluated")
@@ -5364,7 +5390,7 @@ def _generate_cases_worker(task_id):
                     persona=persona,
                     user_facts=user_facts,
                     count=need_count,
-                    model=llm_config["case_gen"]
+                    **llm_config["case_gen"]
                 )
 
                 # 保存到数据库（带重试）
@@ -5424,7 +5450,7 @@ def _generate_cases_worker(task_id):
                                     # 重新生成整批
                                     retry_cases = pipi_api.generate_test_cases(
                                         dimension=dim, toy_persona=toy_persona, persona=persona,
-                                        user_facts=user_facts, count=need_count, model=llm_config["case_gen"]
+                                        user_facts=user_facts, count=need_count, **llm_config["case_gen"]
                                     )
                                     if not retry_cases:
                                         continue
@@ -5457,7 +5483,7 @@ def _generate_cases_worker(task_id):
                                     persona=persona,
                                     user_facts=user_facts,
                                     count=task["count_per_dimension"],
-                                    model=llm_config["case_gen"]
+                                    **llm_config["case_gen"]
                                 )
                                 if not cases:
                                     print(f"[CASE GEN] {task_id} {dim_code} retry LLM returned empty", flush=True)
@@ -5832,7 +5858,7 @@ def _evaluate_cases_worker(task_id):
             try:
                 # 调用评测函数
                 llm_config = get_llm_config()
-                result = pipi_api.evaluate_test_case(case, model=llm_config["eval_case"])
+                result = pipi_api.evaluate_test_case(case, **llm_config["eval_case"])
 
                 score = result.get("score")
                 reason = result.get("deduction_reason", "")
@@ -7161,7 +7187,7 @@ def async_review_cases(case_ids, auto_regenerate=True):
 
                 # LLM 复核
                 llm_config = get_llm_config()
-                result = pipi_api.review_case_quality(case, dim_info, user_facts, model=llm_config["case_review"])
+                result = pipi_api.review_case_quality(case, dim_info, user_facts, **llm_config["case_review"])
 
                 # 更新数据库
                 execute_query(conn,
@@ -7308,7 +7334,7 @@ def _regenerate_dimension_with_feedback(persona_id, dimension, toy_persona, pers
                 user_facts=user_facts,
                 count=count,
                 issues_feedback=issues_feedback,
-                model=llm_config["case_regenerate"]
+                **llm_config["case_regenerate"]
             )
 
             if not new_cases:

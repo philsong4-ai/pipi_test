@@ -231,7 +231,7 @@ def call_pipi_stream(
 
 # ─── LLM 调用（事实提取/用例生成/评测）─────────────
 
-def call_extract_llm(messages: List[Dict], timeout: int = 20, model: str = None) -> Dict:
+def call_extract_llm(messages: List[Dict], timeout: int = 20, model: str = None, temperature: float = None, max_tokens: int = None) -> Dict:
     """
     调用 LLM（LiteLLM 代理）。
     OpenAI 兼容格式，非流式响应。
@@ -252,8 +252,8 @@ def call_extract_llm(messages: List[Dict], timeout: int = 20, model: str = None)
     payload = {
         "model": use_model,
         "messages": messages,
-        "temperature": 0.3,
-        "max_tokens": 8192,
+        "temperature": temperature if temperature is not None else 0.3,
+        "max_tokens": max_tokens if max_tokens is not None else 8192,
     }
 
     start_time = time.time()
@@ -297,17 +297,14 @@ def call_extract_llm(messages: List[Dict], timeout: int = 20, model: str = None)
         }
 
 
-def call_llm_simple(system_prompt: str, user_prompt: str, timeout: int = 30, model: str = None) -> str:
-    """
-    简单的 LLM 调用，返回纯文本内容。
-    用于用例生成、评测等场景。
-    model 参数可指定模型，默认使用 EXTRACT_LLM_MODEL (qwen3.6-plus)。
-    """
+def call_llm_simple(system_prompt: str, user_prompt: str, timeout: int = 30, model: str = None, temperature: float = None, max_tokens: int = None) -> str:
+    """简单的 LLM 调用，返回纯文本内容。支持指定 model / temperature / max_tokens."""
+
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt}
     ]
-    result = call_extract_llm(messages, timeout=timeout, model=model)
+    result = call_extract_llm(messages, timeout=timeout, model=model, temperature=temperature, max_tokens=max_tokens)
     if result.get("error"):
         raise Exception(f"LLM调用失败: {result['error']}")
     return result.get("full_text", "")
@@ -321,7 +318,10 @@ def generate_test_cases(
     persona: Dict,
     user_facts: List[Dict],
     count: int = 5,
-    model: str = None
+    model: str = None,
+    temperature: float = None,
+    max_tokens: int = None,
+    timeout: int = 180
 ) -> List[Dict]:
     """
     调用 LLM 生成测试用例。
@@ -497,7 +497,7 @@ input_text 示例（错误，不要这样写）：
 输出纯JSON数组，无其它文字。"""
 
     try:
-        result_text = call_llm_simple(system_prompt, user_prompt, timeout=180, model=model)
+        result_text = call_llm_simple(system_prompt, user_prompt, timeout=timeout, model=model, temperature=temperature, max_tokens=max_tokens)
 
         json_match = re.search(r'\[[\s\S]*\]', result_text)
         if json_match:
@@ -519,7 +519,10 @@ def generate_test_cases_with_feedback(
     user_facts: List[Dict],
     count: int = 5,
     issues_feedback: List[str] = None,
-    model: str = None
+    model: str = None,
+    temperature: float = None,
+    max_tokens: int = None,
+    timeout: int = 180
 ) -> List[Dict]:
     """
     带反馈重新生成测试用例（用于审核不合格后的自动重生成）
@@ -694,7 +697,7 @@ input_text 示例（错误，不要这样写）：
 
     try:
         print(f"[CASE GEN WITH FEEDBACK] {dim_code} generating {count} cases model={model}", flush=True)
-        result_text = call_llm_simple(system_prompt, user_prompt, timeout=180, model=model)
+        result_text = call_llm_simple(system_prompt, user_prompt, timeout=timeout, model=model, temperature=temperature, max_tokens=max_tokens)
 
         json_match = re.search(r'\[[\s\S]*\]', result_text)
         if json_match:
@@ -752,7 +755,7 @@ VALID_CATEGORIES = {
     "milestone": {"birthday", "anniversary", "achievement", "graduation", "job_change"},
 }
 
-def extract_facts_from_message(user_message: str, persona_data: Optional[Dict], existing_facts: Optional[List[Dict]] = None, chat_history: Optional[List[Dict]] = None, model: str = None) -> List[Dict]:
+def extract_facts_from_message(user_message: str, persona_data: Optional[Dict], existing_facts: Optional[List[Dict]] = None, chat_history: Optional[List[Dict]] = None, model: str = None, temperature: float = None, max_tokens: int = None, timeout: int = 60) -> List[Dict]:
     """
     调用 LLM 从用户消息中提取事实。
 
@@ -863,7 +866,7 @@ def extract_facts_from_message(user_message: str, persona_data: Optional[Dict], 
 
     try:
         # 使用专用 LLM 提取事实
-        result = call_extract_llm(messages, timeout=60, model=model)
+        result = call_extract_llm(messages, timeout=timeout, model=model, temperature=temperature, max_tokens=max_tokens)
         text = result.get("full_text", "").strip()
         error = result.get("error")
         used_model = model or EXTRACT_LLM_MODEL
@@ -918,7 +921,10 @@ def evaluate_reply(
     dimension_name: str,
     standard: str,
     persona_data: Optional[Dict] = None,
-    model: str = None
+    model: str = None,
+    temperature: float = None,
+    max_tokens: int = None,
+    timeout: int = 30
 ) -> Dict:
     """
     评测单条AI回复。
@@ -955,7 +961,7 @@ def evaluate_reply(
     ) % (user_input, ai_reply)
 
     try:
-        result_text = call_llm_simple(system, user, timeout=30, model=model)
+        result_text = call_llm_simple(system, user, timeout=timeout, model=model, temperature=temperature, max_tokens=max_tokens)
         if not result_text:
             return {"score": 0, "reason": "评测LLM无响应"}
 
@@ -972,7 +978,7 @@ def evaluate_reply(
         return {"score": 0, "reason": f"评测异常: {str(e)}"}
 
 
-def evaluate_test_case(case_data: Dict, model: str = None) -> Dict:
+def evaluate_test_case(case_data: Dict, model: str = None, temperature: float = None, max_tokens: int = None, timeout: int = 60) -> Dict:
     """
     评测单个测试用例，使用用例自带的评分参考。
 
@@ -1034,7 +1040,7 @@ def evaluate_test_case(case_data: Dict, model: str = None) -> Dict:
 请评分:"""
 
     try:
-        result_text = call_llm_simple(system_prompt, user_prompt, timeout=60, model=model)
+        result_text = call_llm_simple(system_prompt, user_prompt, timeout=timeout, model=model, temperature=temperature, max_tokens=max_tokens)
         if not result_text:
             return {"score": 0, "deduction_reason": "评测LLM无响应", "status": "failed"}
 
@@ -1083,7 +1089,10 @@ def evaluate_chat_reply(
     chat_history: List[str] = None,
     user_facts: List[Dict] = None,
     persona_data: Dict = None,
-    model: str = None
+    model: str = None,
+    temperature: float = None,
+    max_tokens: int = None,
+    timeout: int = 90
 ) -> Dict:
     """
     对话窗口实时评测AI回复。
@@ -1176,7 +1185,7 @@ def evaluate_chat_reply(
     )
     
     try:
-        result_text = call_llm_simple(system_prompt, user_prompt, timeout=90, model=model)
+        result_text = call_llm_simple(system_prompt, user_prompt, timeout=timeout, model=model, temperature=temperature, max_tokens=max_tokens)
         print(f"[CHAT EVAL] model={model or EXTRACT_LLM_MODEL} result_text len: {len(result_text) if result_text else 0}", flush=True)
         if not result_text:
             return _default_eval_result("LLM无响应")
@@ -1227,7 +1236,7 @@ def _default_eval_result(error_msg: str) -> Dict:
 
 # ─── 用例质量 LLM 复核 ───────────────────────────────────
 
-def review_case_quality(case_data: Dict, dimension_info: Dict = None, user_facts: List[Dict] = None, model: str = None) -> Dict:
+def review_case_quality(case_data: Dict, dimension_info: Dict = None, user_facts: List[Dict] = None, model: str = None, temperature: float = None, max_tokens: int = None, timeout: int = 120) -> Dict:
     """
     LLM 复核用例质量（异步调用）
     返回: {"score": 1-10, "issues": ["问题1"], "status": "passed/warning/failed"}
@@ -1299,7 +1308,7 @@ score_10_desc: {case_data.get('score_10_desc', '')}
 请审核并返回JSON:"""
 
     try:
-        result_text = call_llm_simple(system_prompt, user_prompt, timeout=120, model=model or REVIEW_LLM_MODEL)
+        result_text = call_llm_simple(system_prompt, user_prompt, timeout=timeout, model=model or REVIEW_LLM_MODEL, temperature=temperature, max_tokens=max_tokens)
         if not result_text:
             return {"score": 5, "issues": ["LLM复核无响应"], "status": "warning"}
         
