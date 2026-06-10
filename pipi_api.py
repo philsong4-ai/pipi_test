@@ -394,7 +394,7 @@ def generate_test_cases(
 
     facts_info = ""
     if user_facts:
-        lines = [f"- {f['category']}.{f['fact_key']}: {f['fact_value']}" for f in user_facts[:20]]
+        lines = [f"- {f['category']}.{f['fact_key']}[{f.get('entity_name','')}]: {f['fact_value']}" if f.get('entity_name') else f"- {f['category']}.{f['fact_key']}: {f['fact_value']}" for f in user_facts[:20]]
         facts_info = "\n".join(lines)
 
     # 解析测试点列表
@@ -582,7 +582,7 @@ def generate_test_cases_with_feedback(
     # 用户事实
     facts_info = ""
     if user_facts:
-        lines = [f"- {f['category']}.{f['fact_key']}: {f['fact_value']}" for f in user_facts[:20]]
+        lines = [f"- {f['category']}.{f['fact_key']}[{f.get('entity_name','')}]: {f['fact_value']}" if f.get('entity_name') else f"- {f['category']}.{f['fact_key']}: {f['fact_value']}" for f in user_facts[:20]]
         facts_info = "\n".join(lines)
 
     # 测试点
@@ -746,7 +746,7 @@ VALID_CATEGORIES = {
     "emotion": {"state", "trigger", "duration"},
     "preference": {"drink", "food", "color", "brand", "style", "activity", "music", "movie"},
     "attitude": {"pet_feeling", "work", "life", "relationship", "money"},
-    "relationship": {"friend", "family", "colleague", "partner", "feeling"},  # 支持 relationship.friend_小明
+    "relationship": {"friend", "friend_general", "family", "colleague", "partner", "feeling"},  # friend=具体朋友(需entity_name), friend_general=通用交友状况
     "health": {"condition", "symptom", "treatment", "habit", "sleep", "exercise"},
     "work": {"occupation", "company", "department", "schedule", "colleague", "stress", "income", "commute"},
     "living": {"housing", "roommate", "location", "commute", "city", "hometown"},
@@ -812,7 +812,7 @@ def extract_facts_from_message(user_message: str, persona_data: Optional[Dict], 
         "  emotion(情绪): state, trigger, duration\n"
         "  preference(偏好): drink, food, color, brand, style, activity, music, movie\n"
         "  attitude(态度): pet_feeling, work, life, relationship, money\n"
-        "  relationship(人际): friend, family, colleague, partner, feeling\n"
+        "  relationship(人际): friend(具体朋友,需entity_name), friend_general(通用交友状况), family, colleague, partner, feeling\n"
         "  health(健康): condition, symptom, treatment, habit, sleep, exercise\n"
         "  work(工作): occupation, company, department, schedule, colleague, stress, income, commute\n"
         "  living(生活): housing, roommate, location, commute, city, hometown\n"
@@ -826,6 +826,8 @@ def extract_facts_from_message(user_message: str, persona_data: Optional[Dict], 
         "  - {category:\"pet\", fact_key:\"age\", entity_name:\"豆豆\", fact_value:\"3岁\"}\n"
         "  例: 用户有朋友小明\n"
         "  - {category:\"relationship\", fact_key:\"friend\", entity_name:\"小明\", fact_value:\"大学同学，认识5年\"}\n"
+        "  例: 用户描述自己交友状况\n"
+        "  - {category:\"relationship\", fact_key:\"friend_general\", entity_name:\"\", fact_value:\"朋友不多但都交心\"}\n"
         "\n"
         "【多实例字段 — entity_name 强制必填】以下字段会出现多个不同值，每条必须用 entity_name 区分:\n"
         "  - food.habit → entity_name=具体习惯简称 (如\"咖啡\"、\"晚餐\"、\"宵夜\")\n"
@@ -838,6 +840,9 @@ def extract_facts_from_message(user_message: str, persona_data: Optional[Dict], 
         "  - hobby.* → entity_name=爱好具体项目 (如 hobby.sport[\"篮球\"])\n"
         "  - emotion.state → entity_name=情绪标签 (如\"开心\"、\"焦虑\"，同一用户多次提取不同情绪)\n"
         "  - work.schedule → entity_name=日程内容简称 (如\"加班\"、\"日常\"、\"出差\"、\"开会\")\n"
+        "  - relationship.friend → entity_name=朋友名字 (如\"老张\"、\"小美\")，通用交友状况用 friend_general\n"
+        "  - relationship.family → entity_name=家庭成员称呼 (如\"妈妈\"、\"姐姐\")，通用家庭状况用 family.dynamic\n"
+        "  - relationship.colleague → entity_name=同事名字/称呼 (如\"王经理\")\n"
         "\n"
         "  例: 用户说\"我每天早上喝咖啡，晚上不吃碳水\"\n"
         "  - {category:\"food\", fact_key:\"habit\", entity_name:\"咖啡\", fact_value:\"每天早上喝一杯\"}\n"
