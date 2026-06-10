@@ -766,9 +766,11 @@ def extract_facts_from_message(user_message: str, persona_data: Optional[Dict], 
     if existing_facts:
         lines = []
         for ef in existing_facts:
-            lines.append("id=%s: %s.%s = %s" % (ef["id"], ef["category"], ef["fact_key"], ef["fact_value"]))
+            entity = ef.get("entity_name", "")
+            en_tag = "[%s]" % entity if entity else ""
+            lines.append("id=%s: %s.%s%s = %s" % (ef["id"], ef["category"], ef["fact_key"], en_tag, ef["fact_value"]))
         if lines:
-            existing_text = "\n已有事实:\n" + "\n".join(lines)
+            existing_text = "\n已有事实（entity_name 区分不同实例，如 food.habit[咖啡] 和 food.habit[晚餐] 是两条独立事实）:\n" + "\n".join(lines)
 
     persona_text = ""
     if persona_data:
@@ -818,12 +820,27 @@ def extract_facts_from_message(user_message: str, persona_data: Optional[Dict], 
         "  hobby(爱好): entertainment, sport, creative, social, game, reading, travel\n"
         "  milestone(里程碑): birthday, anniversary, achievement, graduation, job_change\n"
         "\n"
-        "【多实体处理】当涉及具体的人/宠物/事件时，用 entity_name 字段标识:\n"
+        "【多实体处理】当涉及具体的人/宠物/事件/习惯时，用 entity_name 字段标识:\n"
         "  例: 用户有宠物豆豆\n"
         "  - {category:\"pet\", fact_key:\"breed\", entity_name:\"豆豆\", fact_value:\"英短猫\"}\n"
         "  - {category:\"pet\", fact_key:\"age\", entity_name:\"豆豆\", fact_value:\"3岁\"}\n"
         "  例: 用户有朋友小明\n"
         "  - {category:\"relationship\", fact_key:\"friend\", entity_name:\"小明\", fact_value:\"大学同学，认识5年\"}\n"
+        "\n"
+        "【多实例字段 — entity_name 强制必填】以下字段会出现多个不同值，每条必须用 entity_name 区分:\n"
+        "  - food.habit → entity_name=具体习惯简称 (如\"咖啡\"、\"晚餐\"、\"宵夜\")\n"
+        "  - food.favorite → entity_name=食物名称 (如\"火锅\"、\"寿司\")\n"
+        "  - food.dislike → entity_name=不喜欢的食物\n"
+        "  - health.habit → entity_name=习惯简称 (如\"跑步\"、\"瑜伽\"、\"熬夜\")\n"
+        "  - health.condition → entity_name=病症/状态简称 (如\"过敏\"、\"胃炎\")\n"
+        "  - health.symptom → entity_name=症状简称\n"
+        "  - preference.* → entity_name=偏好具体项目 (如 preference.activity[\"游泳\"])\n"
+        "  - hobby.* → entity_name=爱好具体项目 (如 hobby.sport[\"篮球\"])\n"
+        "  - emotion.state → entity_name=情绪标签 (如\"开心\"、\"焦虑\"，同一用户多次提取不同情绪)\n"
+        "\n"
+        "  例: 用户说\"我每天早上喝咖啡，晚上不吃碳水\"\n"
+        "  - {category:\"food\", fact_key:\"habit\", entity_name:\"咖啡\", fact_value:\"每天早上喝一杯\"}\n"
+        "  - {category:\"food\", fact_key:\"habit\", entity_name:\"晚餐\", fact_value:\"晚上不吃碳水\"}\n"
         "  例: 无特定实体时 entity_name 留空\n"
         "  - {category:\"work\", fact_key:\"occupation\", entity_name:\"\", fact_value:\"程序员\"}\n"
         "\n"
@@ -1118,7 +1135,11 @@ def evaluate_chat_reply(
     # 构建用户事实文本
     facts_text = "暂无已知信息"
     if user_facts:
-        facts_list = [f"{f.get('category','')}.{f.get('fact_key','')}: {f.get('fact_value','')}" for f in user_facts[:15]]
+        facts_list = []
+        for f in user_facts[:15]:
+            entity = f.get("entity_name", "")
+            en_tag = "[%s]" % entity if entity else ""
+            facts_list.append(f"{f.get('category','')}.{f.get('fact_key','')}{en_tag}: {f.get('fact_value','')}")
         facts_text = "\n".join(facts_list) if facts_list else "暂无已知信息"
     
     # 构建对话历史文本
@@ -1248,7 +1269,11 @@ def review_case_quality(case_data: Dict, dimension_info: Dict = None, user_facts
     # 格式化用户事实
     facts_text = ""
     if user_facts:
-        facts_lines = [f"- {f.get('category', '')}.{f.get('fact_key', '')}: {f.get('fact_value', '')}" for f in user_facts]
+        facts_lines = []
+        for f in user_facts:
+            entity = f.get("entity_name", "")
+            en_tag = "[%s]" % entity if entity else ""
+            facts_lines.append(f"- {f.get('category', '')}.{f.get('fact_key', '')}{en_tag}: {f.get('fact_value', '')}")
         facts_text = "\n".join(facts_lines)
 
     system_prompt = f"""你是测试用例质量审核专家。请审核以下AI陪伴对话测试用例的质量。

@@ -609,7 +609,7 @@ def test_chat():
             try:
                 conn = get_db_connection()
                 fact_rows = execute_query(conn,
-                    "SELECT id, category, fact_key, fact_value FROM user_facts WHERE persona_id=? AND is_active=1",
+                    "SELECT id, category, fact_key, entity_name, fact_value FROM user_facts WHERE persona_id=? AND is_active=1",
                     (persona_id,), fetch_all=True)
                 existing_facts = [row_to_dict(r) for r in fact_rows]
                 history_rows = execute_query(conn,
@@ -862,7 +862,7 @@ def get_memory_stats(persona_id):
     conn = get_db_connection()
 
     facts = execute_query(conn, """
-        SELECT uf.id, uf.category, uf.fact_key, uf.fact_value, uf.memory_level,
+        SELECT uf.id, uf.category, uf.fact_key, uf.entity_name, uf.fact_value, uf.memory_level,
                uf.weight, uf.created_at, uf.is_active,
                COALESCE(mdr.forget_threshold, 0.1) as forget_threshold
         FROM user_facts uf
@@ -1376,7 +1376,7 @@ def simulate_chat():
             try:
                 conn = get_db_connection()
                 fact_rows = execute_query(conn,
-                    "SELECT id, category, fact_key, fact_value FROM user_facts WHERE persona_id=? AND is_active=1",
+                    "SELECT id, category, fact_key, entity_name, fact_value FROM user_facts WHERE persona_id=? AND is_active=1",
                     (persona_id,), fetch_all=True)
                 existing_facts = [row_to_dict(r) for r in fact_rows]
                 history_rows = execute_query(conn,
@@ -1548,7 +1548,7 @@ def _build_eval_context(conn, persona_id, current_msg_id):
 
     # 获取用户事实（过滤已遗忘的）
     facts = execute_query(conn, """
-        SELECT uf.id, uf.category, uf.fact_key, uf.fact_value, uf.memory_level, uf.weight, uf.created_at, uf.fact_type,
+        SELECT uf.id, uf.category, uf.fact_key, uf.entity_name, uf.fact_value, uf.memory_level, uf.weight, uf.created_at, uf.fact_type,
                COALESCE(mdr.forget_threshold, 0.1) as forget_threshold
         FROM user_facts uf
         LEFT JOIN memory_decay_rules mdr ON uf.memory_level = mdr.level
@@ -1567,6 +1567,7 @@ def _build_eval_context(conn, persona_id, current_msg_id):
                 "id": f["id"],
                 "category": f["category"],
                 "fact_key": f["fact_key"],
+                "entity_name": f.get("entity_name", "") or "",
                 "fact_value": f["fact_value"],
                 "memory_level": f["memory_level"],
                 "weight": current_weight
@@ -1636,7 +1637,7 @@ def _get_active_facts(persona_id, include_forgotten=False):
 
     # 查询所有 is_active=1 的事实，包含计算权重所需字段
     rows = execute_query(conn, """
-        SELECT uf.id, uf.category, uf.fact_key, uf.fact_value,
+        SELECT uf.id, uf.category, uf.fact_key, uf.entity_name, uf.fact_value,
                uf.memory_level, uf.weight, uf.created_at, uf.fact_type,
                COALESCE(mdr.forget_threshold, 0.1) as forget_threshold
         FROM user_facts uf
@@ -1951,7 +1952,7 @@ def _extract_and_save(persona_id, message, persona_data):
     try:
         conn = get_db_connection()
         fact_rows = execute_query(conn,
-            "SELECT id, category, fact_key, fact_value FROM user_facts WHERE persona_id=? AND is_active=1",
+            "SELECT id, category, fact_key, entity_name, fact_value FROM user_facts WHERE persona_id=? AND is_active=1",
             (persona_id,), fetch_all=True)
         existing_facts = [row_to_dict(r) for r in fact_rows]
         history_rows = execute_query(conn,
@@ -3283,7 +3284,7 @@ def _growth_worker(task_id):
                 try:
                     conn2 = get_db_connection()
                     fact_rows = execute_query(conn2,
-                        "SELECT id, category, fact_key, fact_value FROM user_facts WHERE persona_id=? AND is_active=1",
+                        "SELECT id, category, fact_key, entity_name, fact_value FROM user_facts WHERE persona_id=? AND is_active=1",
                         (persona_id,), fetch_all=True)
                     existing_facts = [row_to_dict(r) for r in fact_rows]
                     history_rows = execute_query(conn2,
