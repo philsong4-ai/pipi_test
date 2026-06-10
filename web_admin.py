@@ -962,9 +962,9 @@ def get_llm_config(key=None):
     row = execute_query(conn, "SELECT value FROM eval_config WHERE `key`='llm_models'", fetch_one=True)
     conn.close()
     config = {}
-    if row and row[0]:
+    if row and row["value"]:
         try:
-            raw = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+            raw = json.loads(row["value"]) if isinstance(row["value"], str) else row["value"]
         except:
             raw = {}
         # 兼容旧格式：值可能是字符串，补齐为完整 dict
