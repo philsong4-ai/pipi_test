@@ -172,16 +172,21 @@ def _ensure_tables():
             except Exception as e:
                 print(f"[STARTUP] Could not add persona columns: {e}", flush=True)
 
-        # 服务启动时恢复卡住的任务：running 状态重置为 pending，以便重新执行
-        cursor = execute_query(conn, """
-            UPDATE growth_tasks
-            SET status = 'pending', error_message = 'auto-recovered after service restart'
-            WHERE status = 'running'
-        """)
-        conn.commit()
-        recovered = cursor.rowcount if hasattr(cursor, 'rowcount') else 0
-        if recovered > 0:
-            print(f"[STARTUP] Recovered {recovered} stalled tasks", flush=True)
+        # 服务启动时恢复被中断的任务：重新拉起 worker
+        conn2 = get_db_connection()
+        stalled = execute_query(conn2,
+            "SELECT id FROM growth_tasks WHERE status = 'running'",
+            fetch_all=True)
+        if stalled:
+            stalled_ids = [row["id"] for row in stalled]
+            execute_query(conn2,
+                "UPDATE growth_tasks SET status = 'pending', error_message = 'auto-recovered after service restart' WHERE status = 'running'")
+            conn2.commit()
+            print(f"[STARTUP] Recovered {len(stalled_ids)} stalled growth tasks: {stalled_ids}", flush=True)
+            for tid in stalled_ids:
+                threading.Thread(target=_growth_worker, args=(tid,), daemon=True).start()
+            print(f"[STARTUP] Respawned {len(stalled_ids)} growth workers", flush=True)
+        conn2.close()
 
         conn.close()
         _initialized = True
@@ -3216,14 +3221,23 @@ def _growth_worker(task_id):
     try:
         conn = get_db_connection()
 
-        # 更新任务状态为运行中
-        execute_query(conn,
-            "UPDATE growth_tasks SET status=?, started_at=NOW() WHERE id=?",
-            ("running", task_id))
+        # 原子性抢占任务（避免多 worker 同时恢复导致重复执行）
+        if USE_MYSQL:
+            execute_query(conn,
+                "UPDATE growth_tasks SET status=%s, started_at=NOW() WHERE id=%s AND status='pending'",
+                ("running", task_id))
+        else:
+            execute_query(conn,
+                "UPDATE growth_tasks SET status=?, started_at=NOW() WHERE id=? AND status='pending'",
+                ("running", task_id))
         conn.commit()
 
-        # 获取任务信息
-        task = execute_query(conn, "SELECT * FROM growth_tasks WHERE id=?", (task_id,), fetch_one=True)
+        # 检查是否成功抢占（防止多 worker 重复执行）
+        task = execute_query(conn, "SELECT * FROM growth_tasks WHERE id=? AND status='running'", (task_id,), fetch_one=True)
+        if not task:
+            conn.close()
+            print(f"[GROWTH] task {task_id} already claimed by another worker, exiting")
+            return
         task = row_to_dict(task)
         persona_id = task["persona_id"]
         speed = task.get("speed", "normal")
