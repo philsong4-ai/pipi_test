@@ -837,7 +837,7 @@ def extract_facts_from_message(user_message: str, persona_data: Optional[Dict], 
         "  - preference.* → entity_name=偏好具体项目 (如 preference.activity[\"游泳\"])\n"
         "  - hobby.* → entity_name=爱好具体项目 (如 hobby.sport[\"篮球\"])\n"
         "  - emotion.state → entity_name=情绪标签 (如\"开心\"、\"焦虑\"，同一用户多次提取不同情绪)\n"
-        "  - work.schedule → entity_name=日程类型/日期 (如\"日常\"、\"今天\"、\"本周\"，不同日程信息独立)\n"
+        "  - work.schedule → entity_name=日程内容简称 (如\"加班\"、\"日常\"、\"出差\"、\"开会\")\n"
         "\n"
         "  例: 用户说\"我每天早上喝咖啡，晚上不吃碳水\"\n"
         "  - {category:\"food\", fact_key:\"habit\", entity_name:\"咖啡\", fact_value:\"每天早上喝一杯\"}\n"
