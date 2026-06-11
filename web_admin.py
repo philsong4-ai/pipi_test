@@ -6685,7 +6685,7 @@ def _run_scheduled_task(task):
 
             if case_ids:
                 # 创建 test_task 记录
-                task_code = f"TASK-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6]}"
+                task_code = f"{config.get('persona_id', 'unknown')}-{datetime.now().strftime('%Y%m%d%H%M')}"
                 task_name = config.get("name") or f"预约执行 {datetime.now().strftime('%m-%d %H:%M')}"
                 # 从 personas 表获取真正的 device_id
                 persona_row = execute_query(conn, "SELECT device_id FROM personas WHERE id = %s" if USE_MYSQL else "SELECT device_id FROM personas WHERE id = ?", (config.get("persona_id"),), fetch_one=True)
