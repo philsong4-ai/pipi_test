@@ -4007,31 +4007,42 @@ def reevaluate_failed_results(task_id):
         return jsonify({"error": "task not found"}), 404
 
     # 找出需要重新评测的结果
-    failed_results = execute_query(conn, """
-        SELECT r.id, c.case_id
-        FROM test_results r
-        JOIN test_cases c ON r.case_id = c.id
-        WHERE r.task_id = %s AND r.actual_output IS NOT NULL
-          AND (r.score IS NULL OR r.status IN ('pending', 'executed'))
-    """, (task_id,), fetch_all=True)
-    failed_results = [row_to_dict(r) for r in failed_results]
+    reval_all = request.args.get("all", "0") == "1"
+    if reval_all:
+        # 全部重评
+        results = execute_query(conn, """
+            SELECT r.id, c.case_id
+            FROM test_results r
+            JOIN test_cases c ON r.case_id = c.id
+            WHERE r.task_id = %s AND r.actual_output IS NOT NULL
+        """, (task_id,), fetch_all=True)
+    else:
+        # 仅重评失败/未评的
+        results = execute_query(conn, """
+            SELECT r.id, c.case_id
+            FROM test_results r
+            JOIN test_cases c ON r.case_id = c.id
+            WHERE r.task_id = %s AND r.actual_output IS NOT NULL
+              AND (r.score IS NULL OR r.status IN ('pending', 'executed', 'failed'))
+        """, (task_id,), fetch_all=True)
+    results = [row_to_dict(r) for r in results]
 
-    if not failed_results:
+    if not results:
         conn.close()
-        return jsonify({"message": "no failed results to reevaluate", "count": 0})
+        return jsonify({"message": "no results to reevaluate", "count": 0})
 
     conn.close()
 
     # 启动后台线程重新评测
-    t = threading.Thread(target=_reevaluate_failed_worker, args=(task_id, [r["id"] for r in failed_results]))
+    t = threading.Thread(target=_reevaluate_failed_worker, args=(task_id, [r["id"] for r in results]))
     t.daemon = True
     t.start()
 
     return jsonify({
         "status": "reevaluating",
         "task_id": task_id,
-        "count": len(failed_results),
-        "case_ids": [r["case_id"] for r in failed_results]
+        "count": len(results),
+        "case_ids": [r["case_id"] for r in results]
     })
 
 
