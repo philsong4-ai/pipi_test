@@ -1052,6 +1052,7 @@ def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, model: st
     """
     case_id = case_data.get("case_id", "")
     dimension_code = case_data.get("dimension_code", "")
+    test_point = case_data.get("test_point", "")
     input_text = case_data.get("input_text", "")
     actual_output = case_data.get("actual_output", "")
     expected_output = case_data.get("expected_output", "")
@@ -1062,9 +1063,13 @@ def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, model: st
 
     facts_text = _format_facts_grouped(user_facts) if user_facts else ""
 
+    dim_header = f"【评测维度】{dimension_code}"
+    if test_point:
+        dim_header += f" - {test_point}"
+
     system_prompt = f"""你是AI陪伴对话质量评测专家。请根据以下评分标准对AI回复进行评测。
 
-【评测维度】{dimension_code}
+{dim_header}
 
 【评分参考】
 - 2分（差）: {score_2_desc}
