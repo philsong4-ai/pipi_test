@@ -3814,10 +3814,24 @@ def evaluate_test_task(task_id):
     return jsonify({"status": "evaluating", "task_id": task_id})
 
 
+def _load_user_facts(conn, persona_id):
+    """加载用户活跃事实（按分类分组），用于评测上下文"""
+    facts = execute_query(conn,
+        "SELECT id, category, fact_key, entity_name, fact_value FROM user_facts "
+        "WHERE persona_id = %s AND is_active = 1",
+        (persona_id,), fetch_all=True)
+    return [row_to_dict(f) for f in facts] if facts else []
+
+
 def _evaluate_task_worker(task_id):
     """后台评测测试任务"""
     try:
         conn = get_db_connection()
+
+        # 获取 persona_id
+        trow = execute_query(conn, "SELECT persona_id FROM test_tasks WHERE id = %s", (task_id,), fetch_one=True)
+        persona_id = trow["persona_id"] if trow else None
+        user_facts = _load_user_facts(conn, persona_id) if persona_id else []
 
         # 获取已执行的结果
         results = execute_query(conn,
@@ -3855,7 +3869,7 @@ def _evaluate_task_worker(task_id):
                 }
 
                 llm_config = get_llm_config()
-                eval_result = pipi_api.evaluate_test_case(case_data, **llm_config["eval_case"])
+                eval_result = pipi_api.evaluate_test_case(case_data, **llm_config["eval_case"], user_facts=user_facts)
                 score = eval_result.get("score")
                 reason = eval_result.get("deduction_reason", "")
                 status = eval_result.get("status", "evaluated")
@@ -3921,9 +3935,10 @@ def reevaluate_single_result(result_id):
     """
     conn = get_db_connection()
 
-    # 获取结果及关联的用例信息
+    # 获取结果及关联的用例信息（含 persona_id）
     row = execute_query(conn, """
-        SELECT r.id, r.actual_output, r.status, c.case_id, c.dimension_code, c.title, c.test_point, c.input_text,
+        SELECT r.id, r.actual_output, r.status, r.task_id,
+               c.case_id, c.dimension_code, c.title, c.test_point, c.input_text,
                c.expected_output, c.failure_flags, c.score_2_desc, c.score_6_desc, c.score_10_desc
         FROM test_results r
         JOIN test_cases c ON r.case_id = c.id
@@ -3939,6 +3954,11 @@ def reevaluate_single_result(result_id):
     if not result.get("actual_output"):
         conn.close()
         return jsonify({"error": "no actual_output, need execute first"}), 400
+
+    # 获取用户事实
+    trow2 = execute_query(conn, "SELECT persona_id FROM test_tasks WHERE id = %s", (result["task_id"],), fetch_one=True)
+    persona_id = trow2["persona_id"] if trow2 else None
+    user_facts = _load_user_facts(conn, persona_id) if persona_id else []
 
     case_code = result["case_id"]
     print(f"[RE-EVAL] Re-evaluating {case_code} (result_id={result_id})...", flush=True)
@@ -3960,7 +3980,7 @@ def reevaluate_single_result(result_id):
         }
 
         llm_config = get_llm_config()
-        eval_result = pipi_api.evaluate_test_case(case_data, **llm_config["eval_case"])
+        eval_result = pipi_api.evaluate_test_case(case_data, **llm_config["eval_case"], user_facts=user_facts)
         score = eval_result.get("score")
         reason = eval_result.get("deduction_reason", "")
         status = eval_result.get("status", "evaluated")
@@ -4051,6 +4071,12 @@ def _reevaluate_failed_worker(task_id, result_ids):
     print(f"[RE-EVAL BATCH] Starting re-evaluation for task {task_id}, {len(result_ids)} results", flush=True)
 
     conn = get_db_connection()
+
+    # 加载用户事实（所有结果共用）
+    trow3 = execute_query(conn, "SELECT persona_id FROM test_tasks WHERE id = %s", (task_id,), fetch_one=True)
+    persona_id = trow3["persona_id"] if trow3 else None
+    user_facts = _load_user_facts(conn, persona_id) if persona_id else []
+
     success_count = 0
     fail_count = 0
 
@@ -4086,7 +4112,7 @@ def _reevaluate_failed_worker(task_id, result_ids):
             }
 
             llm_config = get_llm_config()
-            eval_result = pipi_api.evaluate_test_case(case_data, **llm_config["eval_case"])
+            eval_result = pipi_api.evaluate_test_case(case_data, **llm_config["eval_case"], user_facts=user_facts)
             score = eval_result.get("score")
             reason = eval_result.get("deduction_reason", "")
             status = eval_result.get("status", "evaluated")
@@ -5882,9 +5908,12 @@ def _evaluate_cases_worker(task_id):
                 continue
 
             try:
+                # 加载用户事实
+                user_facts = _load_user_facts(conn, case.get("persona_id")) if case.get("persona_id") else []
+
                 # 调用评测函数
                 llm_config = get_llm_config()
-                result = pipi_api.evaluate_test_case(case, **llm_config["eval_case"])
+                result = pipi_api.evaluate_test_case(case, **llm_config["eval_case"], user_facts=user_facts)
 
                 score = result.get("score")
                 reason = result.get("deduction_reason", "")

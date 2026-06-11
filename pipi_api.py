@@ -1026,7 +1026,7 @@ def evaluate_reply(
         return {"score": 0, "reason": f"评测异常: {str(e)}"}
 
 
-def evaluate_test_case(case_data: Dict, model: str = None, temperature: float = None, max_tokens: int = None, timeout: int = 60) -> Dict:
+def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, model: str = None, temperature: float = None, max_tokens: int = None, timeout: int = 60) -> Dict:
     """
     评测单个测试用例，使用用例自带的评分参考。
 
@@ -1041,6 +1041,8 @@ def evaluate_test_case(case_data: Dict, model: str = None, temperature: float = 
         "score_6_desc": 6分表现描述,
         "score_10_desc": 10分表现描述,
     }
+
+    user_facts: 用户已知事实列表，用于判断AI引用记忆 vs 幻觉
 
     返回: {
         "score": 1-10分,
@@ -1058,6 +1060,8 @@ def evaluate_test_case(case_data: Dict, model: str = None, temperature: float = 
     score_6_desc = case_data.get("score_6_desc", "")
     score_10_desc = case_data.get("score_10_desc", "")
 
+    facts_text = _format_facts_grouped(user_facts) if user_facts else ""
+
     system_prompt = f"""你是AI陪伴对话质量评测专家。请根据以下评分标准对AI回复进行评测。
 
 【评测维度】{dimension_code}
@@ -1073,10 +1077,14 @@ def evaluate_test_case(case_data: Dict, model: str = None, temperature: float = 
 【期望回复参考】
 {expected_output}
 
+【已知用户信息】
+{facts_text or "暂无"}
+
 【评分规则】
 - 10分制，直接打整数分（1-10）
 - 对比实际回复与期望回复，结合评分参考打分
 - 如果触及扣分点，必须扣分并说明原因
+- 重要：AI引用已知用户信息中的事实不算幻觉，只有捏造新事实才算幻觉
 - 返回JSON格式: {{"score": 分数, "deduction_reason": "扣分原因或评价"}}"""
 
     user_prompt = f"""【用户输入】
