@@ -7304,7 +7304,7 @@ def _auto_regenerate_failed_cases(reviewed_cases):
         # 获取玩偶人设（从 toy_personas 表）
         toy_persona = None
         toy_row = execute_query(conn,
-            "SELECT * FROM toy_personas LIMIT 1",  # 当前只有一个玩偶
+            "SELECT * FROM toy_persona LIMIT 1",  # 当前只有一个玩偶
             fetch_one=True)
         if toy_row:
             toy_persona = row_to_dict(toy_row)
