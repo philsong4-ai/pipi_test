@@ -392,10 +392,7 @@ def generate_test_cases(
                 parts.append(f"{k}: {v}")
         persona_info = "\n".join(parts)
 
-    facts_info = ""
-    if user_facts:
-        lines = [f"- {f['category']}.{f['fact_key']}[{f.get('entity_name','')}]: {f['fact_value']}" if f.get('entity_name') else f"- {f['category']}.{f['fact_key']}: {f['fact_value']}" for f in user_facts[:20]]
-        facts_info = "\n".join(lines)
+    facts_info = _format_facts_grouped(user_facts)
 
     # 解析测试点列表
     test_point_list = [p.strip() for p in test_points.split("、") if p.strip()] if test_points else []
@@ -580,10 +577,7 @@ def generate_test_cases_with_feedback(
         persona_info = "\n".join(parts)
 
     # 用户事实
-    facts_info = ""
-    if user_facts:
-        lines = [f"- {f['category']}.{f['fact_key']}[{f.get('entity_name','')}]: {f['fact_value']}" if f.get('entity_name') else f"- {f['category']}.{f['fact_key']}: {f['fact_value']}" for f in user_facts[:20]]
-        facts_info = "\n".join(lines)
+    facts_info = _format_facts_grouped(user_facts)
 
     # 测试点
     test_point_list = [p.strip() for p in test_points.split("、") if p.strip()] if test_points else []
@@ -754,6 +748,37 @@ VALID_CATEGORIES = {
     "hobby": {"entertainment", "sport", "creative", "social", "game", "reading", "travel"},
     "milestone": {"birthday", "anniversary", "achievement", "graduation", "job_change"},
 }
+
+CATEGORY_NAMES = {
+    "pet": "宠物", "food": "饮食", "event": "事件", "emotion": "情绪",
+    "preference": "偏好", "attitude": "态度", "relationship": "人际",
+    "health": "健康", "work": "工作", "living": "生活", "family": "家庭",
+    "hobby": "爱好", "milestone": "里程碑",
+}
+
+def _format_facts_grouped(user_facts: List[Dict]) -> str:
+    """按 category 分组格式化用户事实，优化 LLM 阅读效率"""
+    if not user_facts:
+        return "暂无已知信息"
+
+    grouped = {}
+    for f in user_facts:
+        cat = f.get("category", "other")
+        if cat not in grouped:
+            grouped[cat] = []
+        grouped[cat].append(f)
+
+    lines = []
+    for cat in sorted(grouped.keys()):
+        cat_name = CATEGORY_NAMES.get(cat, cat)
+        lines.append(f"\n【{cat_name}】{cat}")
+        for f in grouped[cat]:
+            entity = f.get("entity_name", "")
+            en_tag = f"[{entity}]" if entity else ""
+            lines.append(f"  - {cat}.{f.get('fact_key','')}{en_tag}: {f.get('fact_value','')}")
+
+    return "\n".join(lines).lstrip("\n")
+
 
 def extract_facts_from_message(user_message: str, persona_data: Optional[Dict], existing_facts: Optional[List[Dict]] = None, chat_history: Optional[List[Dict]] = None, model: str = None, temperature: float = None, max_tokens: int = None, timeout: int = 60) -> List[Dict]:
     """
@@ -1138,15 +1163,8 @@ def evaluate_chat_reply(
         "total_score": 平均分
     }
     """
-    # 构建用户事实文本
-    facts_text = "暂无已知信息"
-    if user_facts:
-        facts_list = []
-        for f in user_facts[:15]:
-            entity = f.get("entity_name", "")
-            en_tag = "[%s]" % entity if entity else ""
-            facts_list.append(f"{f.get('category','')}.{f.get('fact_key','')}{en_tag}: {f.get('fact_value','')}")
-        facts_text = "\n".join(facts_list) if facts_list else "暂无已知信息"
+    # 构建用户事实文本（按分类分组）
+    facts_text = _format_facts_grouped(user_facts)
     
     # 构建对话历史文本
     history_text = "无历史对话"
@@ -1272,15 +1290,8 @@ def review_case_quality(case_data: Dict, dimension_info: Dict = None, user_facts
     dim_name = dimension_info.get("dimension_name", dim_code) if dimension_info else dim_code
     test_points = dimension_info.get("test_points", "") if dimension_info else ""
 
-    # 格式化用户事实
-    facts_text = ""
-    if user_facts:
-        facts_lines = []
-        for f in user_facts:
-            entity = f.get("entity_name", "")
-            en_tag = "[%s]" % entity if entity else ""
-            facts_lines.append(f"- {f.get('category', '')}.{f.get('fact_key', '')}{en_tag}: {f.get('fact_value', '')}")
-        facts_text = "\n".join(facts_lines)
+    # 格式化用户事实（按分类分组）
+    facts_text = _format_facts_grouped(user_facts)
 
     system_prompt = f"""你是测试用例质量审核专家。请审核以下AI陪伴对话测试用例的质量。
 
