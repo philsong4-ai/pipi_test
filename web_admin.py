@@ -5546,9 +5546,40 @@ def _generate_cases_worker(task_id):
                     if not db_success:
                         task["errors"].append({"dimension": dim_code, "error": f"数据库插入失败（重试{db_max_retries}次）"})
                 else:
-                    # LLM 返回空或解析失败，记录错误
-                    print(f"[CASE GEN] {task_id} {dim_code} LLM returned empty/invalid", flush=True)
-                    task["errors"].append({"dimension": dim_code, "error": "LLM 返回空或解析失败"})
+                    # LLM 返回空或解析失败，worker 层面再重试1次
+                    print(f"[CASE GEN] {task_id} {dim_code} LLM returned empty (after 3 attempts), worker retry...", flush=True)
+                    time.sleep(5)
+                    cases = pipi_api.generate_test_cases(
+                        dimension=dim, toy_persona=toy_persona, persona=persona,
+                        user_facts=user_facts, count=need_count, **llm_config["case_gen"]
+                    )
+                    if cases:
+                        print(f"[CASE GEN] {task_id} {dim_code} worker retry succeeded, got {len(cases)} cases", flush=True)
+                        conn3 = get_db_connection()
+                        created_this_round = 0
+                        for case in cases:
+                            base_case_id = case.get("case_id", f"{dim_code}-01")
+                            final_case_id = _get_unique_case_id(conn3, base_case_id)
+                            case["case_id"] = final_case_id
+                            new_case_id = _save_test_case(
+                                conn3, case, persona_id=task["persona_id"],
+                                device_id=task["persona_id"], dimension_code=dim_code
+                            )
+                            if "created_case_ids" not in task:
+                                task["created_case_ids"] = []
+                            if "_current_dim_case_ids" not in task:
+                                task["_current_dim_case_ids"] = []
+                            if new_case_id:
+                                task["created_case_ids"].append(new_case_id)
+                                task["_current_dim_case_ids"].append(new_case_id)
+                                created_this_round += 1
+                        conn3.commit()
+                        conn3.close()
+                        task["cases_created"] += created_this_round
+                        print(f"[CASE GEN] {task_id} {dim_code} worker retry done, created {created_this_round}/{len(cases)} cases", flush=True)
+                    else:
+                        print(f"[CASE GEN] {task_id} {dim_code} worker retry also empty, giving up", flush=True)
+                        task["errors"].append({"dimension": dim_code, "error": "LLM 返回空或解析失败（已重试）"})
 
             except Exception as e:
                 print(f"[CASE GEN ERROR] {task_id} {dim_code}: {e}", flush=True)
