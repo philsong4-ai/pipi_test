@@ -7107,15 +7107,16 @@ def validate_case_rules(case_data, dimension_code):
     返回: {"passed": bool, "issues": ["问题1", "问题2"]}
     """
     issues = []
+    import re
+
     input_text = case_data.get("input_text", "")
-    
+
     # 1. input_text 不应包含 AI 回复
     if "秋秋：" in input_text or "秋秋:" in input_text:
         issues.append("input_text 包含 AI 回复（应只有用户输入）")
-    
+
     # 2. 多轮格式检查
     if "【R" in input_text:
-        import re
         rounds = re.findall(r'【R(\d+)】', input_text)
         if rounds:
             nums = [int(r) for r in rounds]
