@@ -7332,8 +7332,8 @@ def async_review_cases(case_ids, auto_regenerate=True):
 
 def _auto_regenerate_failed_cases(reviewed_cases):
     """自动重生成不合格用例（最多重试2次）"""
-    # 筛选不合格用例（failed 状态）
-    failed_cases = [c for c in reviewed_cases if c["status"] == "failed"]
+    # 筛选不合格用例（failed 或 warning 状态）
+    failed_cases = [c for c in reviewed_cases if c["status"] in ("failed", "warning")]
     if not failed_cases:
         return
 
@@ -7367,7 +7367,7 @@ def _auto_regenerate_failed_cases(reviewed_cases):
             if c["issues"]:
                 issues_feedback.append(f"- {c['case_id']}: {'; '.join(c['issues'][:2])}")
 
-        print(f"[AUTO REGEN] {retry_key} retry {current_retry + 1}/2, regenerating {len(cases)} failed cases", flush=True)
+        print(f"[AUTO REGEN] {retry_key} retry {current_retry + 1}/2, regenerating {len(cases)} failed/warning cases", flush=True)
 
         # 删除不合格用例
         conn = get_db_connection()
