@@ -23,6 +23,7 @@ def _tsprint(*args, **kwargs):
 builtins.print = _tsprint
 
 from flask import Flask, request, jsonify, send_file
+from flask_compress import Compress
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
 import pipi_api
@@ -102,6 +103,7 @@ def row_to_dict(row):
         return dict(row) if row else None
 
 app = Flask(__name__)
+Compress(app)
 
 
 def get_api_url_by_code(api_code: str) -> str:
