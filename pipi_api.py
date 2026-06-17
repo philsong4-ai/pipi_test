@@ -312,6 +312,101 @@ def call_llm_simple(system_prompt: str, user_prompt: str, timeout: int = 30, mod
 
 # ─── 测试用例生成 ────────────────────────────────
 
+def _format_toy_persona(toy_persona: Dict) -> str:
+    """将玩偶人设格式化为 LLM prompt 用的结构化文本。
+
+    从 DB 中 toy_persona 的 JSON 字段提取行为描述、边界规则等，
+    让 LLM 在生成 expected_output/failure_flags 时准确把握角色风格。
+    """
+    if not toy_persona:
+        return ""
+
+    parts = []
+
+    # 基础信息
+    if toy_persona.get("name"):
+        parts.append(f"名字: {toy_persona['name']}")
+    if toy_persona.get("identity"):
+        parts.append(f"身份定位: {toy_persona['identity']}")
+    if toy_persona.get("core_belief"):
+        parts.append(f"核心信念: {toy_persona['core_belief']}")
+
+    # 性格特质（含 core/min/max 行为描述）
+    traits = toy_persona.get("personality_traits")
+    if traits:
+        if isinstance(traits, str):
+            traits = json.loads(traits)
+        if traits:
+            lines = ["性格特质:"]
+            for t in traits:
+                name = t.get("name", "")
+                core = t.get("core", "")
+                vmin = t.get("min", "")
+                vmax = t.get("max", "")
+                lines.append(f"  · {name}: {core}")
+                if vmin:
+                    lines.append(f"    太冷(不可): {vmin}")
+                if vmax:
+                    lines.append(f"    太过(不可): {vmax}")
+            parts.append("\n".join(lines))
+
+    # 行为原则（含说明和示例）
+    principles = toy_persona.get("behavior_principles")
+    if principles:
+        if isinstance(principles, str):
+            principles = json.loads(principles)
+        if principles:
+            lines = ["行为原则:"]
+            for p in principles:
+                name = p.get("name", "")
+                desc = p.get("desc", "")
+                example = p.get("example", "")
+                lines.append(f"  · {name}: {desc}" + (f" (如: {example})" if example else ""))
+            parts.append("\n".join(lines))
+
+    # 情感边界（硬规则，不可突破）
+    boundaries = toy_persona.get("emotion_boundaries")
+    if boundaries:
+        if isinstance(boundaries, str):
+            boundaries = json.loads(boundaries)
+        if boundaries:
+            lines = ["情感边界（硬规则，不可突破）:"]
+            for b in boundaries:
+                rule = b.get("rule", "")
+                if rule:
+                    lines.append(f"  · {rule}")
+            parts.append("\n".join(lines))
+
+    # 说话风格
+    style = toy_persona.get("speaking_style")
+    if style:
+        if isinstance(style, str):
+            style = json.loads(style)
+        if style:
+            lines = ["说话风格:"]
+            if style.get("tone"):
+                lines.append(f"  语气: {style['tone']}")
+            if style.get("length"):
+                lines.append(f"  长度: {style['length']}")
+            particles = style.get("particles")
+            if particles:
+                lines.append(f"  语气词: {', '.join(particles)}")
+            redup = style.get("reduplication")
+            if redup:
+                lines.append(f"  叠词: {', '.join(redup)}")
+            parts.append("\n".join(lines))
+
+    # 禁用表达
+    forbidden = toy_persona.get("forbidden_expressions")
+    if forbidden:
+        if isinstance(forbidden, str):
+            forbidden = json.loads(forbidden)
+        if forbidden:
+            parts.append(f"禁用表达: {', '.join(forbidden)}")
+
+    return "\n".join(parts)
+
+
 def generate_test_cases(
     dimension: Dict,
     toy_persona: Dict,
@@ -340,48 +435,7 @@ def generate_test_cases(
     dim_name = dimension.get("dimension_name", "")
     test_points = dimension.get("test_points", "")
 
-    toy_info = ""
-    if toy_persona:
-        parts = []
-        if toy_persona.get("name"):
-            parts.append(f"名字: {toy_persona['name']}")
-        if toy_persona.get("identity"):
-            parts.append(f"身份定位: {toy_persona['identity']}")
-        if toy_persona.get("core_belief"):
-            parts.append(f"核心信念: {toy_persona['core_belief']}")
-
-        # 性格特质
-        traits = toy_persona.get("personality_traits")
-        if traits:
-            if isinstance(traits, str):
-                traits = json.loads(traits)
-            trait_names = [t.get("name", "") for t in traits if t.get("name")]
-            if trait_names:
-                parts.append(f"性格特质: {', '.join(trait_names)}")
-
-        # 说话风格
-        style = toy_persona.get("speaking_style")
-        if style:
-            if isinstance(style, str):
-                style = json.loads(style)
-            style_desc = []
-            if style.get("tone"):
-                style_desc.append(style["tone"])
-            if style.get("length"):
-                style_desc.append(style["length"])
-            if style_desc:
-                parts.append(f"说话风格: {'; '.join(style_desc)}")
-
-        # 行为原则
-        principles = toy_persona.get("behavior_principles")
-        if principles:
-            if isinstance(principles, str):
-                principles = json.loads(principles)
-            principle_names = [p.get("name", "") for p in principles if p.get("name")]
-            if principle_names:
-                parts.append(f"行为原则: {', '.join(principle_names)}")
-
-        toy_info = "\n".join(parts)
+    toy_info = _format_toy_persona(toy_persona)
 
     persona_info = ""
     if persona:
@@ -542,42 +596,8 @@ def generate_test_cases_with_feedback(
     dim_name = dimension.get("dimension_name", "")
     test_points = dimension.get("test_points", "")
 
-    # 玩偶信息（与原函数相同）
-    toy_info = ""
-    if toy_persona:
-        parts = []
-        if toy_persona.get("name"):
-            parts.append(f"名字: {toy_persona['name']}")
-        if toy_persona.get("identity"):
-            parts.append(f"身份定位: {toy_persona['identity']}")
-        if toy_persona.get("core_belief"):
-            parts.append(f"核心信念: {toy_persona['core_belief']}")
-        traits = toy_persona.get("personality_traits")
-        if traits:
-            if isinstance(traits, str):
-                traits = json.loads(traits)
-            trait_names = [t.get("name", "") for t in traits if t.get("name")]
-            if trait_names:
-                parts.append(f"性格特质: {', '.join(trait_names)}")
-        style = toy_persona.get("speaking_style")
-        if style:
-            if isinstance(style, str):
-                style = json.loads(style)
-            style_desc = []
-            if style.get("tone"):
-                style_desc.append(style["tone"])
-            if style.get("length"):
-                style_desc.append(style["length"])
-            if style_desc:
-                parts.append(f"说话风格: {'; '.join(style_desc)}")
-        principles = toy_persona.get("behavior_principles")
-        if principles:
-            if isinstance(principles, str):
-                principles = json.loads(principles)
-            principle_names = [p.get("name", "") for p in principles if p.get("name")]
-            if principle_names:
-                parts.append(f"行为原则: {', '.join(principle_names)}")
-        toy_info = "\n".join(parts)
+    # 玩偶信息（使用公共格式化函数）
+    toy_info = _format_toy_persona(toy_persona)
 
     # 用户角色信息（与原函数相同）
     persona_info = ""
@@ -1163,6 +1183,7 @@ def evaluate_chat_reply(
     chat_history: List[str] = None,
     user_facts: List[Dict] = None,
     persona_data: Dict = None,
+    toy_persona: Dict = None,
     model: str = None,
     temperature: float = None,
     max_tokens: int = None,
@@ -1170,13 +1191,15 @@ def evaluate_chat_reply(
 ) -> Dict:
     """
     对话窗口实时评测AI回复。
-    
+
+    toy_persona: 玩偶人设信息（从 toy_persona 表读取），传入时使用完整结构化描述，未传入时使用默认简短描述
+
     评测维度：
     - 记忆运用：是否恰当使用已知的用户信息
     - 情感回应：对用户情绪的识别和回应质量
     - 回复质量：回复的自然度、连贯性、有用性
     - 人设一致：是否符合秋秋的人设
-    
+
     返回: {
         "memory_score": 1-10,
         "memory_reason": "扣分原因",
@@ -1207,10 +1230,16 @@ def evaluate_chat_reply(
                 parts.append(f"{k}: {v}")
         persona_text = "\n".join(parts) if parts else ""
     
+    # 构建人设文本（传入完整 toy_persona 时使用结构化描述，否则用默认简述）
+    if toy_persona:
+        toy_info = _format_toy_persona(toy_persona)
+    else:
+        toy_info = "秋秋是一个温暖、俏皮的AI陪伴玩偶，说话简短亲切，会用嘛呀呢等语气词，像朋友聊天。"
+
     system_prompt = """你是AI陪伴对话质量评测专家。请对AI回复进行多维度评测。
 
 【AI人设】
-秋秋是一个温暖、俏皮的AI陪伴玩偶，说话简短亲切，会用嘛呀呢等语气词，像朋友聊天。
+{toy_info}
 
 【已知用户信息】
 {facts}
@@ -1222,12 +1251,13 @@ def evaluate_chat_reply(
 1. 记忆运用(memory)：是否恰当引用已知用户信息，不生硬堆砌，不捏造事实
 2. 情感回应(emotion)：是否识别用户情绪并给予恰当回应，共情而不说教
 3. 回复质量(quality)：回复是否自然流畅、长度适中、有实际内容
-4. 人设一致(persona)：是否符合秋秋温暖俏皮的人设，语气词自然
+4. 人设一致(persona)：是否符合秋秋的人设（语气词自然、不做客服不做说教、知道分寸）
 
 【评分规则】
 - 每项10分制，整数打分
 - 扣分必须写明原因，满分可不写原因
 - 返回严格JSON格式""".format(
+        toy_info=toy_info,
         facts=facts_text,
         persona=persona_text or "未提供"
     )

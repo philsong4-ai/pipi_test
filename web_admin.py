@@ -1282,6 +1282,12 @@ def eval_score():
     if not user_message:
         return jsonify({"error": "user_message is required"}), 400
 
+    # 获取玩偶人设
+    conn = get_db_connection()
+    toy_row = execute_query(conn, "SELECT * FROM toy_persona LIMIT 1", fetch_one=True)
+    conn.close()
+    toy_persona = row_to_dict(toy_row) if toy_row else None
+
     llm_config = get_llm_config()
     result = pipi_api.evaluate_chat_reply(
         reply_text=reply_text,
@@ -1289,6 +1295,7 @@ def eval_score():
         chat_history=chat_history,
         user_facts=user_facts,
         persona_data=persona_data,
+        toy_persona=toy_persona,
         **llm_config["eval_realtime"]
     )
 
@@ -1424,6 +1431,7 @@ def simulate_chat():
                     chat_history=context.get("chat_history", []),
                     user_facts=context.get("user_facts", []),
                     persona_data=context.get("persona_data"),
+                    toy_persona=context.get("toy_persona"),
                     **llm_config2["eval_realtime"]
                 )
 
@@ -1512,6 +1520,7 @@ def _batch_evaluate_worker(pending_msgs):
                 chat_history=context['chat_history'],
                 user_facts=context['user_facts'],
                 persona_data=context['persona_data'],
+                toy_persona=context.get('toy_persona'),
                 **llm_config["eval_batch"]
             )
 
@@ -1582,10 +1591,15 @@ def _build_eval_context(conn, persona_id, current_msg_id):
     persona = execute_query(conn, "SELECT * FROM personas WHERE id = ?", (persona_id,), fetch_one=True)
     persona_data = row_to_dict(persona) if persona else None
 
+    # 获取玩偶人设
+    toy_row = execute_query(conn, "SELECT * FROM toy_persona LIMIT 1", fetch_one=True)
+    toy_persona = row_to_dict(toy_row) if toy_row else None
+
     return {
         "chat_history": chat_history,
         "user_facts": user_facts,
-        "persona_data": persona_data
+        "persona_data": persona_data,
+        "toy_persona": toy_persona
     }
 
 
@@ -1943,6 +1957,7 @@ def _evaluate_and_save(msg_id, persona_id, user_message, reply_text, persona_dat
             chat_history=context['chat_history'],
             user_facts=context['user_facts'],
             persona_data=context['persona_data'],
+            toy_persona=context.get('toy_persona'),
             **llm_config["eval_realtime"]
         )
 
