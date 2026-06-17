@@ -13,7 +13,7 @@ from datetime import datetime
 MYSQL_CONFIG = {
     "host": os.environ.get("MYSQL_HOST", "localhost"),
     "user": os.environ.get("MYSQL_USER", "pipi"),
-    "password": os.environ.get("MYSQL_PASSWORD", "<DB_PASSWORD>"),
+    "password": os.environ.get("MYSQL_PASSWORD", ""),
     "database": os.environ.get("MYSQL_DATABASE", "pipi_test"),
     "charset": "utf8mb4",
 }

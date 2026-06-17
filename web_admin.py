@@ -556,7 +556,7 @@ def test_chat():
         }
 
     示例:
-        curl -X POST http://<SERVER_IP>:8080/api/test/chat \\
+        curl -X POST http://localhost:8080/api/test/chat \\
             -H "Content-Type: application/json" \\
             -d '{"persona_id": "xiaojuzi", "message": "我今天好开心"}'
     """

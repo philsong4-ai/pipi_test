@@ -90,7 +90,7 @@ ssh root@<SERVER_IP> "tail -100 /opt/pipi-test/web/web_admin.log"
 ssh root@<SERVER_IP> "cd /opt/pipi-test/web && git log --oneline -5"
 
 # 查询数据库
-ssh root@<SERVER_IP> "mysql -u pipi -p<DB_PASSWORD> pipi_test -e 'SELECT ...'"
+ssh root@<SERVER_IP> "mysql -u pipi -p pipi_test -e 'SELECT ...'"
 ```
 
 ## Database
