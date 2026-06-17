@@ -1381,7 +1381,8 @@ def review_case_quality(case_data: Dict, dimension_info: Dict = None, user_facts
 【评分规则】
 - 10分：完全符合，可直接使用
 - 7-9分：基本合格，有小瑕疵
-- 4-6分：需修改，有明显问题（expected_output 是行为列表直接 ≤6 分）
+- 4-6分：需修改，有明显问题（expected_output 是行为列表直接 ≤6 分；expected_output 中引用的事实不在【用户已知事实】列表中（虚构事实）直接 ≤4 分）
+- 1-3分：不合格，需重新生成
 - 1-3分：不合格，需重新生成
 
 返回JSON: {{"score": 分数, "issues": ["问题1", "问题2"], "suggestion": "修改建议"}}"""
