@@ -5,7 +5,9 @@ sleep 1
 
 # 加载环境变量（服务器上的 .env 文件需手动创建）
 if [ -f .env ]; then
+    set -a
     source .env
+    set +a
 fi
 
 nohup gunicorn -w 8 -b 0.0.0.0:8080 --timeout 300 web_admin:app >> web_admin.log 2>&1 &
