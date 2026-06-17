@@ -1337,7 +1337,7 @@ def _default_eval_result(error_msg: str) -> Dict:
 
 # ─── 用例质量 LLM 复核 ───────────────────────────────────
 
-def review_case_quality(case_data: Dict, dimension_info: Dict = None, user_facts: List[Dict] = None, model: str = None, temperature: float = None, max_tokens: int = None, timeout: int = 120) -> Dict:
+def review_case_quality(case_data: Dict, dimension_info: Dict = None, user_facts: List[Dict] = None, toy_persona: Dict = None, model: str = None, temperature: float = None, max_tokens: int = None, timeout: int = 120) -> Dict:
     """
     LLM 复核用例质量（异步调用）
     返回: {"score": 1-10, "issues": ["问题1"], "status": "passed/warning/failed"}
@@ -1349,23 +1349,27 @@ def review_case_quality(case_data: Dict, dimension_info: Dict = None, user_facts
     # 格式化用户事实（按分类分组）
     facts_text = _format_facts_grouped(user_facts)
 
+    # 格式化玩偶人设
+    persona_text = _format_toy_persona(toy_persona) if toy_persona else ""
+
     system_prompt = f"""你是测试用例质量审核专家。请审核以下AI陪伴对话测试用例的质量。
 
 【维度】{dim_code} - {dim_name}
 【测试点要求】{test_points}
-
+{f"【AI玩偶人设】{chr(10)}{persona_text}" if persona_text else ""}
 【用户已知事实】
 {facts_text or "暂无"}
 
 【审核标准】
 1. input_text 是否覆盖了测试点？
 2. **expected_output 必须是具体回复文本（模拟AI理想回复），而不是行为原则列表**。如果 expected_output 是"1. xxx；2. xxx"的行为描述格式，直接扣 3 分
-3. evaluation_points 是否覆盖了 expected_output 中体现的关键行为？是否具体可判断？
-4. 评分描述（2分/6分/10分）是否合理递进？
-5. failure_flags 是否与场景相关、可检测？
-6. input_text 中的事实是否与用户已知事实一致（无冲突）？
-7. expected_output 中提及的用户信息是否能在已知事实中找到对应？
-8. 用例整体是否可执行、可评测？
+3. expected_output 是否符合AI玩偶的人设风格（语气自然口语化、不说教不套话、有分寸感）？
+4. evaluation_points 是否覆盖了 expected_output 中体现的关键行为？是否具体可判断？
+5. 评分描述（2分/6分/10分）是否合理递进？
+6. failure_flags 是否与场景相关、可检测？是否涵盖了玩偶的行为边界（不越界、不做承诺、不暧昧等）？
+7. input_text 中的事实是否与用户已知事实一致（无冲突）？
+8. expected_output 中提及的用户信息是否能在已知事实中找到对应？
+9. 用例整体是否可执行、可评测？
 
 【事实校验反误判规则 - 重要】
 在判断"expected_output 引用了不存在的事实"之前，必须逐条对照【用户已知事实】列表。以下情况不算虚构：

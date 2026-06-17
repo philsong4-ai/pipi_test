@@ -7287,9 +7287,13 @@ def async_review_cases(case_ids, auto_regenerate=True):
                     if fact_rows:
                         user_facts = [row_to_dict(r) for r in fact_rows]
 
+                # 获取玩偶人设
+                toy_row = execute_query(conn, "SELECT * FROM toy_persona LIMIT 1", fetch_one=True)
+                toy_persona = row_to_dict(toy_row) if toy_row else None
+
                 # LLM 复核
                 llm_config = get_llm_config()
-                result = pipi_api.review_case_quality(case, dim_info, user_facts, **llm_config["case_review"])
+                result = pipi_api.review_case_quality(case, dim_info, user_facts, toy_persona, **llm_config["case_review"])
 
                 # 更新数据库
                 execute_query(conn,
