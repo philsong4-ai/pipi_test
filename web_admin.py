@@ -4170,7 +4170,7 @@ def get_test_results():
     ph = "%s" if USE_MYSQL else "?"
 
     sql = """SELECT r.id, r.task_id, r.case_id, r.actual_output, r.executed_at, r.score, r.deduction_reason, r.status,
-                    c.case_id as case_code, c.dimension_code, c.title, c.test_point, c.input_text, c.expected_output
+                    c.case_id as case_code, c.dimension_code, c.title, c.test_point, c.input_text, c.expected_output, c.evaluation_points
              FROM test_results r
              JOIN test_cases c ON r.case_id = c.id
              WHERE r.task_id = """ + ph
@@ -4210,6 +4210,7 @@ def get_test_results():
             "title": row["title"],
             "input_text": row["input_text"],
             "expected_output": row["expected_output"],
+            "evaluation_points": row.get("evaluation_points", ""),
             "actual_output": row["actual_output"],
             "executed_at": str(row["executed_at"]) if row.get("executed_at") else None,
             "score": row["score"],
@@ -4227,7 +4228,7 @@ def get_single_test_result(result_id):
     ph = "%s" if USE_MYSQL else "?"
     row = execute_query(conn, f"""
         SELECT r.id, r.task_id, r.case_id, r.actual_output, r.executed_at, r.score, r.deduction_reason, r.status,
-               c.case_id as case_code, c.dimension_code, c.title, c.test_point, c.input_text, c.expected_output
+               c.case_id as case_code, c.dimension_code, c.title, c.test_point, c.input_text, c.expected_output, c.evaluation_points
         FROM test_results r
         JOIN test_cases c ON r.case_id = c.id
         WHERE r.id = {ph}
@@ -4247,6 +4248,7 @@ def get_single_test_result(result_id):
         "title": row["title"],
         "input_text": row["input_text"],
         "expected_output": row["expected_output"],
+        "evaluation_points": row.get("evaluation_points", ""),
         "actual_output": row["actual_output"],
         "executed_at": str(row["executed_at"]) if row.get("executed_at") else None,
         "score": row["score"],

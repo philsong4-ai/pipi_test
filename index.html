@@ -4276,6 +4276,9 @@ function _showEvalDetailV2(c, result) {
   content += '<p><b>标题:</b> ' + (c.title || '-') + '</p>';
   content += '<p><b>用户输入:</b></p><pre style="background:#f5f5f7;padding:8px;border-radius:4px;white-space:pre-wrap;font-size:12px;max-height:100px;overflow-y:auto">' + (c.input_text || '') + '</pre>';
   content += '<p><b>期望输出:</b></p><pre style="background:#f5f5f7;padding:8px;border-radius:4px;white-space:pre-wrap;font-size:12px;max-height:80px;overflow-y:auto">' + (c.expected_output || '') + '</pre>';
+  if (c.evaluation_points) {
+    content += '<p><b>评估点:</b></p><pre style="background:#fff8e1;padding:8px;border-radius:4px;white-space:pre-wrap;font-size:12px;max-height:60px;overflow-y:auto;color:#5d4037">' + c.evaluation_points + '</pre>';
+  }
   if (result && result.actual_output) {
     content += '<p><b>实际输出:</b></p><pre style="background:#e8f5e8;padding:8px;border-radius:4px;white-space:pre-wrap;font-size:12px;max-height:100px;overflow-y:auto">' + result.actual_output + '</pre>';
   }
