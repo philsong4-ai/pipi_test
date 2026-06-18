@@ -951,9 +951,9 @@ DEFAULT_LLM_CONFIG = {
     "case_gen":       {"model": "qwen3.6-plus",  "temperature": 0.3, "max_tokens": 8192, "timeout": 180},
     "case_regenerate": {"model": "qwen3.6-plus",  "temperature": 0.3, "max_tokens": 8192, "timeout": 180},
     "fact_extract":   {"model": "qwen3.6-plus",  "temperature": 0.3, "max_tokens": 8192, "timeout": 60},
-    "eval_batch":     {"model": "qwen3.6-plus",  "temperature": 0.3, "max_tokens": 8192, "timeout": 90},
-    "eval_case":      {"model": "qwen3.6-plus",  "temperature": 0.3, "max_tokens": 8192, "timeout": 60},
-    "eval_realtime":  {"model": "qwen3.6-plus",  "temperature": 0.3, "max_tokens": 8192, "timeout": 90},
+    "eval_batch":     {"model": "qwen3.6-plus",  "temperature": 0, "max_tokens": 8192, "timeout": 90},
+    "eval_case":      {"model": "qwen3.6-plus",  "temperature": 0, "max_tokens": 8192, "timeout": 60},
+    "eval_realtime":  {"model": "qwen3.6-plus",  "temperature": 0, "max_tokens": 8192, "timeout": 90},
     "case_review":    {"model": "deepseek-v4-pro","temperature": 0.3, "max_tokens": 8192, "timeout": 120},
 }
 
@@ -3853,7 +3853,7 @@ def _evaluate_task_worker(task_id):
         # 获取已执行的结果
         results = execute_query(conn,
             """SELECT r.id, r.actual_output, c.case_id, c.dimension_code, c.title, c.test_point, c.input_text,
-                      c.expected_output, c.failure_flags, c.score_2_desc, c.score_6_desc, c.score_10_desc
+                      c.expected_output, c.evaluation_points, c.failure_flags, c.score_2_desc, c.score_6_desc, c.score_10_desc
                FROM test_results r
                JOIN test_cases c ON r.case_id = c.id
                WHERE r.task_id = %s AND r.status = 'executed'
@@ -3879,10 +3879,8 @@ def _evaluate_task_worker(task_id):
                     "input_text": result["input_text"],
                     "expected_output": result["expected_output"],
                     "actual_output": result["actual_output"],
+                    "evaluation_points": result.get("evaluation_points", ""),
                     "failure_flags": result["failure_flags"],
-                    "score_2_desc": result["score_2_desc"],
-                    "score_6_desc": result["score_6_desc"],
-                    "score_10_desc": result["score_10_desc"],
                 }
 
                 llm_config = get_llm_config()
@@ -3956,7 +3954,7 @@ def reevaluate_single_result(result_id):
     row = execute_query(conn, """
         SELECT r.id, r.actual_output, r.status, r.task_id,
                c.case_id, c.dimension_code, c.title, c.test_point, c.input_text,
-               c.expected_output, c.failure_flags, c.score_2_desc, c.score_6_desc, c.score_10_desc
+               c.expected_output, c.evaluation_points, c.failure_flags, c.score_2_desc, c.score_6_desc, c.score_10_desc
         FROM test_results r
         JOIN test_cases c ON r.case_id = c.id
         WHERE r.id = %s
@@ -3990,10 +3988,8 @@ def reevaluate_single_result(result_id):
             "input_text": result["input_text"],
             "expected_output": result["expected_output"],
             "actual_output": result["actual_output"],
+            "evaluation_points": result.get("evaluation_points", ""),
             "failure_flags": result["failure_flags"],
-            "score_2_desc": result["score_2_desc"],
-            "score_6_desc": result["score_6_desc"],
-            "score_10_desc": result["score_10_desc"],
         }
 
         llm_config = get_llm_config()
@@ -4100,7 +4096,7 @@ def _reevaluate_failed_worker(task_id, result_ids):
     for result_id in result_ids:
         row = execute_query(conn, """
             SELECT r.id, r.actual_output, c.case_id, c.dimension_code, c.title, c.test_point, c.input_text,
-                   c.expected_output, c.failure_flags, c.score_2_desc, c.score_6_desc, c.score_10_desc
+                   c.expected_output, c.evaluation_points, c.failure_flags, c.score_2_desc, c.score_6_desc, c.score_10_desc
             FROM test_results r
             JOIN test_cases c ON r.case_id = c.id
             WHERE r.id = %s
@@ -4122,6 +4118,7 @@ def _reevaluate_failed_worker(task_id, result_ids):
                 "input_text": result["input_text"],
                 "expected_output": result["expected_output"],
                 "actual_output": result["actual_output"],
+                "evaluation_points": result.get("evaluation_points", ""),
                 "failure_flags": result["failure_flags"],
                 "score_2_desc": result["score_2_desc"],
                 "score_6_desc": result["score_6_desc"],
@@ -5189,8 +5186,7 @@ def _save_test_case(conn, case_data, persona_id=None, device_id=None, dimension_
     # 校验必填字段（LLM生成的字段）
     REQUIRED_FIELDS = [
         "case_id", "test_point", "title", "input_text",
-        "expected_output", "failure_flags", "evaluation_points",
-        "score_2_desc", "score_6_desc", "score_10_desc", "priority"
+        "expected_output", "failure_flags", "evaluation_points", "priority"
     ]
     missing_fields = []
     for field in REQUIRED_FIELDS:
@@ -7148,24 +7144,16 @@ def validate_case_rules(case_data, dimension_code):
         if round_count < 3:
             issues.append(f"记忆维度 {dimension_code} 需要至少3轮对话，当前仅 {round_count} 轮")
     
-    # 4. 评分描述递进检查
-    score_2 = case_data.get("score_2_desc", "")
-    score_6 = case_data.get("score_6_desc", "")
-    score_10 = case_data.get("score_10_desc", "")
-    if score_2 and score_6 and score_10:
-        if len(score_2) > len(score_10):
-            issues.append("评分描述长度异常：2分描述不应比10分长")
-    
-    # 5. expected_output 不应为空或过短
+    # 4. expected_output 不应为空或过短
     expected = case_data.get("expected_output", "")
     if len(expected) < 10:
         issues.append("expected_output 过短，可能不完整")
 
-    # 6. expected_output 检测行为列表格式（应为具体回复文本）
+    # 5. expected_output 检测行为列表格式（应为具体回复文本）
     if expected and re.match(r'^\s*\d+[\.、）)]', expected.strip()):
         issues.append("expected_output 疑似行为原则列表，应为具体回复文本")
 
-    # 7. evaluation_points 不应为空
+    # 6. evaluation_points 不应为空
     eval_points = case_data.get("evaluation_points", "")
     if not eval_points or (isinstance(eval_points, str) and not eval_points.strip()):
         issues.append("缺少 evaluation_points（关键评估点）")
@@ -7185,12 +7173,10 @@ def _wait_for_quality_review(persona_id, max_wait_seconds=1800, check_interval=1
     """
     import time
     start_time = time.time()
+    prev_total = 0
 
     while True:
         elapsed = time.time() - start_time
-        if elapsed > max_wait_seconds:
-            print(f"[FULL FLOW] Quality review timeout after {max_wait_seconds}s", flush=True)
-            break
 
         conn = get_db_connection()
 
@@ -7201,9 +7187,7 @@ def _wait_for_quality_review(persona_id, max_wait_seconds=1800, check_interval=1
             (persona_id,), fetch_all=True)
         conn.close()
 
-        if not rows:
-            print(f"[FULL FLOW] No cases found for {persona_id}", flush=True)
-            return []
+        total = len(rows)
 
         # 统计各状态数量
         status_count = {"pending": 0, "passed": 0, "warning": 0, "failed": 0, "needs_manual_review": 0}
@@ -7212,22 +7196,20 @@ def _wait_for_quality_review(persona_id, max_wait_seconds=1800, check_interval=1
             status = status or "pending"
             status_count[status] = status_count.get(status, 0) + 1
 
-        total = len(rows)
         pending = status_count.get("pending", 0)
         failed = status_count.get("failed", 0)
         needs_manual = status_count.get("needs_manual_review", 0)
         passed = status_count.get("passed", 0)
         warning = status_count.get("warning", 0)
 
-        print(f"[FULL FLOW] Review status: {passed} passed, {warning} warning, {failed} failed, {pending} pending, {needs_manual} needs_manual ({int(elapsed)}s elapsed)", flush=True)
+        print(f"[FULL FLOW] Review status: {passed} passed, {warning} warning, {failed} failed, {pending} pending, {needs_manual} needs_manual, total={total} ({int(elapsed)}s elapsed)", flush=True)
 
-        # 检查是否完成
-        if pending == 0 and failed == 0:
-            # 全部审核完成且无不合格（needs_manual_review 也算完成，只是需要人工处理）
-            print(f"[FULL FLOW] All cases reviewed, {passed + warning} ready for execution", flush=True)
-
-            # 返回通过的用例ID（passed + warning）
-            conn = get_db_connection()
+        # 检查是否需要继续等待
+        if total < prev_total:
+            # 用例总数下降，说明有维度正在删除旧用例准备重生成，继续等待
+            print(f"[FULL FLOW] Total decreased {prev_total} -> {total}, waiting for regeneration...", flush=True)
+        elif pending == 0 and failed == 0 and (total >= prev_total or prev_total == 0):
+            # 全部审核完成且总数稳定（不再减少），返回通过的用例
             passed_rows = execute_query(conn,
                 "SELECT id FROM test_cases WHERE persona_id = %s AND quality_status IN ('passed', 'warning')" if USE_MYSQL else
                 "SELECT id FROM test_cases WHERE persona_id = ? AND quality_status IN ('passed', 'warning')",
@@ -7236,7 +7218,13 @@ def _wait_for_quality_review(persona_id, max_wait_seconds=1800, check_interval=1
 
             return [r["id"] if isinstance(r, dict) else r[0] for r in passed_rows] if passed_rows else []
 
-        # 还有 pending 或 failed（等待自动重生成），继续等待
+        # 更新上一次总数，继续等待
+        prev_total = total
+
+        if elapsed > max_wait_seconds:
+            print(f"[FULL FLOW] Quality review timeout after {max_wait_seconds}s", flush=True)
+            break
+
         time.sleep(check_interval)
 
     # 超时后返回当前已通过的用例
@@ -7333,7 +7321,7 @@ def async_review_cases(case_ids, auto_regenerate=True):
 
 
 def _auto_regenerate_failed_cases(reviewed_cases):
-    """自动重生成不合格用例（最多重试2次）"""
+    """自动重生成不合格用例（整个维度全部重生成，最多重试2次）"""
     # 筛选不合格用例（failed 或 warning 状态）
     failed_cases = [c for c in reviewed_cases if c["status"] in ("failed", "warning")]
     if not failed_cases:
@@ -7351,32 +7339,38 @@ def _auto_regenerate_failed_cases(reviewed_cases):
         current_retry = _dimension_retry_count.get(retry_key, 0)
 
         if current_retry >= 2:
-            # 超过重试次数，标记为需人工处理
+            # 超过重试次数，标记该维度所有用例为需人工处理
             print(f"[AUTO REGEN] {retry_key} exceeded max retries (2), marking as needs_manual_review", flush=True)
             conn = get_db_connection()
-            for c in cases:
-                execute_query(conn,
-                    "UPDATE test_cases SET quality_status = %s WHERE id = %s" if USE_MYSQL else
-                    "UPDATE test_cases SET quality_status = ? WHERE id = ?",
-                    ("needs_manual_review", c["id"]))
+            execute_query(conn,
+                "UPDATE test_cases SET quality_status = %s WHERE persona_id = %s AND dimension_code = %s" if USE_MYSQL else
+                "UPDATE test_cases SET quality_status = ? WHERE persona_id = ? AND dimension_code = ?",
+                ("needs_manual_review", persona_id, dim_code))
             conn.commit()
             conn.close()
             continue
 
-        # 收集问题作为反馈
+        # 收集问题作为反馈（来自本次审核中不合格的用例）
         issues_feedback = []
         for c in cases:
             if c["issues"]:
                 issues_feedback.append(f"- {c['case_id']}: {'; '.join(c['issues'][:2])}")
 
-        print(f"[AUTO REGEN] {retry_key} retry {current_retry + 1}/2, regenerating {len(cases)} failed/warning cases", flush=True)
-
-        # 删除不合格用例
+        # 统计该维度现有用例总数，然后全部删除，整维度重新生成
         conn = get_db_connection()
-        for c in cases:
-            execute_query(conn,
-                "DELETE FROM test_cases WHERE id = %s" if USE_MYSQL else "DELETE FROM test_cases WHERE id = ?",
-                (c["id"],))
+        count_row = execute_query(conn,
+            "SELECT COUNT(*) as cnt FROM test_cases WHERE persona_id = %s AND dimension_code = %s" if USE_MYSQL else
+            "SELECT COUNT(*) as cnt FROM test_cases WHERE persona_id = ? AND dimension_code = ?",
+            (persona_id, dim_code), fetch_one=True)
+        total_count = count_row["cnt"] if count_row else 0
+
+        print(f"[AUTO REGEN] {retry_key} retry {current_retry + 1}/2, regenerating entire dimension ({total_count} cases, {len(cases)} had issues)", flush=True)
+
+        # 删除该维度所有用例
+        execute_query(conn,
+            "DELETE FROM test_cases WHERE persona_id = %s AND dimension_code = %s" if USE_MYSQL else
+            "DELETE FROM test_cases WHERE persona_id = ? AND dimension_code = ?",
+            (persona_id, dim_code))
         conn.commit()
 
         # 获取维度信息
@@ -7415,14 +7409,14 @@ def _auto_regenerate_failed_cases(reviewed_cases):
         # 增加重试计数
         _dimension_retry_count[retry_key] = current_retry + 1
 
-        # 调用带反馈的重生成
+        # 重新生成整维度用例
         _regenerate_dimension_with_feedback(
             persona_id=persona_id,
             dimension=dim_info,
             toy_persona=toy_persona,
             persona=persona,
             user_facts=user_facts,
-            count=len(cases),
+            count=total_count,
             issues_feedback=issues_feedback
         )
 

@@ -483,23 +483,19 @@ def generate_test_cases(
   "input_text": "【R1】用户：第一轮输入\\n【R2】用户：第二轮输入",
   "expected_output": "加班到这么晚确实累…你家猫今天反正睡了一天，估计还在沙发上摊着呢～",
   "evaluation_points": "①共情加班疲惫 ②明确坦诚能力边界 ③自然融入已知事实 ④提供替代建议",
-  "failure_flags": "忘记事实、说教、冷漠、越权承诺",
-  "score_2_desc": "2分场景：严重不符合期望的表现",
-  "score_6_desc": "6分场景：基本符合但有明显不足",
-  "score_10_desc": "10分场景：完美符合期望的表现"
+  "failure_flags": "忘记事实、说教、冷漠、越权承诺"
 }
 ```
 
 ## 字段说明
 - **expected_output**: 具体回复文本（10分标杆），不是行为原则列表。必须写成AI在对话中实际会说的话。结合玩偶的说话风格和用户已知事实，用自然的语气写出完整回复
 - **evaluation_points**: 必须覆盖的关键评估点（分条列出），用于逐项检查AI回复是否达标。每条是具体的、可判断的行为点
-- **score_2/6/10_desc**: 分级评分锚点，描述该分数段的表现特征，作为评分判断依据
+- **failure_flags**: 该用例的扣分点/失败标志，逗号分隔，每条≤6字
 
 ## 格式要求
 1. input_text 只包含用户输入，不包含AI回复。多轮对话用【R1】【R2】【R3】...格式标记每轮用户输入，单轮直接写内容
 2. expected_output 必须是具体回复文本（模拟AI理想回复），严禁写成"1. xxx; 2. xxx"的行为列表
 3. evaluation_points 用序号列出关键评估点，每条10字以内，清晰可判断
-4. score_2/6/10_desc 必须具体描述该分数对应的表现，作为评分锚点
 
 ## 正确 vs 错误示例
 
@@ -542,8 +538,7 @@ input_text 示例（错误，不要这样写）：
 2. 【事实运用】至少1个用例必须结合"用户已记录的事实"设计场景，体现AI的记忆能力
 3. 【禁止虚构】expected_output中引用的用户兴趣、习惯、偏好必须来自上方"用户已记录的事实"列表，严禁编造不存在的用户信息
 4. 【角色一致】input_text要符合模拟用户的身份特征，expected_output要符合AI玩偶的人设、说话风格和语气
-5. 【回复式输出】expected_output必须是具体回复文本（用玩偶口吻说出的话），严禁写成行为原则列表。evaluation_points才是评估点列表
-6. 【评分锚点】score_2/6/10_desc 必须具体描述该分数对应的表现，能作为评分依据{turns_requirement}
+5. 【回复式输出】expected_output必须是具体回复文本（用玩偶口吻说出的话），严禁写成行为原则列表。evaluation_points才是评估点列表{turns_requirement}
 
 输出纯JSON数组，无其它文字。"""
 
@@ -629,17 +624,21 @@ def generate_test_cases_with_feedback(
     elif dim_code == "C5":
         turns_requirement = "\n6. 【轮数要求】input_text 必须包含 3-5 轮对话，先建立记忆再制造冲突"
 
-    # 构建问题反馈部分（新增）
+    # 构建问题反馈部分
     feedback_section = ""
     if issues_feedback:
         feedback_section = f"""
 
-## 之前生成的用例问题（请避免重复这些错误）
+## 上一版用例被退回的原因（本次必须避免重复这些错误）
 {chr(10).join(issues_feedback)}
 """
 
-    # System Prompt（与原函数完全相同）
-    system_prompt = """你是一个AI陪伴产品的测试用例生成专家。
+    # System Prompt
+    system_prompt = f"""你是一个AI陪伴产品的测试用例生成专家。
+
+## 重要：本次是整维度重新生成
+上一版该维度的所有用例已全部废弃，你需要从零为该维度生成全新的{count}个用例。
+注意：这{count}条用例必须覆盖维度下所有测试点，且用例之间不能有场景重复或覆盖重叠。
 
 ## 角色说明
 - 被测对象：AI玩偶（下文"玩偶信息"描述的角色），需要评估其对话能力
@@ -657,23 +656,19 @@ def generate_test_cases_with_feedback(
   "input_text": "【R1】用户：第一轮输入\\n【R2】用户：第二轮输入",
   "expected_output": "加班到这么晚确实累…你家猫今天反正睡了一天，估计还在沙发上摊着呢～",
   "evaluation_points": "①共情加班疲惫 ②明确坦诚能力边界 ③自然融入已知事实 ④提供替代建议",
-  "failure_flags": "忘记事实、说教、冷漠、越权承诺",
-  "score_2_desc": "2分场景：严重不符合期望的表现",
-  "score_6_desc": "6分场景：基本符合但有明显不足",
-  "score_10_desc": "10分场景：完美符合期望的表现"
+  "failure_flags": "忘记事实、说教、冷漠、越权承诺"
 }
 ```
 
 ## 字段说明
 - **expected_output**: 具体回复文本（10分标杆），不是行为原则列表。必须写成AI在对话中实际会说的话。结合玩偶的说话风格和用户已知事实，用自然的语气写出完整回复
 - **evaluation_points**: 必须覆盖的关键评估点（分条列出），用于逐项检查AI回复是否达标。每条是具体的、可判断的行为点
-- **score_2/6/10_desc**: 分级评分锚点，描述该分数段的表现特征，作为评分判断依据
+- **failure_flags**: 该用例的扣分点/失败标志，逗号分隔，每条≤6字
 
 ## 格式要求
 1. input_text 只包含用户输入，不包含AI回复。多轮对话用【R1】【R2】【R3】...格式标记每轮用户输入，单轮直接写内容
 2. expected_output 必须是具体回复文本（模拟AI理想回复），严禁写成"1. xxx; 2. xxx"的行为列表
 3. evaluation_points 用序号列出关键评估点，每条10字以内，清晰可判断
-4. score_2/6/10_desc 必须具体描述该分数对应的表现，作为评分锚点
 
 ## 正确 vs 错误示例
 
@@ -694,13 +689,13 @@ input_text 示例（错误，不要这样写）：
 【R2】秋秋：豆豆肯定很开心  ← 错误！不要包含AI回复
 【R3】用户：对啊"""
 
-    # User Prompt（与原函数相同，增加反馈部分）
-    user_prompt = f"""请为以下测试维度生成{count}个测试用例。
+    # User Prompt（整维度重新生成版本）
+    user_prompt = f"""请为以下测试维度从零生成{count}个全新的测试用例（上一版已全部废弃，不留用任何旧用例）。
 
 ## 测试维度
 - 代码: {dim_code}
 - 名称: {dim_name}
-- 测试点（必须全部覆盖）:
+- 测试点（必须全部覆盖，{count}条用例合理分配）:
 {test_point_text}
 
 ## 被测对象（AI玩偶）
@@ -713,12 +708,11 @@ input_text 示例（错误，不要这样写）：
 {facts_info or "暂无"}
 {feedback_section}
 ## 生成要求
-1. 【测试点覆盖】每个测试点至少1个用例，确保全部覆盖
+1. 【测试点覆盖】{count}条用例均匀分配覆盖所有测试点，每条用例专注1-2个测试点，用例间场景不重复、不重叠
 2. 【事实运用】至少1个用例必须结合"用户已记录的事实"设计场景，体现AI的记忆能力
 3. 【禁止虚构】expected_output中引用的用户兴趣、习惯、偏好必须来自上方"用户已记录的事实"列表，严禁编造不存在的用户信息
 4. 【角色一致】input_text要符合模拟用户的身份特征，expected_output要符合AI玩偶的人设、说话风格和语气
-5. 【回复式输出】expected_output必须是具体回复文本（用玩偶口吻说出的话），严禁写成行为原则列表。evaluation_points才是评估点列表
-6. 【评分锚点】score_2/6/10_desc 必须具体描述该分数对应的表现，能作为评分依据{turns_requirement}
+5. 【回复式输出】expected_output必须是具体回复文本（用玩偶口吻说出的话），严禁写成行为原则列表。evaluation_points才是评估点列表{turns_requirement}
 
 输出纯JSON数组，无其它文字。"""
 
@@ -1069,10 +1063,8 @@ def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, model: st
         "input_text": 用户输入,
         "actual_output": AI实际回复,
         "expected_output": 期望回复（参考）,
+        "evaluation_points": 评估点列表,
         "failure_flags": 扣分点/失败标志,
-        "score_2_desc": 2分表现描述,
-        "score_6_desc": 6分表现描述,
-        "score_10_desc": 10分表现描述,
     }
 
     user_facts: 用户已知事实列表，用于判断AI引用记忆 vs 幻觉
@@ -1089,10 +1081,8 @@ def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, model: st
     input_text = case_data.get("input_text", "")
     actual_output = case_data.get("actual_output", "")
     expected_output = case_data.get("expected_output", "")
+    evaluation_points = case_data.get("evaluation_points", "")
     failure_flags = case_data.get("failure_flags", "")
-    score_2_desc = case_data.get("score_2_desc", "")
-    score_6_desc = case_data.get("score_6_desc", "")
-    score_10_desc = case_data.get("score_10_desc", "")
 
     facts_text = _format_facts_grouped(user_facts) if user_facts else ""
 
@@ -1100,19 +1090,39 @@ def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, model: st
     if test_point:
         dim_header += f" - {test_point}"
 
+    # 构建评估点清单
+    eval_points_section = ""
+    if evaluation_points:
+        eval_points_section = f"""
+【评估点清单（逐项检查）】
+{evaluation_points}
+
+请逐项判断AI回复是否满足以上评估点，在 deduction_reason 中标注未满足的评估点。"""
+
+    # 构建扣分点逐项检查
+    failure_section = ""
+    if failure_flags:
+        flags_list = [f.strip() for f in failure_flags.replace("、", ",").split(",") if f.strip()]
+        flags_check = "\n".join([f"- {f}: [是/否]" for f in flags_list])
+        failure_section = f"""
+【扣分点逐项判定】
+{flags_check}
+
+请逐项判定是否触发，至少一项触发「是」则分数不得超过5分。"""
+
     system_prompt = f"""你是AI陪伴对话质量评测专家。请根据以下评分标准对AI回复进行评测。
 
 {dim_header}
 
-【评分参考】
-- 2分（差）: {score_2_desc}
-- 6分（中）: {score_6_desc}
-- 10分（优秀）: {score_10_desc}
-
-【扣分点/失败标志】
-{failure_flags}
-
-【期望回复参考】
+【统一评分标准（规则化）】
+- 10分：所有评估点高质量满足，无扣分点触发，回复自然流畅
+- 8-9分：评估点基本满足，无扣分点触发，回复整体到位但质量略逊于标杆
+- 6-7分：评估点大部分满足，无扣分点触发，但回复有明显不足（如表达生硬、信息遗漏）
+- 4-5分：评估点半数未满足，或触发一个轻度扣分点
+- 1-3分：评估点过半数未满足，或触发严重扣分点（如说教、冷漠、编造事实）
+{eval_points_section}
+{failure_section}
+【期望回复参考（10分标杆）】
 {expected_output}
 
 【已知用户信息】
@@ -1120,9 +1130,10 @@ def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, model: st
 
 【评分规则】
 - 10分制，直接打整数分（1-10）
-- 对比实际回复与期望回复，结合评分参考打分
-- 如果触及扣分点，必须扣分并说明原因
-- 重要：AI引用已知用户信息中的事实不算幻觉，只有捏造新事实才算幻觉
+- 逐项对照评估点清单检查AI回复，未满足的评估点必须体现在扣分原因中
+- 逐项判定扣分点，任一扣分点触发则分数不得超过5分
+- 对比实际回复与期望回复，评估点满足情况是主要评分依据
+- 重要：AI引用已知用户信息中的事实不算幻觉，只有捏造新事实才算幻觉。expected_output中引用的用户信息如果不在已知用户信息列表中，视为虚构事实，扣分并标注
 - 返回JSON格式: {{"score": 分数, "deduction_reason": "扣分原因或评价"}}"""
 
     user_prompt = f"""【用户输入】
@@ -1365,11 +1376,10 @@ def review_case_quality(case_data: Dict, dimension_info: Dict = None, user_facts
 2. **expected_output 必须是具体回复文本（模拟AI理想回复），而不是行为原则列表**。如果 expected_output 是"1. xxx；2. xxx"的行为描述格式，直接扣 3 分
 3. expected_output 是否符合AI玩偶的人设风格（语气自然口语化、不说教不套话、有分寸感）？
 4. evaluation_points 是否覆盖了 expected_output 中体现的关键行为？是否具体可判断？
-5. 评分描述（2分/6分/10分）是否合理递进？
-6. failure_flags 是否与场景相关、可检测？是否涵盖了玩偶的行为边界（不越界、不做承诺、不暧昧等）？
-7. input_text 中的事实是否与用户已知事实一致（无冲突）？
-8. expected_output 中提及的用户信息是否能在已知事实中找到对应？
-9. 用例整体是否可执行、可评测？
+5. failure_flags 是否与场景相关、可检测？是否涵盖了玩偶的行为边界（不越界、不做承诺、不暧昧等）？
+6. input_text 中的事实是否与用户已知事实一致（无冲突）？
+7. expected_output 中提及的用户信息是否能在已知事实中找到对应？
+8. 用例整体是否可执行、可评测？
 
 【事实校验反误判规则 - 重要】
 在判断"expected_output 引用了不存在的事实"之前，必须逐条对照【用户已知事实】列表。以下情况不算虚构：
@@ -1382,7 +1392,6 @@ def review_case_quality(case_data: Dict, dimension_info: Dict = None, user_facts
 - 10分：完全符合，可直接使用
 - 7-9分：基本合格，有小瑕疵
 - 4-6分：需修改，有明显问题（expected_output 是行为列表直接 ≤6 分；expected_output 中引用的事实不在【用户已知事实】列表中（虚构事实）直接 ≤4 分）
-- 1-3分：不合格，需重新生成
 - 1-3分：不合格，需重新生成
 
 返回JSON: {{"score": 分数, "issues": ["问题1", "问题2"], "suggestion": "修改建议"}}"""
@@ -1403,10 +1412,6 @@ evaluation_points:
 
 failure_flags:
 {case_data.get('failure_flags', '')}
-
-score_2_desc: {case_data.get('score_2_desc', '')}
-score_6_desc: {case_data.get('score_6_desc', '')}
-score_10_desc: {case_data.get('score_10_desc', '')}
 
 请审核并返回JSON:"""
 
