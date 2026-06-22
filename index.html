@@ -3495,9 +3495,9 @@ function saveLlmConfig() {
   for (var key in LLM_CONFIG_LABELS) {
     data[key] = {
       model: (document.getElementById('llm-mod-' + key) || {}).value.trim() || '',
-      temperature: parseFloat((document.getElementById('llm-tmp-' + key) || {}).value) || 0.3,
-      max_tokens: parseInt((document.getElementById('llm-tok-' + key) || {}).value) || 8192,
-      timeout: parseInt((document.getElementById('llm-tmo-' + key) || {}).value) || 60
+      temperature: (function(v) { var n = parseFloat(v); return isNaN(n) ? 0.3 : n; })((document.getElementById('llm-tmp-' + key) || {}).value),
+      max_tokens: (function(v) { var n = parseInt(v); return isNaN(n) ? 8192 : n; })((document.getElementById('llm-tok-' + key) || {}).value),
+      timeout: (function(v) { var n = parseInt(v); return isNaN(n) ? 60 : n; })((document.getElementById('llm-tmo-' + key) || {}).value)
     };
   }
   fetch('/api/llm/config', {
