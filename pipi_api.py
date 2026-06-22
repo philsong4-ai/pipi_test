@@ -1134,7 +1134,7 @@ def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, model: st
 - 逐项判定扣分点，任一扣分点触发则分数不得超过5分
 - 对比实际回复与期望回复，评估点满足情况是主要评分依据
 - 重要：AI引用已知用户信息中的事实不算幻觉，只有捏造新事实才算幻觉。expected_output中引用的用户信息如果不在已知用户信息列表中，视为虚构事实，扣分并标注
-- 返回JSON格式: {{"score": 分数, "deduction_reason": "扣分原因或评价"}}"""
+- 返回JSON格式: {{"score": 分数, "deduction_reason": "扣分原因或评价", "eval_points_check": {{"评估点1": true/false, ...}}, "failure_flags_triggered": ["触发的扣分点"]}}"""
 
     user_prompt = f"""【用户输入】
 {input_text}
@@ -1155,14 +1155,24 @@ def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, model: st
         clean_text = re.sub(r'```json\s*', '', result_text)
         clean_text = re.sub(r'```\s*', '', clean_text).strip()
 
-        # 方法1: 直接尝试解析整个文本（去掉代码块后可能就是纯JSON）
+        # 隐藏的解析函数
+        def _parse_eval_result(data):
+            score = int(round(data.get("score", 0)))
+            reason = data.get("deduction_reason", data.get("reason", ""))
+            status = "passed" if score >= 6 else "failed"
+            return {
+                "score": score,
+                "deduction_reason": reason,
+                "status": status,
+                "eval_points_check": data.get("eval_points_check", {}),
+                "failure_flags_triggered": data.get("failure_flags_triggered", []),
+            }
+
+        # 方法1: 直接尝试解析整个文本
         try:
             data = json.loads(clean_text)
             if "score" in data:
-                score = int(round(data.get("score", 0)))
-                reason = data.get("deduction_reason", data.get("reason", ""))
-                status = "passed" if score >= 6 else "failed"
-                return {"score": score, "deduction_reason": reason, "status": status}
+                return _parse_eval_result(data)
         except json.JSONDecodeError:
             pass
 
@@ -1174,16 +1184,13 @@ def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, model: st
             try:
                 data = json.loads(json_str)
                 if "score" in data:
-                    score = int(round(data.get("score", 0)))
-                    reason = data.get("deduction_reason", data.get("reason", ""))
-                    status = "passed" if score >= 6 else "failed"
-                    return {"score": score, "deduction_reason": reason, "status": status}
+                    return _parse_eval_result(data)
             except json.JSONDecodeError:
                 pass
 
-        return {"score": 0, "deduction_reason": f"无法解析评测结果: {clean_text[:100]}", "status": "failed"}
+        return {"score": 0, "deduction_reason": f"无法解析评测结果: {clean_text[:100]}", "status": "failed", "eval_points_check": {}, "failure_flags_triggered": []}
     except Exception as e:
-        return {"score": 0, "deduction_reason": f"评测异常: {str(e)}", "status": "failed"}
+        return {"score": 0, "deduction_reason": f"评测异常: {str(e)}", "status": "failed", "eval_points_check": {}, "failure_flags_triggered": []}
 
 
 # ─── 对话实时评测 ───────────────────────────────────

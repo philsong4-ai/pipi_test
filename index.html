@@ -4288,6 +4288,28 @@ function _showEvalDetailV2(c, result) {
     content += '<p><b>评测得分:</b> <span style="font-size:18px;font-weight:600;color:' + scoreColor + '">' + result.score + '</span>/10</p>';
     if (result.deduction_reason) content += '<p><b>扣分原因:</b> <span style="color:#ff3b30">' + result.deduction_reason + '</span></p>';
   }
+  if (result && result.eval_detail) {
+    var ed = typeof result.eval_detail === 'string' ? JSON.parse(result.eval_detail) : result.eval_detail;
+    if (ed.eval_points_check && Object.keys(ed.eval_points_check).length > 0) {
+      content += '<p style="margin-top:12px"><b>评估点检查:</b></p>';
+      content += '<div style="background:#fafafa;padding:8px;border-radius:4px;font-size:12px">';
+      Object.keys(ed.eval_points_check).forEach(function(k) {
+        var passed = ed.eval_points_check[k];
+        var icon = passed ? '&#9989;' : '&#10060;';
+        var itemColor = passed ? '#2e7d32' : '#c62828';
+        content += '<div style="margin:2px 0;color:' + itemColor + '">' + icon + ' ' + k + '</div>';
+      });
+      content += '</div>';
+    }
+    if (ed.failure_flags_triggered && ed.failure_flags_triggered.length > 0) {
+      content += '<p style="margin-top:12px"><b>触发失败标记:</b></p>';
+      content += '<div style="background:#fff0f0;padding:8px;border-radius:4px;font-size:12px">';
+      ed.failure_flags_triggered.forEach(function(f) {
+        content += '<div style="margin:2px 0;color:#c62828">&#9888; ' + f + '</div>';
+      });
+      content += '</div>';
+    }
+  }
   content += '</div>';
 
   var nav = '<div style="margin-top:16px;display:flex;justify-content:space-between;align-items:center">';
@@ -4941,6 +4963,28 @@ function _showResultDetail(c, result) {
     var scoreColor = result.score >= 6 ? '#34c759' : '#ff3b30';
     content += '<p><b>评测得分:</b> <span style="font-size:18px;font-weight:600;color:' + scoreColor + '">' + result.score + '</span>/10</p>';
     if (result.deduction_reason) content += '<p><b>扣分原因:</b> <span style="color:#ff3b30">' + result.deduction_reason + '</span></p>';
+  }
+  if (result && result.eval_detail) {
+    var ed = typeof result.eval_detail === 'string' ? JSON.parse(result.eval_detail) : result.eval_detail;
+    if (ed.eval_points_check && Object.keys(ed.eval_points_check).length > 0) {
+      content += '<p style="margin-top:12px"><b>评估点检查:</b></p>';
+      content += '<div style="background:#fafafa;padding:8px;border-radius:4px;font-size:12px">';
+      Object.keys(ed.eval_points_check).forEach(function(k) {
+        var passed = ed.eval_points_check[k];
+        var icon = passed ? '&#9989;' : '&#10060;';
+        var itemColor = passed ? '#2e7d32' : '#c62828';
+        content += '<div style="margin:2px 0;color:' + itemColor + '">' + icon + ' ' + k + '</div>';
+      });
+      content += '</div>';
+    }
+    if (ed.failure_flags_triggered && ed.failure_flags_triggered.length > 0) {
+      content += '<p style="margin-top:12px"><b>触发失败标记:</b></p>';
+      content += '<div style="background:#fff0f0;padding:8px;border-radius:4px;font-size:12px">';
+      ed.failure_flags_triggered.forEach(function(f) {
+        content += '<div style="margin:2px 0;color:#c62828">&#9888; ' + f + '</div>';
+      });
+      content += '</div>';
+    }
   }
   content += '</div>';
 

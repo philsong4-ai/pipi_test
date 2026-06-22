@@ -3889,10 +3889,24 @@ def _evaluate_task_worker(task_id):
                 reason = eval_result.get("deduction_reason", "")
                 status = eval_result.get("status", "evaluated")
 
+                # 超时或无响应时重试1次
+                if score == 0 and ("超时" in str(reason) or "无响应" in str(reason) or "异常" in str(reason)):
+                    print(f"[TASK-EVAL] {case_code} retry after timeout/error: {reason}", flush=True)
+                    eval_result = pipi_api.evaluate_test_case(case_data, **llm_config["eval_case"], user_facts=user_facts)
+                    score = eval_result.get("score")
+                    reason = eval_result.get("deduction_reason", "")
+                    status = eval_result.get("status", "evaluated")
+
+                # 结构化评测详情
+                eval_detail = json.dumps({
+                    "eval_points_check": eval_result.get("eval_points_check", {}),
+                    "failure_flags_triggered": eval_result.get("failure_flags_triggered", []),
+                }, ensure_ascii=False)
+
                 if score is not None:
                     execute_query(conn,
-                        "UPDATE test_results SET score = %s, deduction_reason = %s, status = %s WHERE id = %s",
-                        (score, reason, status, result["id"]))
+                        "UPDATE test_results SET score = %s, deduction_reason = %s, status = %s, eval_detail = %s WHERE id = %s",
+                        (score, reason, status, eval_detail, result["id"]))
                     if status == "passed":
                         passed += 1
                     else:
@@ -3999,9 +4013,14 @@ def reevaluate_single_result(result_id):
         status = eval_result.get("status", "evaluated")
 
         if score is not None:
+            eval_detail_obj = {
+                "eval_points_check": eval_result.get("eval_points_check", {}),
+                "failure_flags_triggered": eval_result.get("failure_flags_triggered", []),
+            }
+            eval_detail = json.dumps(eval_detail_obj, ensure_ascii=False)
             execute_query(conn,
-                "UPDATE test_results SET score = %s, deduction_reason = %s, status = %s WHERE id = %s",
-                (score, reason, status, result_id))
+                "UPDATE test_results SET score = %s, deduction_reason = %s, status = %s, eval_detail = %s WHERE id = %s",
+                (score, reason, status, eval_detail, result_id))
             conn.commit()
             print(f"[RE-EVAL] {case_code} => score={score}, status={status}", flush=True)
             conn.close()
@@ -4132,9 +4151,13 @@ def _reevaluate_failed_worker(task_id, result_ids):
             status = eval_result.get("status", "evaluated")
 
             if score is not None:
+                eval_detail2 = json.dumps({
+                    "eval_points_check": eval_result.get("eval_points_check", {}),
+                    "failure_flags_triggered": eval_result.get("failure_flags_triggered", []),
+                }, ensure_ascii=False)
                 execute_query(conn,
-                    "UPDATE test_results SET score = %s, deduction_reason = %s, status = %s WHERE id = %s",
-                    (score, reason, status, result_id))
+                    "UPDATE test_results SET score = %s, deduction_reason = %s, status = %s, eval_detail = %s WHERE id = %s",
+                    (score, reason, status, eval_detail2, result_id))
                 conn.commit()
                 success_count += 1
                 print(f"[RE-EVAL BATCH] {case_code} => score={score}", flush=True)
@@ -4148,6 +4171,16 @@ def _reevaluate_failed_worker(task_id, result_ids):
 
     conn.close()
     print(f"[RE-EVAL BATCH] Task {task_id} completed: success={success_count}, failed={fail_count}", flush=True)
+
+
+def _parse_eval_detail(raw):
+    """安全解析 eval_detail JSON 字符串"""
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, TypeError):
+        return {}
 
 
 @app.route("/api/test_results", methods=["GET"])
@@ -4169,7 +4202,7 @@ def get_test_results():
     conn = get_db_connection()
     ph = "%s" if USE_MYSQL else "?"
 
-    sql = """SELECT r.id, r.task_id, r.case_id, r.actual_output, r.executed_at, r.score, r.deduction_reason, r.status,
+    sql = """SELECT r.id, r.task_id, r.case_id, r.actual_output, r.executed_at, r.score, r.deduction_reason, r.status, r.eval_detail,
                     c.case_id as case_code, c.dimension_code, c.title, c.test_point, c.input_text, c.expected_output, c.evaluation_points
              FROM test_results r
              JOIN test_cases c ON r.case_id = c.id
@@ -4216,6 +4249,7 @@ def get_test_results():
             "score": row["score"],
             "deduction_reason": row["deduction_reason"],
             "status": row["status"],
+            "eval_detail": _parse_eval_detail(row.get("eval_detail")),
         })
 
     return jsonify(results)
@@ -4227,7 +4261,7 @@ def get_single_test_result(result_id):
     conn = get_db_connection()
     ph = "%s" if USE_MYSQL else "?"
     row = execute_query(conn, f"""
-        SELECT r.id, r.task_id, r.case_id, r.actual_output, r.executed_at, r.score, r.deduction_reason, r.status,
+        SELECT r.id, r.task_id, r.case_id, r.actual_output, r.executed_at, r.score, r.deduction_reason, r.status, r.eval_detail,
                c.case_id as case_code, c.dimension_code, c.title, c.test_point, c.input_text, c.expected_output, c.evaluation_points
         FROM test_results r
         JOIN test_cases c ON r.case_id = c.id
@@ -4254,8 +4288,8 @@ def get_single_test_result(result_id):
         "score": row["score"],
         "deduction_reason": row["deduction_reason"],
         "status": row["status"],
+        "eval_detail": _parse_eval_detail(row.get("eval_detail")),
     })
-
 
 def _generate_report_summary(clusters, failed_cases, pass_rate, avg_score):
     """生成测试报告的描述性总结"""
