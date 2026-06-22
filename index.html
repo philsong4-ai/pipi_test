@@ -1519,13 +1519,107 @@ function showEvalDetail(msgId) {
     var modalBox = document.getElementById('modal-box');
     var modalBg = document.getElementById('modal-bg');
     if (modalBox && modalBg) {
-      modalBox.innerHTML = '<h3 style="margin-bottom:12px">自动评测详情</h3>' + html + '<div style="margin-top:16px;text-align:right"><button class="btn btn-secondary" onclick="closeModal()">关闭</button></div>';
+      var hasHuman = d.human_score !== null && d.human_score !== undefined;
+      var humanBadge = hasHuman ? '<span style="font-size:11px;color:#ff9500;margin-left:8px">(已人工纠正: ' + d.human_score + '/10)</span>' : '';
+      var footerHtml = '<div style="margin-top:16px;display:flex;justify-content:space-between;align-items:center">';
+      footerHtml += '<div>' + humanBadge + '</div>';
+      footerHtml += '<div>';
+      footerHtml += '<button class="btn btn-primary" onclick="showChatCorrection(' + msgId + ')" style="margin-right:8px;background:#ff9500">人工纠正</button>';
+      footerHtml += '<button class="btn btn-secondary" onclick="closeModal()">关闭</button>';
+      footerHtml += '</div></div>';
+      modalBox.innerHTML = '<h3 style="margin-bottom:12px">自动评测详情</h3>' + html + footerHtml;
       modalBg.style.display = 'flex';
     } else {
       // 备用：用 alert 显示
       alert('总分: ' + d.total_score.toFixed(1) + '\n记忆: ' + d.memory_score + '\n情感: ' + d.emotion_score + '\n质量: ' + d.quality_score + '\n人设: ' + (d.persona_score || '-'));
     }
   });
+}
+
+function showChatCorrection(msgId) {
+  api('/api/eval/' + msgId).then(function(d) {
+    var content = '<div style="font-size:13px">';
+    content += '<p>当前自动评分: <b>' + d.total_score.toFixed(1) + '/10</b></p>';
+    content += '<div class="form-group" style="margin-bottom:12px">';
+    content += '<label>人工评分 (1-10)</label>';
+    content += '<input type="number" id="corr-score" min="1" max="10" value="' + Math.round(d.total_score) + '" style="width:100px;padding:8px;border:1px solid #d2d2d7;border-radius:8px;font-size:14px">';
+    content += '</div>';
+    content += '<div class="form-group" style="margin-bottom:12px">';
+    content += '<label>纠正说明</label>';
+    content += '<textarea id="corr-note" rows="3" placeholder="说明为什么需要纠正评分..." style="width:100%;padding:8px;border:1px solid #d2d2d7;border-radius:8px;font-size:13px">' + (d.human_note || '') + '</textarea>';
+    content += '</div>';
+    content += '</div>';
+    content += '<div style="margin-top:16px;text-align:right">';
+    content += '<button class="btn btn-secondary" onclick="closeModal()" style="margin-right:8px">取消</button>';
+    content += '<button class="btn btn-primary" onclick="submitChatCorrection(' + msgId + ')" style="background:#ff9500">确认纠正</button>';
+    content += '</div>';
+    document.getElementById('modal-box').innerHTML = '<h3 style="margin-bottom:12px">人工纠正评测</h3>' + content;
+    document.getElementById('modal-bg').style.display = 'flex';
+  });
+}
+
+function submitChatCorrection(msgId) {
+  var score = parseInt(document.getElementById('corr-score').value);
+  var note = document.getElementById('corr-note').value;
+  if (isNaN(score) || score < 1 || score > 10) {
+    alert('评分必须为1-10的整数');
+    return;
+  }
+  api('/api/eval/' + msgId + '/correct', 'POST', { human_score: score, human_note: note })
+    .then(function(res) {
+      if (res.success) {
+        alert('人工纠正已保存');
+        closeModal();
+        showEvalDetail(msgId);
+      } else {
+        alert('纠正失败: ' + (res.error || '未知错误'));
+      }
+    }).catch(function(err) {
+      alert('请求失败: ' + err.message);
+    });
+}
+
+function showTestCorrection(resultId) {
+  api('/api/test_results/' + resultId).then(function(d) {
+    var content = '<div style="font-size:13px">';
+    content += '<p>当前自动评分: <b>' + (d.score || '-') + '/10</b></p>';
+    if (d.deduction_reason) content += '<p style="color:#ff3b30">扣分原因: ' + d.deduction_reason + '</p>';
+    content += '<div class="form-group" style="margin-bottom:12px">';
+    content += '<label>人工评分 (1-10)</label>';
+    content += '<input type="number" id="corr-score" min="1" max="10" value="' + (d.human_score || d.score || 5) + '" style="width:100px;padding:8px;border:1px solid #d2d2d7;border-radius:8px;font-size:14px">';
+    content += '</div>';
+    content += '<div class="form-group" style="margin-bottom:12px">';
+    content += '<label>纠正说明</label>';
+    content += '<textarea id="corr-note" rows="3" placeholder="说明为什么需要纠正评分..." style="width:100%;padding:8px;border:1px solid #d2d2d7;border-radius:8px;font-size:13px">' + (d.human_note || '') + '</textarea>';
+    content += '</div>';
+    content += '</div>';
+    content += '<div style="margin-top:16px;text-align:right">';
+    content += '<button class="btn btn-secondary" onclick="closeModal()" style="margin-right:8px">取消</button>';
+    content += '<button class="btn btn-primary" onclick="submitTestCorrection(' + resultId + ')" style="background:#ff9500">确认纠正</button>';
+    content += '</div>';
+    document.getElementById('modal-box').innerHTML = '<h3 style="margin-bottom:12px">人工纠正评测</h3>' + content;
+    document.getElementById('modal-bg').style.display = 'flex';
+  });
+}
+
+function submitTestCorrection(resultId) {
+  var score = parseInt(document.getElementById('corr-score').value);
+  var note = document.getElementById('corr-note').value;
+  if (isNaN(score) || score < 1 || score > 10) {
+    alert('评分必须为1-10的整数');
+    return;
+  }
+  api('/api/test_results/' + resultId + '/correct', 'POST', { human_score: score, human_note: note })
+    .then(function(res) {
+      if (res.success) {
+        alert('人工纠正已保存');
+        closeModal();
+      } else {
+        alert('纠正失败: ' + (res.error || '未知错误'));
+      }
+    }).catch(function(err) {
+      alert('请求失败: ' + err.message);
+    });
 }
 
 function loadEvalForMessage(msgId) {
@@ -1535,7 +1629,13 @@ function loadEvalForMessage(msgId) {
       if (ph && !ph.dataset.loaded) { ph.dataset.loaded = "1";
         ph.className = 'eval-score';
         ph.style.display = '';
-        ph.innerHTML = '🤖 ' + d.total_score.toFixed(1);
+        var displayScore = d.human_score !== null && d.human_score !== undefined ? d.human_score : d.total_score;
+        var badgeHtml = '\ud83e\udd16 ' + displayScore.toFixed(1);
+        if (d.human_score !== null && d.human_score !== undefined) {
+          badgeHtml += ' \u270f\ufe0f';
+          ph.style.border = '1px solid #ff9500';
+        }
+        ph.innerHTML = badgeHtml;
         ph.onclick = function() { showEvalDetail(msgId); };
       }
     }
@@ -4164,7 +4264,7 @@ function loadTaskEvalResults() {
         html += '<td style="padding:6px;font-family:monospace;font-size:10px">' + (r.case_code || '-') + '</td>';
         html += '<td style="padding:6px;text-align:center">' + (r.dimension_code || '-') + '</td>';
         html += '<td style="padding:6px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (r.title || '-') + '</td>';
-        html += '<td style="padding:6px;text-align:center;font-weight:600;color:' + (r.score >= 6 ? '#34c759' : '#ff3b30') + '">' + (r.score || '-') + '</td>';
+        html += '<td style="padding:6px;text-align:center;font-weight:600;color:' + ((r.human_score !== null && r.human_score !== undefined ? r.human_score : r.score) >= 6 ? '#34c759' : '#ff3b30') + '">' + (r.human_score !== null && r.human_score !== undefined ? r.human_score + ' \u270f\ufe0f' : (r.score || '-')) + '</td>';
         html += '<td style="padding:6px;text-align:center">' + statusBadge + '</td>';
         html += '<td style="padding:6px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ff3b30">' + (r.deduction_reason || '-') + '</td>';
         html += '<td style="padding:6px;text-align:center">';
@@ -4284,9 +4384,15 @@ function _showEvalDetailV2(c, result) {
   }
   content += '<hr style="margin:12px 0;border:none;border-top:1px solid #e8e8ed">';
   if (result && result.score !== null) {
-    var scoreColor = result.score >= 6 ? '#34c759' : '#ff3b30';
-    content += '<p><b>评测得分:</b> <span style="font-size:18px;font-weight:600;color:' + scoreColor + '">' + result.score + '</span>/10</p>';
+    var displayScore = result.human_score !== null && result.human_score !== undefined ? result.human_score : result.score;
+    var scoreColor = displayScore >= 6 ? '#34c759' : '#ff3b30';
+    content += '<p><b>评测得分:</b> <span style="font-size:18px;font-weight:600;color:' + scoreColor + '">' + displayScore + '</span>/10';
+    if (result.human_score !== null && result.human_score !== undefined) content += ' <span style="color:#ff9500">\u270f\ufe0f 人工纠正</span>';
+    content += '</p>';
     if (result.deduction_reason) content += '<p><b>扣分原因:</b> <span style="color:#ff3b30">' + result.deduction_reason + '</span></p>';
+  }
+  if (result && result.human_score !== null && result.human_score !== undefined && result.human_note) {
+    content += '<p><b>纠正说明:</b> <span style="color:#ff9500">' + result.human_note + '</span></p>';
   }
   if (result && result.eval_detail) {
     var ed = typeof result.eval_detail === 'string' ? JSON.parse(result.eval_detail) : result.eval_detail;
@@ -4320,6 +4426,9 @@ function _showEvalDetailV2(c, result) {
   nav += '<div>';
   if (result && result.status === 'failed') {
     nav += '<button class="btn btn-primary" onclick="showCreateJiraModal(' + result.id + ')" style="margin-right:8px;background:#5856d6">创建Jira</button>';
+  }
+  if (result) {
+    nav += '<button class="btn btn-primary" onclick="showTestCorrection(' + result.id + ')" style="margin-right:8px;background:#ff9500">人工纠正</button>';
   }
   nav += '<button class="btn btn-secondary" onclick="closeModal()">关闭</button>';
   nav += '</div>';
@@ -4960,9 +5069,15 @@ function _showResultDetail(c, result) {
   }
   content += '<hr style="margin:12px 0;border:none;border-top:1px solid #e8e8ed">';
   if (result && result.score !== null) {
-    var scoreColor = result.score >= 6 ? '#34c759' : '#ff3b30';
-    content += '<p><b>评测得分:</b> <span style="font-size:18px;font-weight:600;color:' + scoreColor + '">' + result.score + '</span>/10</p>';
+    var displayScore = result.human_score !== null && result.human_score !== undefined ? result.human_score : result.score;
+    var scoreColor = displayScore >= 6 ? '#34c759' : '#ff3b30';
+    content += '<p><b>评测得分:</b> <span style="font-size:18px;font-weight:600;color:' + scoreColor + '">' + displayScore + '</span>/10';
+    if (result.human_score !== null && result.human_score !== undefined) content += ' <span style="color:#ff9500">\u270f\ufe0f 人工纠正</span>';
+    content += '</p>';
     if (result.deduction_reason) content += '<p><b>扣分原因:</b> <span style="color:#ff3b30">' + result.deduction_reason + '</span></p>';
+  }
+  if (result && result.human_score !== null && result.human_score !== undefined && result.human_note) {
+    content += '<p><b>纠正说明:</b> <span style="color:#ff9500">' + result.human_note + '</span></p>';
   }
   if (result && result.eval_detail) {
     var ed = typeof result.eval_detail === 'string' ? JSON.parse(result.eval_detail) : result.eval_detail;
@@ -4993,6 +5108,10 @@ function _showResultDetail(c, result) {
   nav += '<button class="btn btn-secondary" onclick="goPrevResult()" ' + (_evalResultIndex <= 0 ? 'disabled' : '') + ' style="margin-right:8px">← 上一条</button>';
   nav += '<button class="btn btn-secondary" onclick="goNextResult()" ' + (_evalResultIndex >= _evalResultList.length - 1 ? 'disabled' : '') + '>下一条 →</button>';
   nav += '</div>';
+  nav += '<div>';
+  if (result) {
+    nav += '<button class="btn btn-primary" onclick="showTestCorrection(' + result.id + ')" style="margin-right:8px;background:#ff9500">人工纠正</button>';
+  }
   nav += '<button class="btn btn-secondary" onclick="closeModal()">关闭</button>';
   nav += '</div>';
 

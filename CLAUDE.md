@@ -17,20 +17,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 └── ...
 ```
 
-### web_admin.py — Flask 后端（~7700行）
+### web_admin.py — Flask 后端（~8000行）
 
 按功能区段组织，以注释标记：
 
 | 区段 | 核心职责 |
 |------|---------|
-| 数据库配置/初始化 | MySQL/SQLite 双后端，`execute_query()` 统一接口，启动时自动恢复卡住的任务 |
+| 数据库配置/初始化 | MySQL/SQLite 双后端，`execute_query()` 统一接口，启动时 `_ensure_tables()` 自动 ALTER TABLE 补齐缺失列 + 创建新表 |
 | 用户画像 (personas) | CRUD + 批量导入，含 device_id |
 | 聊天 (chat/chat_history) | 实时对话 + 历史管理 + 事实自动提取 |
 | 遗忘机制配置 (memory/config) | 记忆衰减参数 |
-| 自动评测 (eval) | 回复评分 + 统计（趋势/分布/扣分原因/按用户） |
+| 自动评测 (eval) | 回复评分 + 统计（趋势/分布/扣分原因/按用户）+ 人工纠正 |
 | 用户成长 (growth) | 模拟长期对话，验证记忆形成 |
 | 测试用例管理 (test_cases) | CRUD + LLM 生成 + 质量复核 |
-| 测试任务 (test_tasks) | 异步执行/评测 + 进度追踪 |
+| 测试任务 (test_tasks) | 异步执行/评测 + 进度追踪 + 人工纠正 |
 | 测试报告 (test_report) | HTML/Excel 报告生成 |
 | 预约任务 (scheduled_tasks) | 定时执行 + 调度器循环 |
 | API 接口配置 (api_endpoints) | 动态管理外部 API URL/Key |
@@ -38,19 +38,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | 用例质量校验 (review) | LLM 复核用例是否符合维度要求 + 自动重生成不合格用例 |
 | LLM 配置 (llm/config) | 7 个调用场景独立配置 model / temperature / max_tokens / timeout |
 
-### pipi_api.py — API 调用层（~1400行）
+### pipi_api.py — API 调用层（~1500行）
 
 - **SSE 流解析**: `parse_sse_buffer()` — 兼容流式(`delta.content`)和非流式(`message.content`)
 - **玩偶对话**: `call_pipi_stream()` — 调玩偶 API，返回完整回复
 - **LLM 调用**: `call_extract_llm()` / `call_llm_simple()` — 用例生成、事实提取、评测评分
-- **评测入口**: `evaluate_chat_reply()` / `evaluate_test_case()` — 调用 LLM 打分
+- **评测入口**: `evaluate_chat_reply()` / `evaluate_test_case()` — 调用 LLM 打分，均支持 `corrections` 参数注入 few-shot 案例
 - **用例生成**: `generate_test_cases()` / `generate_test_cases_with_feedback()` — LLM 生成+反馈修正
 - **用例复核**: `review_case_quality()` — 检查用例是否符合测试维度
 - **事实提取**: `extract_facts_from_message()` — 从对话中提取用户事实，含 `entity_name` 判断
-- **事实格式化**: `_format_facts_grouped()` — 按分类（CATEGORY_NAMES）分组展示事实，用于评测/复核 prompt
+- **事实格式化**: `_format_facts_grouped()` — 按分类（CATEGORY_NAMES）分组展示事实
+- **纠正案例格式化**: `_format_corrections_for_prompt()` — 将人工纠正记录转为 few-shot prompt 片段
 - **System Prompt 构建**: `build_system_prompt()` — 拼装 persona 信息
 
-### index.html — 单文件前端（~5000行）
+### index.html — 单文件前端（~5200行）
 
 所有 UI 渲染、图表、交互逻辑在一个 HTML 文件中。
 
@@ -101,13 +102,14 @@ MySQL `pipi_test`，用户 `pipi`，密码 `<DB_PASSWORD>`。代码同时兼容 
 - `personas`: 用户画像（含 device_id）
 - `test_cases`: 测试用例（含 dimension_code、input_text、expected_output、failure_flags）
 - `test_tasks`: 测试任务（含 status、progress）
-- `test_results`: 执行结果（含 actual_output、score、executed_at、deduction_reason）
+- `test_results`: 执行结果（含 actual_output、score、executed_at、deduction_reason、human_score、human_note）
 - `test_dimensions`: 测试维度定义
 - `scheduled_tasks`: 预约任务（cron 表达式）
 - `growth_tasks`: 成长模拟任务
 - `jira_config`: Jira 集成配置（jira_url、jira_token）
 - `api_endpoints`: 外部 API 配置（base_url、auth_config JSON）
-- `auto_evaluation`: 自动评测记录
+- `auto_evaluation`: 自动评测记录（含 human_score、human_note）
+- `eval_corrections`: 人工纠正案例（eval_type、ref_id、dimension_code、user_input、ai_reply、auto_score、human_score、correction_reason），用于 few-shot prompt 注入
 - `user_facts`: 用户事实记忆
 - `chat_messages`: 聊天历史
 - `async_tasks`: 异步任务（生成/执行/评测），含 progress_json 和 result_json
@@ -171,6 +173,25 @@ cases = pipi_api.generate_test_cases(
 ### Python scoping trap
 
 如果 `import re` 写在函数内的条件分支（`if`/`for`/`try`）中，Python 会把 `re` 标记为局部变量。当条件不满足时 `re` 未赋值，后续语句 `re.match()` 直接 `UnboundLocalError`。方案：`import re` 放在函数顶部或模块顶部。
+
+### 人工纠正 (human correction)
+
+`auto_evaluation` 和 `test_results` 表均有 `human_score` INT 和 `human_note` TEXT 列。
+
+- `POST /api/eval/<message_id>/correct` — 纠正聊天评测分数
+- `POST /api/test_results/<result_id>/correct` — 纠正测试结果分数
+- 统计 API（trend / by_user）使用 `COALESCE(human_score, total_score)` 优先人工分
+- 前端评测详情弹窗有「人工纠正」按钮，人工纠正后 badge 显示 ✏️ 标记+橙色标识
+- `_save_correction()`: `human_note` 为空时不写入 `eval_corrections`；按 `ref_id` 去重（同 item 多次纠正只保留最新一条）
+
+### Few-shot 纠正注入
+
+每次评测调用前，从 `eval_corrections` 表加载最近的纠正案例注入到 LLM system prompt 末尾。
+
+- `_load_recent_corrections(eval_type, dimension_code, limit)` — 按类型（chat / test_case）和维度加载纠正记录
+- `_format_corrections_for_prompt(corrections, eval_type)` — 格式化为「历史纠正案例」prompt 片段
+- `evaluate_chat_reply()` 和 `evaluate_test_case()` 均接受 `corrections: List[Dict]` 参数（默认 None），非空时拼接到 system_prompt
+- 所有评测 worker（实时/批量/任务/重评/独立用例）均在调用评测前加载 corrections 传入
 
 ## External Integrations
 

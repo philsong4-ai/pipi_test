@@ -174,6 +174,72 @@ def _ensure_tables():
             except Exception as e:
                 print(f"[STARTUP] Could not add persona columns: {e}", flush=True)
 
+        # 检查并添加 human_score 和 human_note 列（人工纠正）
+        try:
+            execute_query(conn, "SELECT human_score FROM auto_evaluation LIMIT 1", fetch_one=True)
+        except:
+            try:
+                execute_query(conn, "ALTER TABLE auto_evaluation ADD COLUMN human_score INT")
+                execute_query(conn, "ALTER TABLE auto_evaluation ADD COLUMN human_note TEXT")
+                conn.commit()
+                print("[STARTUP] Added human_score and human_note to auto_evaluation", flush=True)
+            except Exception as e:
+                print(f"[STARTUP] Could not add human columns to auto_evaluation: {e}", flush=True)
+
+        try:
+            execute_query(conn, "SELECT human_score FROM test_results LIMIT 1", fetch_one=True)
+        except:
+            try:
+                execute_query(conn, "ALTER TABLE test_results ADD COLUMN human_score INT")
+                execute_query(conn, "ALTER TABLE test_results ADD COLUMN human_note TEXT")
+                conn.commit()
+                print("[STARTUP] Added human_score and human_note to test_results", flush=True)
+            except Exception as e:
+                print(f"[STARTUP] Could not add human columns to test_results: {e}", flush=True)
+
+        # 创建 eval_corrections 表（few-shot 纠正案例）
+        try:
+            execute_query(conn, "SELECT 1 FROM eval_corrections LIMIT 1", fetch_one=True)
+        except:
+            try:
+                if USE_MYSQL:
+                    execute_query(conn, """
+                        CREATE TABLE IF NOT EXISTS eval_corrections (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            eval_type VARCHAR(20) NOT NULL COMMENT 'chat or test_case',
+                            ref_id VARCHAR(100) NOT NULL COMMENT 'message_id or result_id',
+                            case_id VARCHAR(100) DEFAULT NULL COMMENT 'test_case case_id for dedup',
+                            dimension_code VARCHAR(50) DEFAULT NULL,
+                            user_input TEXT NOT NULL,
+                            ai_reply TEXT NOT NULL,
+                            auto_score INT NOT NULL,
+                            human_score INT NOT NULL,
+                            correction_reason TEXT DEFAULT '',
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            INDEX idx_eval_type (eval_type),
+                            INDEX idx_created_at (created_at)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """)
+                else:
+                    execute_query(conn, """
+                        CREATE TABLE IF NOT EXISTS eval_corrections (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            eval_type TEXT NOT NULL,
+                            ref_id TEXT NOT NULL,
+                            case_id TEXT DEFAULT NULL,
+                            user_input TEXT NOT NULL,
+                            ai_reply TEXT NOT NULL,
+                            auto_score INTEGER NOT NULL,
+                            human_score INTEGER NOT NULL,
+                            correction_reason TEXT DEFAULT '',
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+                conn.commit()
+                print("[STARTUP] Created eval_corrections table", flush=True)
+            except Exception as e:
+                print(f"[STARTUP] Could not create eval_corrections: {e}", flush=True)
+
         # 服务启动时恢复被中断的任务：重新拉起 worker
         conn2 = get_db_connection()
         stalled = execute_query(conn2,
@@ -1036,6 +1102,45 @@ def get_evaluation(message_id):
     return jsonify(row_to_dict(row) if row else {})
 
 
+@app.route("/api/eval/<int:message_id>/correct", methods=["POST"])
+def correct_evaluation(message_id):
+    """人工纠正聊天评测分数"""
+    data = request.get_json() or {}
+    human_score = data.get("human_score")
+    human_note = data.get("human_note", "")
+
+    if human_score is None:
+        return jsonify({"error": "human_score is required"}), 400
+    if not isinstance(human_score, int) or human_score < 1 or human_score > 10:
+        return jsonify({"error": "human_score must be an integer 1-10"}), 400
+
+    conn = get_db_connection()
+    ph = "%s" if USE_MYSQL else "?"
+
+    row = execute_query(conn,
+        f"SELECT * FROM auto_evaluation WHERE message_id = {ph}",
+        (message_id,), fetch_one=True)
+    if not row:
+        conn.close()
+        return jsonify({"error": "evaluation not found"}), 404
+
+    row = row_to_dict(row)
+
+    execute_query(conn,
+        f"UPDATE auto_evaluation SET human_score = {ph}, human_note = {ph} WHERE message_id = {ph}",
+        (human_score, human_note, message_id))
+
+    # 存入 few-shot 纠正案例
+    _save_correction(conn, eval_type="chat", ref_id=str(message_id),
+                     dimension_code=None, user_input="", ai_reply="",
+                     auto_score=int(round(row.get("total_score") or 0)),
+                     human_score=human_score, correction_reason=human_note)
+
+    conn.close()
+    return jsonify({"success": True, "message_id": message_id,
+                    "human_score": human_score, "human_note": human_note})
+
+
 @app.route("/api/eval/batch_get", methods=["GET"])
 def batch_get_evaluations():
     """批量获取多条消息的评测数据"""
@@ -1073,7 +1178,7 @@ def eval_stats_trend():
     if persona_id:
         rows = execute_query(conn, """
             SELECT DATE(created_at) as date,
-                   AVG(total_score) as total,
+                   AVG(COALESCE(human_score, total_score)) as total,
                    AVG(memory_score) as memory,
                    AVG(emotion_score) as emotion,
                    AVG(quality_score) as quality,
@@ -1088,7 +1193,7 @@ def eval_stats_trend():
     else:
         rows = execute_query(conn, """
             SELECT DATE(created_at) as date,
-                   AVG(total_score) as total,
+                   AVG(COALESCE(human_score, total_score)) as total,
                    AVG(memory_score) as memory,
                    AVG(emotion_score) as emotion,
                    AVG(quality_score) as quality,
@@ -1216,7 +1321,7 @@ def eval_stats_by_user():
 
     rows = execute_query(conn, """
         SELECT e.persona_id, p.name,
-               AVG(e.total_score) as avg_score,
+               AVG(COALESCE(e.human_score, e.total_score)) as avg_score,
                AVG(e.memory_score) as avg_memory,
                AVG(e.emotion_score) as avg_emotion,
                AVG(e.quality_score) as avg_quality,
@@ -1497,6 +1602,7 @@ def batch_evaluate():
 
 def _batch_evaluate_worker(pending_msgs):
     """后台批量评测工作线程"""
+    corrections = _load_recent_corrections(eval_type="chat", limit=20)
     for msg in pending_msgs:
         try:
             msg_id = msg['id']
@@ -1523,6 +1629,7 @@ def _batch_evaluate_worker(pending_msgs):
                 user_facts=context['user_facts'],
                 persona_data=context['persona_data'],
                 toy_persona=context.get('toy_persona'),
+                corrections=corrections,
                 **llm_config["eval_batch"]
             )
 
@@ -1740,6 +1847,53 @@ def _save_evaluation(message_id, persona_id, eval_result, context):
     conn.close()
 
 
+def _save_correction(conn, eval_type, ref_id, dimension_code, user_input, ai_reply,
+                     auto_score, human_score, correction_reason):
+    """存储人工纠正记录到 eval_corrections 表（有说明才存，按 ref_id 去重）"""
+    if not correction_reason or not correction_reason.strip():
+        return
+    ph = "%s" if USE_MYSQL else "?"
+
+    # 按 ref_id 去重：先删旧再插新
+    execute_query(conn, f"DELETE FROM eval_corrections WHERE eval_type = {ph} AND ref_id = {ph}",
+                  (eval_type, str(ref_id)))
+
+    execute_query(conn, f"""
+        INSERT INTO eval_corrections
+        (eval_type, ref_id, dimension_code, user_input, ai_reply, auto_score, human_score, correction_reason)
+        VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+    """, (eval_type, str(ref_id), dimension_code, user_input, ai_reply,
+          auto_score, human_score, correction_reason))
+
+
+def _load_recent_corrections(eval_type, dimension_code=None, limit=20):
+    """加载最近的 N 条人工纠正记录，用于 few-shot 注入"""
+    conn = get_db_connection()
+    ph = "%s" if USE_MYSQL else "?"
+
+    if eval_type == 'test_case' and dimension_code:
+        rows = execute_query(conn, f"""
+            SELECT eval_type, ref_id, dimension_code, user_input, ai_reply,
+                   auto_score, human_score, correction_reason, created_at
+            FROM eval_corrections
+            WHERE eval_type = {ph} AND dimension_code = {ph}
+            ORDER BY created_at DESC
+            LIMIT {ph}
+        """, (eval_type, dimension_code, limit), fetch_all=True)
+    else:
+        rows = execute_query(conn, f"""
+            SELECT eval_type, ref_id, dimension_code, user_input, ai_reply,
+                   auto_score, human_score, correction_reason, created_at
+            FROM eval_corrections
+            WHERE eval_type = {ph}
+            ORDER BY created_at DESC
+            LIMIT {ph}
+        """, (eval_type, limit), fetch_all=True)
+
+    conn.close()
+    return [row_to_dict(r) for r in rows] if rows else []
+
+
 def is_eval_enabled():
     """检查评测开关是否开启"""
     conn = get_db_connection()
@@ -1952,6 +2106,7 @@ def _evaluate_and_save(msg_id, persona_id, user_message, reply_text, persona_dat
         context = _build_eval_context(conn, persona_id, msg_id)
         conn.close()
 
+        corrections = _load_recent_corrections(eval_type="chat", limit=20)
         llm_config = get_llm_config()
         eval_result = pipi_api.evaluate_chat_reply(
             reply_text=reply_text,
@@ -1960,6 +2115,7 @@ def _evaluate_and_save(msg_id, persona_id, user_message, reply_text, persona_dat
             user_facts=context['user_facts'],
             persona_data=context['persona_data'],
             toy_persona=context.get('toy_persona'),
+            corrections=corrections,
             **llm_config["eval_realtime"]
         )
 
@@ -3865,11 +4021,19 @@ def _evaluate_task_worker(task_id):
         passed = 0
         failed = 0
 
+        # 预加载通用 chat 纠正案例
+        chat_corrections = _load_recent_corrections(eval_type="chat", limit=10)
+
         for result in results:
             case_code = result["case_id"]
             print(f"[TASK-EVAL] {task_id} evaluating {case_code}...", flush=True)
 
             try:
+                # 按维度加载相关的 test_case 纠正案例
+                dim_code = result.get("dimension_code", "")
+                test_corrections = _load_recent_corrections(eval_type="test_case", dimension_code=dim_code, limit=10)
+                combined_corrections = (chat_corrections or []) + (test_corrections or [])
+
                 # 构建评测用例数据
                 case_data = {
                     "case_id": case_code,
@@ -3884,7 +4048,7 @@ def _evaluate_task_worker(task_id):
                 }
 
                 llm_config = get_llm_config()
-                eval_result = pipi_api.evaluate_test_case(case_data, **llm_config["eval_case"], user_facts=user_facts)
+                eval_result = pipi_api.evaluate_test_case(case_data, corrections=combined_corrections, user_facts=user_facts, **llm_config["eval_case"])
                 score = eval_result.get("score")
                 reason = eval_result.get("deduction_reason", "")
                 status = eval_result.get("status", "evaluated")
@@ -3892,7 +4056,7 @@ def _evaluate_task_worker(task_id):
                 # 超时或无响应时重试1次
                 if score == 0 and ("超时" in str(reason) or "无响应" in str(reason) or "异常" in str(reason)):
                     print(f"[TASK-EVAL] {case_code} retry after timeout/error: {reason}", flush=True)
-                    eval_result = pipi_api.evaluate_test_case(case_data, **llm_config["eval_case"], user_facts=user_facts)
+                    eval_result = pipi_api.evaluate_test_case(case_data, corrections=combined_corrections, user_facts=user_facts, **llm_config["eval_case"])
                     score = eval_result.get("score")
                     reason = eval_result.get("deduction_reason", "")
                     status = eval_result.get("status", "evaluated")
@@ -4006,8 +4170,13 @@ def reevaluate_single_result(result_id):
             "failure_flags": result["failure_flags"],
         }
 
+        # 加载相关纠正案例
+        chat_corrections = _load_recent_corrections(eval_type="chat", limit=5)
+        test_corrections = _load_recent_corrections(eval_type="test_case", dimension_code=result.get("dimension_code", ""), limit=10)
+        combined_corrections = (chat_corrections or []) + (test_corrections or [])
+
         llm_config = get_llm_config()
-        eval_result = pipi_api.evaluate_test_case(case_data, **llm_config["eval_case"], user_facts=user_facts)
+        eval_result = pipi_api.evaluate_test_case(case_data, corrections=combined_corrections, user_facts=user_facts, **llm_config["eval_case"])
         score = eval_result.get("score")
         reason = eval_result.get("deduction_reason", "")
         status = eval_result.get("status", "evaluated")
@@ -4112,6 +4281,9 @@ def _reevaluate_failed_worker(task_id, result_ids):
     success_count = 0
     fail_count = 0
 
+    # 预加载通用 chat 纠正案例
+    chat_corrections = _load_recent_corrections(eval_type="chat", limit=10)
+
     for result_id in result_ids:
         row = execute_query(conn, """
             SELECT r.id, r.actual_output, c.case_id, c.dimension_code, c.title, c.test_point, c.input_text,
@@ -4129,6 +4301,11 @@ def _reevaluate_failed_worker(task_id, result_ids):
         print(f"[RE-EVAL BATCH] {task_id} re-evaluating {case_code}...", flush=True)
 
         try:
+            # 按维度加载 test_case 纠正案例
+            dim_code = result.get("dimension_code", "")
+            test_corrections = _load_recent_corrections(eval_type="test_case", dimension_code=dim_code, limit=10)
+            combined_corrections = (chat_corrections or []) + (test_corrections or [])
+
             case_data = {
                 "case_id": case_code,
                 "dimension_code": result["dimension_code"],
@@ -4145,7 +4322,7 @@ def _reevaluate_failed_worker(task_id, result_ids):
             }
 
             llm_config = get_llm_config()
-            eval_result = pipi_api.evaluate_test_case(case_data, **llm_config["eval_case"], user_facts=user_facts)
+            eval_result = pipi_api.evaluate_test_case(case_data, corrections=combined_corrections, user_facts=user_facts, **llm_config["eval_case"])
             score = eval_result.get("score")
             reason = eval_result.get("deduction_reason", "")
             status = eval_result.get("status", "evaluated")
@@ -4203,6 +4380,7 @@ def get_test_results():
     ph = "%s" if USE_MYSQL else "?"
 
     sql = """SELECT r.id, r.task_id, r.case_id, r.actual_output, r.executed_at, r.score, r.deduction_reason, r.status, r.eval_detail,
+                   r.human_score, r.human_note,
                     c.case_id as case_code, c.dimension_code, c.title, c.test_point, c.input_text, c.expected_output, c.evaluation_points
              FROM test_results r
              JOIN test_cases c ON r.case_id = c.id
@@ -4250,6 +4428,8 @@ def get_test_results():
             "deduction_reason": row["deduction_reason"],
             "status": row["status"],
             "eval_detail": _parse_eval_detail(row.get("eval_detail")),
+            "human_score": row.get("human_score"),
+            "human_note": row.get("human_note"),
         })
 
     return jsonify(results)
@@ -4262,6 +4442,7 @@ def get_single_test_result(result_id):
     ph = "%s" if USE_MYSQL else "?"
     row = execute_query(conn, f"""
         SELECT r.id, r.task_id, r.case_id, r.actual_output, r.executed_at, r.score, r.deduction_reason, r.status, r.eval_detail,
+               r.human_score, r.human_note,
                c.case_id as case_code, c.dimension_code, c.title, c.test_point, c.input_text, c.expected_output, c.evaluation_points
         FROM test_results r
         JOIN test_cases c ON r.case_id = c.id
@@ -4289,7 +4470,54 @@ def get_single_test_result(result_id):
         "deduction_reason": row["deduction_reason"],
         "status": row["status"],
         "eval_detail": _parse_eval_detail(row.get("eval_detail")),
+        "human_score": row.get("human_score"),
+        "human_note": row.get("human_note"),
     })
+
+
+@app.route("/api/test_results/<int:result_id>/correct", methods=["POST"])
+def correct_test_result(result_id):
+    """人工纠正测试结果分数"""
+    data = request.get_json() or {}
+    human_score = data.get("human_score")
+    human_note = data.get("human_note", "")
+
+    if human_score is None:
+        return jsonify({"error": "human_score is required"}), 400
+    if not isinstance(human_score, int) or human_score < 1 or human_score > 10:
+        return jsonify({"error": "human_score must be an integer 1-10"}), 400
+
+    conn = get_db_connection()
+    ph = "%s" if USE_MYSQL else "?"
+
+    row = execute_query(conn, f"""
+        SELECT r.id, r.score, r.actual_output, r.deduction_reason,
+               c.case_id, c.dimension_code, c.input_text
+        FROM test_results r
+        JOIN test_cases c ON r.case_id = c.id
+        WHERE r.id = {ph}
+    """, (result_id,), fetch_one=True)
+    if not row:
+        conn.close()
+        return jsonify({"error": "result not found"}), 404
+
+    row = row_to_dict(row)
+
+    execute_query(conn,
+        f"UPDATE test_results SET human_score = {ph}, human_note = {ph} WHERE id = {ph}",
+        (human_score, human_note, result_id))
+
+    _save_correction(conn, eval_type="test_case", ref_id=str(result_id),
+                     dimension_code=row.get("dimension_code", ""),
+                     user_input=row.get("input_text", ""),
+                     ai_reply=row.get("actual_output", ""),
+                     auto_score=int(row.get("score") or 0),
+                     human_score=human_score, correction_reason=human_note)
+
+    conn.close()
+    return jsonify({"success": True, "result_id": result_id,
+                    "human_score": human_score, "human_note": human_note})
+
 
 def _generate_report_summary(clusters, failed_cases, pass_rate, avg_score):
     """生成测试报告的描述性总结"""
@@ -5969,6 +6197,8 @@ def _evaluate_cases_worker(task_id):
         conn = get_db_connection()
         case_ids = task["case_ids"]
 
+        chat_corrections = _load_recent_corrections(eval_type="chat", limit=10)
+
         for case_id in case_ids:
             # 获取用例详情
             case = execute_query(conn,
@@ -5991,9 +6221,14 @@ def _evaluate_cases_worker(task_id):
                 # 加载用户事实
                 user_facts = _load_user_facts(conn, case.get("persona_id")) if case.get("persona_id") else []
 
+                # 按维度加载测试纠正案例
+                dim_code = case.get("dimension_code", "")
+                test_corrections = _load_recent_corrections(eval_type="test_case", dimension_code=dim_code, limit=10)
+                combined_corrections = (chat_corrections or []) + (test_corrections or [])
+
                 # 调用评测函数
                 llm_config = get_llm_config()
-                result = pipi_api.evaluate_test_case(case, **llm_config["eval_case"], user_facts=user_facts)
+                result = pipi_api.evaluate_test_case(case, corrections=combined_corrections, user_facts=user_facts, **llm_config["eval_case"])
 
                 score = result.get("score")
                 reason = result.get("deduction_reason", "")

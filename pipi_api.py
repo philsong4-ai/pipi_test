@@ -1053,7 +1053,37 @@ def evaluate_reply(
         return {"score": 0, "reason": f"评测异常: {str(e)}"}
 
 
-def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, model: str = None, temperature: float = None, max_tokens: int = None, timeout: int = 60) -> Dict:
+def _format_corrections_for_prompt(corrections, eval_type="chat"):
+    """将人工纠正记录格式化为 few-shot prompt 片段"""
+    if not corrections:
+        return ""
+
+    lines = ["", "【历史纠正案例】以下是人工纠正过的评分案例，请参考这些案例的评分标准来校准你的评分尺度。", ""]
+
+    for i, c in enumerate(corrections, 1):
+        auto_score = c.get("auto_score", 0)
+        human_score = c.get("human_score", 0)
+        reason = c.get("correction_reason", "")
+
+        if eval_type == "chat":
+            lines.append(f"案例{i}: 自动评分{auto_score}分 → 人工纠正为{human_score}分")
+            if reason:
+                lines.append(f"  纠正原因: {reason}")
+        else:
+            lines.append(f"案例{i}: 自动评分{auto_score}分 → 人工纠正为{human_score}分")
+            if reason:
+                lines.append(f"  纠正原因: {reason}")
+            if c.get("user_input"):
+                lines.append(f"  用户输入: {c['user_input'][:200]}")
+            if c.get("ai_reply"):
+                lines.append(f"  AI回复: {c['ai_reply'][:200]}")
+
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, corrections: List[Dict] = None, model: str = None, temperature: float = None, max_tokens: int = None, timeout: int = 60) -> Dict:
     """
     评测单个测试用例，使用用例自带的评分参考。
 
@@ -1136,6 +1166,11 @@ def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, model: st
 - 重要：AI引用已知用户信息中的事实不算幻觉，只有捏造新事实才算幻觉。expected_output中引用的用户信息如果不在已知用户信息列表中，视为虚构事实，扣分并标注
 - 返回JSON格式: {{"score": 分数, "deduction_reason": "扣分原因或评价", "eval_points_check": {{"评估点1": true/false, ...}}, "failure_flags_triggered": ["触发的扣分点"]}}"""
 
+    # Few-shot 纠正案例
+    corrections_text = _format_corrections_for_prompt(corrections, eval_type="test_case") if corrections else ""
+    if corrections_text:
+        system_prompt += "\n" + corrections_text
+
     user_prompt = f"""【用户输入】
 {input_text}
 
@@ -1202,6 +1237,7 @@ def evaluate_chat_reply(
     user_facts: List[Dict] = None,
     persona_data: Dict = None,
     toy_persona: Dict = None,
+    corrections: List[Dict] = None,
     model: str = None,
     temperature: float = None,
     max_tokens: int = None,
@@ -1279,7 +1315,12 @@ def evaluate_chat_reply(
         facts=facts_text,
         persona=persona_text or "未提供"
     )
-    
+
+    # Few-shot 纠正案例
+    corrections_text = _format_corrections_for_prompt(corrections, eval_type="chat") if corrections else ""
+    if corrections_text:
+        system_prompt += "\n" + corrections_text
+
     user_prompt = """【近期对话】
 {history}
 
