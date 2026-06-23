@@ -214,7 +214,7 @@ def _ensure_tables():
                             ai_reply TEXT NOT NULL,
                             auto_score INT NOT NULL,
                             human_score INT NOT NULL,
-                            correction_reason TEXT DEFAULT '',
+                            correction_reason TEXT,
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                             INDEX idx_eval_type (eval_type),
                             INDEX idx_created_at (created_at)
@@ -231,7 +231,7 @@ def _ensure_tables():
                             ai_reply TEXT NOT NULL,
                             auto_score INTEGER NOT NULL,
                             human_score INTEGER NOT NULL,
-                            correction_reason TEXT DEFAULT '',
+                            correction_reason TEXT,
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                         )
                     """)
