@@ -256,6 +256,41 @@ def _ensure_tables():
             except Exception as e:
                 print(f"[STARTUP] Could not create eval_corrections: {e}", flush=True)
 
+        # 创建 dimension_retry_counts 表（AUTO REGEN 跨 worker 持久化重试计数）
+        try:
+            execute_query(conn, "SELECT 1 FROM dimension_retry_counts LIMIT 1", fetch_one=True)
+        except:
+            try:
+                if USE_MYSQL:
+                    execute_query(conn, """
+                        CREATE TABLE IF NOT EXISTS dimension_retry_counts (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            persona_id VARCHAR(50) NOT NULL,
+                            dimension_code VARCHAR(10) NOT NULL,
+                            retry_count INT NOT NULL DEFAULT 0,
+                            task_id VARCHAR(50) DEFAULT NULL,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            UNIQUE KEY uk_persona_dim (persona_id, dimension_code),
+                            INDEX idx_persona (persona_id)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """)
+                else:
+                    execute_query(conn, """
+                        CREATE TABLE IF NOT EXISTS dimension_retry_counts (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            persona_id TEXT NOT NULL,
+                            dimension_code TEXT NOT NULL,
+                            retry_count INTEGER NOT NULL DEFAULT 0,
+                            task_id TEXT,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            UNIQUE (persona_id, dimension_code)
+                        )
+                    """)
+                conn.commit()
+                print("[STARTUP] Created dimension_retry_counts table", flush=True)
+            except Exception as e:
+                print(f"[STARTUP] Could not create dimension_retry_counts: {e}", flush=True)
+
         # 服务启动时恢复被中断的任务：重新拉起 worker
         conn2 = get_db_connection()
         stalled = execute_query(conn2,
@@ -5658,6 +5693,10 @@ def _generate_cases_worker(task_id):
         return
 
     try:
+        # 任务开始时清空该用户的所有维度重试计数（上一轮任务残留）
+        if task.get("persona_id"):
+            _reset_retry_count(task["persona_id"])
+
         conn = get_db_connection()
 
         # 获取测试维度
@@ -7496,7 +7535,9 @@ def _wait_for_quality_review(persona_id, max_wait_seconds=1800, check_interval=1
             # 用例总数下降，说明有维度正在删除旧用例准备重生成，继续等待
             print(f"[FULL FLOW] Total decreased {prev_total} -> {total}, waiting for regeneration...", flush=True)
         elif pending == 0 and failed == 0 and (total >= prev_total or prev_total == 0):
-            # 全部审核完成且总数稳定（不再减少），返回通过的用例
+            # 全部审核完成且总数稳定（不再减少），返回通过的用例（needs_manual_review 不阻塞，因其不再自动变化）
+            if needs_manual > 0:
+                print(f"[FULL FLOW] {needs_manual} cases in needs_manual_review, returning passed cases anyway", flush=True)
             passed_rows = execute_query(conn,
                 "SELECT id FROM test_cases WHERE persona_id = %s AND quality_status IN ('passed', 'warning')" if USE_MYSQL else
                 "SELECT id FROM test_cases WHERE persona_id = ? AND quality_status IN ('passed', 'warning')",
@@ -7525,8 +7566,94 @@ def _wait_for_quality_review(persona_id, max_wait_seconds=1800, check_interval=1
     return [r["id"] if isinstance(r, dict) else r[0] for r in passed_rows] if passed_rows else []
 
 
-# 记录每个 (persona_id, dimension_code) 的重试次数
+# 记录每个 (persona_id, dimension_code) 的重试次数（已持久化到 DB，保留旧变量做兼容）
 _dimension_retry_count = {}
+
+# AUTO REGEN 并发互斥锁：{f"{persona_id}:{dim_code}": threading.Lock}
+import threading as _threading_mod
+_regen_locks = {}
+_regen_locks_guard = _threading_mod.Lock()
+
+
+def _get_regen_lock(key):
+    """获取（或创建）指定 key 的重生成互斥锁"""
+    lock = _regen_locks.get(key)
+    if lock is not None:
+        return lock
+    with _regen_locks_guard:
+        lock = _regen_locks.get(key)
+        if lock is None:
+            lock = _threading_mod.Lock()
+            _regen_locks[key] = lock
+        return lock
+
+
+def _get_retry_count(persona_id, dim_code):
+    """从 DB 查询 (persona_id, dim_code) 的当前重试次数"""
+    conn = get_db_connection()
+    try:
+        row = execute_query(conn,
+            "SELECT retry_count FROM dimension_retry_counts WHERE persona_id = %s AND dimension_code = %s" if USE_MYSQL else
+            "SELECT retry_count FROM dimension_retry_counts WHERE persona_id = ? AND dimension_code = ?",
+            (persona_id, dim_code), fetch_one=True)
+        return (row["retry_count"] if isinstance(row, dict) else row[0]) if row else 0
+    except Exception as e:
+        print(f"[RETRY COUNT] get error: {e}", flush=True)
+        return 0
+    finally:
+        conn.close()
+
+
+def _incr_retry_count(persona_id, dim_code, task_id=None):
+    """DB 原子递增 (persona_id, dim_code) 的重试次数，返回递增后的值"""
+    conn = get_db_connection()
+    try:
+        if USE_MYSQL:
+            execute_query(conn,
+                """INSERT INTO dimension_retry_counts (persona_id, dimension_code, retry_count, task_id)
+                   VALUES (%s, %s, 1, %s)
+                   ON DUPLICATE KEY UPDATE retry_count = retry_count + 1, task_id = VALUES(task_id)""",
+                (persona_id, dim_code, task_id))
+        else:
+            # SQLite: INSERT OR REPLACE 需要先查再写
+            row = execute_query(conn,
+                "SELECT retry_count FROM dimension_retry_counts WHERE persona_id = ? AND dimension_code = ?",
+                (persona_id, dim_code), fetch_one=True)
+            new_count = (row["retry_count"] if isinstance(row, dict) else row[0]) + 1 if row else 1
+            execute_query(conn,
+                """INSERT INTO dimension_retry_counts (persona_id, dimension_code, retry_count, task_id)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(persona_id, dimension_code) DO UPDATE SET retry_count = ?, task_id = ?""",
+                (persona_id, dim_code, new_count, task_id, new_count, task_id))
+        conn.commit()
+        return _get_retry_count(persona_id, dim_code)
+    except Exception as e:
+        print(f"[RETRY COUNT] incr error: {e}", flush=True)
+        return 0
+    finally:
+        conn.close()
+
+
+def _reset_retry_count(persona_id, task_id=None):
+    """任务开始时清零指定 persona 的所有维度重试计数"""
+    conn = get_db_connection()
+    try:
+        if task_id:
+            execute_query(conn,
+                "DELETE FROM dimension_retry_counts WHERE persona_id = %s AND task_id = %s" if USE_MYSQL else
+                "DELETE FROM dimension_retry_counts WHERE persona_id = ? AND task_id = ?",
+                (persona_id, task_id))
+        else:
+            execute_query(conn,
+                "DELETE FROM dimension_retry_counts WHERE persona_id = %s" if USE_MYSQL else
+                "DELETE FROM dimension_retry_counts WHERE persona_id = ?",
+                (persona_id,))
+        conn.commit()
+    except Exception as e:
+        print(f"[RETRY COUNT] reset error: {e}", flush=True)
+    finally:
+        conn.close()
+
 
 def async_review_cases(case_ids, auto_regenerate=True):
     """异步 LLM 复核用例质量，不合格自动重生成（最多2次）"""
@@ -7607,8 +7734,8 @@ def async_review_cases(case_ids, auto_regenerate=True):
     return t
 
 
-def _auto_regenerate_failed_cases(reviewed_cases):
-    """自动重生成不合格用例（整个维度全部重生成，最多重试2次）"""
+def _auto_regenerate_failed_cases(reviewed_cases, regen_depth=0):
+    """自动重生成不合格用例（整个维度全部重生成，递归深度+DB计数双保险限制）"""
     # 筛选不合格用例（failed 或 warning 状态）
     failed_cases = [c for c in reviewed_cases if c["status"] in ("failed", "warning")]
     if not failed_cases:
@@ -7623,11 +7750,11 @@ def _auto_regenerate_failed_cases(reviewed_cases):
 
     for (persona_id, dim_code), cases in grouped.items():
         retry_key = f"{persona_id}:{dim_code}"
-        current_retry = _dimension_retry_count.get(retry_key, 0)
 
-        if current_retry >= 2:
-            # 超过重试次数，标记该维度所有用例为需人工处理
-            print(f"[AUTO REGEN] {retry_key} exceeded max retries (2), marking as needs_manual_review", flush=True)
+        # 双保险：递归深度 + DB 持久化计数
+        db_retry_count = _get_retry_count(persona_id, dim_code)
+        if regen_depth >= 2 or db_retry_count >= 4:
+            print(f"[AUTO REGEN] {retry_key} exceeded limit (depth={regen_depth}, db_count={db_retry_count}), marking as needs_manual_review", flush=True)
             conn = get_db_connection()
             execute_query(conn,
                 "UPDATE test_cases SET quality_status = %s WHERE persona_id = %s AND dimension_code = %s" if USE_MYSQL else
@@ -7637,13 +7764,13 @@ def _auto_regenerate_failed_cases(reviewed_cases):
             conn.close()
             continue
 
-        # 收集问题作为反馈（来自本次审核中不合格的用例）
+        # 收集问题作为反馈（来自本次审核中不合格的用例，完整传递不再截断）
         issues_feedback = []
         for c in cases:
             if c["issues"]:
-                issues_feedback.append(f"- {c['case_id']}: {'; '.join(c['issues'][:2])}")
+                issues_feedback.append(f"- {c['case_id']}: {'; '.join(c['issues'])}")
 
-        # 统计该维度现有用例总数，然后全部删除，整维度重新生成
+        # 统计该维度现有用例总数（用于重生成的 count 参数）
         conn = get_db_connection()
         count_row = execute_query(conn,
             "SELECT COUNT(*) as cnt FROM test_cases WHERE persona_id = %s AND dimension_code = %s" if USE_MYSQL else
@@ -7651,14 +7778,18 @@ def _auto_regenerate_failed_cases(reviewed_cases):
             (persona_id, dim_code), fetch_one=True)
         total_count = count_row["cnt"] if count_row else 0
 
-        print(f"[AUTO REGEN] {retry_key} retry {current_retry + 1}/2, regenerating entire dimension ({total_count} cases, {len(cases)} had issues)", flush=True)
+        # 并发安全：如果该维度已被其他线程删空（并发场景），跳过
+        if total_count == 0:
+            print(f"[AUTO REGEN] {retry_key} has 0 cases (maybe concurrent delete), skip", flush=True)
+            conn.close()
+            continue
 
-        # 删除该维度所有用例
-        execute_query(conn,
-            "DELETE FROM test_cases WHERE persona_id = %s AND dimension_code = %s" if USE_MYSQL else
-            "DELETE FROM test_cases WHERE persona_id = ? AND dimension_code = ?",
-            (persona_id, dim_code))
-        conn.commit()
+        # 查出要删除的旧用例 ID（先重生后删，P1-5 原子化）
+        old_id_rows = execute_query(conn,
+            "SELECT id FROM test_cases WHERE persona_id = %s AND dimension_code = %s" if USE_MYSQL else
+            "SELECT id FROM test_cases WHERE persona_id = ? AND dimension_code = ?",
+            (persona_id, dim_code), fetch_all=True)
+        old_case_ids = [r["id"] if isinstance(r, dict) else r[0] for r in old_id_rows] if old_id_rows else []
 
         # 获取维度信息
         dim_row = execute_query(conn,
@@ -7675,7 +7806,7 @@ def _auto_regenerate_failed_cases(reviewed_cases):
         if fact_rows:
             user_facts = [row_to_dict(r) for r in fact_rows]
 
-        # 获取玩偶人设（从 toy_personas 表）
+        # 获取玩偶人设（从 toy_persona 表）
         toy_persona = None
         toy_row = execute_query(conn,
             "SELECT * FROM toy_persona LIMIT 1",  # 当前只有一个玩偶
@@ -7693,10 +7824,11 @@ def _auto_regenerate_failed_cases(reviewed_cases):
 
         conn.close()
 
-        # 增加重试计数
-        _dimension_retry_count[retry_key] = current_retry + 1
+        # 递增 DB 计数（在调重生成前递增，避免并发漏计）
+        new_db_count = _incr_retry_count(persona_id, dim_code)
+        print(f"[AUTO REGEN] {retry_key} depth={regen_depth} db_count={new_db_count}, regenerating ({total_count} cases, {len(cases)} had issues, {len(issues_feedback)} feedback items)", flush=True)
 
-        # 重新生成整维度用例
+        # 重新生成整维度用例（P1-5: 先重生后删，P1-4: 进程内锁防并发）
         _regenerate_dimension_with_feedback(
             persona_id=persona_id,
             dimension=dim_info,
@@ -7704,15 +7836,22 @@ def _auto_regenerate_failed_cases(reviewed_cases):
             persona=persona,
             user_facts=user_facts,
             count=total_count,
-            issues_feedback=issues_feedback
+            issues_feedback=issues_feedback,
+            old_case_ids=old_case_ids,
+            regen_depth=regen_depth
         )
 
 
-def _regenerate_dimension_with_feedback(persona_id, dimension, toy_persona, persona, user_facts, count, issues_feedback):
-    """带反馈重新生成维度用例"""
+def _regenerate_dimension_with_feedback(persona_id, dimension, toy_persona, persona, user_facts, count, issues_feedback, old_case_ids=None, regen_depth=0):
+    """带反馈重新生成维度用例（P1-4 进程内锁防并发，P1-5 先重生后删原子化，P1-6 递归深度传递）"""
     import threading
 
     def _regen_worker():
+        retry_key = f"{persona_id}:{dimension.get('dimension_code', '')}"
+        lock = _get_regen_lock(retry_key)
+        if not lock.acquire(blocking=False):
+            print(f"[AUTO REGEN] {retry_key} already in progress, skip", flush=True)
+            return
         try:
             # 调用 LLM 生成（带问题反馈）
             llm_config = get_llm_config()
@@ -7727,36 +7866,51 @@ def _regenerate_dimension_with_feedback(persona_id, dimension, toy_persona, pers
             )
 
             if not new_cases:
-                print(f"[AUTO REGEN] {persona_id} {dimension.get('dimension_code')} LLM returned empty", flush=True)
+                print(f"[AUTO REGEN] {retry_key} depth={regen_depth} LLM returned empty, keep old cases", flush=True)
                 return
 
-            # 保存新用例
+            # 保存新用例 + 删旧用例（同事务，P1-5 原子化）
             conn = get_db_connection()
             new_case_ids = []
             dim_code = dimension.get("dimension_code", "")
 
-            for case in new_cases:
-                base_case_id = case.get("case_id", f"{dim_code}-01")
-                final_case_id = _get_unique_case_id(conn, base_case_id)
-                case["case_id"] = final_case_id
+            try:
+                for case in new_cases:
+                    base_case_id = case.get("case_id", f"{dim_code}-01")
+                    final_case_id = _get_unique_case_id(conn, base_case_id)
+                    case["case_id"] = final_case_id
 
-                new_id = _save_test_case(conn, case, persona_id=persona_id, device_id=persona_id, dimension_code=dim_code)
-                if new_id:
-                    new_case_ids.append(new_id)
+                    new_id = _save_test_case(conn, case, persona_id=persona_id, device_id=persona_id, dimension_code=dim_code)
+                    if new_id:
+                        new_case_ids.append(new_id)
 
-            conn.commit()
-            conn.close()
+                # 新用例保存成功后，删旧用例
+                if old_case_ids:
+                    placeholders = ",".join(["%s"] * len(old_case_ids)) if USE_MYSQL else ",".join(["?"] * len(old_case_ids))
+                    execute_query(conn,
+                        f"DELETE FROM test_cases WHERE id IN ({placeholders})",
+                        tuple(old_case_ids))
 
-            print(f"[AUTO REGEN] {persona_id} {dim_code} regenerated {len(new_case_ids)} cases, triggering review", flush=True)
+                conn.commit()
+            except Exception as db_err:
+                conn.rollback()
+                print(f"[AUTO REGEN] {retry_key} DB error, old cases kept: {db_err}", flush=True)
+                raise
+            finally:
+                conn.close()
 
-            # 触发新用例的审核（继续自动重生成流程）
+            print(f"[AUTO REGEN] {retry_key} depth={regen_depth} regenerated {len(new_case_ids)} cases (deleted {len(old_case_ids or [])} old), triggering review", flush=True)
+
+            # 触发新用例的审核（递归深度+1，P1-6 限制无限递归）
             if new_case_ids:
-                async_review_cases(new_case_ids, auto_regenerate=True)
+                async_review_cases(new_case_ids, auto_regenerate=True, regen_depth=regen_depth + 1)
 
         except Exception as e:
-            print(f"[AUTO REGEN ERROR] {e}", flush=True)
+            print(f"[AUTO REGEN ERROR] {retry_key} depth={regen_depth}: {e}", flush=True)
             import traceback
             traceback.print_exc()
+        finally:
+            lock.release()
 
     t = threading.Thread(target=_regen_worker, daemon=True)
     t.start()
