@@ -57,21 +57,37 @@ def get_db_connection():
         return conn
 
 def execute_query(conn, sql, params=None, fetch_one=False, fetch_all=False):
-    """统一执行查询，兼容 MySQL 和 SQLite"""
+    """统一执行查询，兼容 MySQL 和 SQLite，含断连重试"""
     params = params or ()
     if USE_MYSQL:
-        # MySQL: 使用 %s 占位符
+        import pymysql
         sql = sql.replace("?", "%s")
-        # MySQL 不支持 PRAGMA
         if "PRAGMA" in sql:
             return []
-        cursor = conn.cursor()
-        cursor.execute(sql, params)
-        if fetch_one:
-            return cursor.fetchone()
-        elif fetch_all:
-            return cursor.fetchall()
-        return cursor
+        last_err = None
+        for attempt in range(3):
+            try:
+                cursor = conn.cursor()
+                cursor.execute(sql, params)
+                if fetch_one:
+                    return cursor.fetchone()
+                elif fetch_all:
+                    return cursor.fetchall()
+                return cursor
+            except (pymysql.err.InterfaceError, pymysql.err.OperationalError) as e:
+                last_err = e
+                if attempt < 2:
+                    import time
+                    time.sleep(1)
+                    try:
+                        conn.ping(reconnect=True)
+                    except Exception:
+                        pass
+                    continue
+                raise
+        if last_err:
+            raise last_err
+        return None
     else:
         # SQLite: 使用 ? 占位符
         if fetch_one:
