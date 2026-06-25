@@ -464,6 +464,14 @@ body{background:#f5f5f7;color:#1d1d1f}
     <div id="llm-config-list" style="font-size:13px">
       <div style="color:#aeaeb2;text-align:center;padding:40px">加载中...</div>
     </div>
+    <datalist id="common-models">
+      <option value="qwen3.6-plus">
+      <option value="qwen3.7-max">
+      <option value="doubao-seed-2-0-pro">
+      <option value="deepseek-v4-pro">
+      <option value="gpt-4o">
+      <option value="claude-sonnet-4">
+    </datalist>
   </div>
 </div>
 
@@ -3628,6 +3636,9 @@ var LLM_CONFIG_LABELS = {
   "case_review": "用例复核"
 };
 
+var EVAL_JUDGE_KEYS = ['eval_batch', 'eval_case', 'eval_realtime'];
+var COMMON_MODELS = ['qwen3.6-plus', 'qwen3.7-max', 'doubao-seed-2-0-pro', 'deepseek-v4-pro', 'gpt-4o', 'claude-sonnet-4'];
+
 function loadLlmConfig() {
   fetch('/api/llm/config')
     .then(r => r.json())
@@ -3646,8 +3657,87 @@ function loadLlmConfig() {
         h += '</tr>';
       }
       h += '</table>';
+
+      // 多评测员配置区
+      h += '<div style="margin-top:20px;padding:12px;background:#fafafa;border-radius:8px">';
+      h += '<div style="font-weight:600;margin-bottom:8px;color:#1d1d1f">多评测员集成（3 个不同模型取均值，降低单模型偏差）</div>';
+      h += '<div style="font-size:11px;color:#86868b;margin-bottom:12px">关闭「启用」复选框则只跑第一个 judge，等同单裁判。Judge 列表为空时也等同单裁判。</div>';
+      EVAL_JUDGE_KEYS.forEach(function(key) {
+        var entry = config[key] || {};
+        var judges = Array.isArray(entry.judges) ? entry.judges : [];
+        var enabled = judges && judges.length >= 2;
+        h += '<div style="margin-bottom:12px;padding:8px;background:#fff;border:1px solid #e8e8ed;border-radius:6px">';
+        h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">';
+        h += '<label style="font-weight:500;font-size:12px"><input type="checkbox" id="llm-jen-' + key + '" ' + (enabled ? 'checked' : '') + '> ' + LLM_CONFIG_LABELS[key] + ' — 启用多评测员</label>';
+        h += '<button onclick="addJudgeRow(\'' + key + '\')" style="padding:2px 10px;background:#0071e3;color:#fff;border:none;border-radius:4px;font-size:11px;cursor:pointer">+ 添加评测员</button>';
+        h += '</div>';
+        h += '<div id="llm-judges-' + key + '" style="font-size:11px"></div>';
+        h += '</div>';
+      });
+      h += '</div>';
+
       list.innerHTML = h;
+      // 渲染初始 judge 行
+      EVAL_JUDGE_KEYS.forEach(function(key) {
+        var entry = config[key] || {};
+        var judges = Array.isArray(entry.judges) ? entry.judges : [];
+        var container = document.getElementById('llm-judges-' + key);
+        if (!container) return;
+        container.innerHTML = '';
+        if (judges.length === 0) {
+          // 默认展示 3 行（DEFAULT 配置），让用户能看到推荐值
+          judges = [
+            {model: 'qwen3.6-plus', temperature: 0},
+            {model: 'deepseek-v4-pro', temperature: 0},
+            {model: 'doubao-seed-2-0-pro', temperature: 0}
+          ];
+        }
+        judges.forEach(function(j, idx) {
+          container.appendChild(makeJudgeRow(key, j, idx));
+        });
+      });
     });
+}
+
+function makeJudgeRow(key, judge, idx) {
+  var row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:6px;align-items:center;margin:4px 0;padding:4px;background:#fafafa;border-radius:4px';
+  row.dataset.key = key;
+  var label = document.createElement('span');
+  label.textContent = 'Judge ' + (idx + 1);
+  label.style.cssText = 'font-size:11px;color:#86868b;width:60px';
+  row.appendChild(label);
+
+  var modelInput = document.createElement('input');
+  modelInput.type = 'text';
+  modelInput.list = 'common-models';
+  modelInput.value = judge.model || '';
+  modelInput.placeholder = 'model';
+  modelInput.style.cssText = 'flex:1;padding:3px 6px;border:1px solid #d2d2d7;border-radius:3px;font-family:monospace;font-size:11px';
+  row.appendChild(modelInput);
+
+  var tempInput = document.createElement('input');
+  tempInput.type = 'number';
+  tempInput.step = '0.1';
+  tempInput.value = (judge.temperature != null ? judge.temperature : 0);
+  tempInput.placeholder = '0';
+  tempInput.style.cssText = 'width:60px;padding:3px 6px;border:1px solid #d2d2d7;border-radius:3px;font-family:monospace;font-size:11px';
+  row.appendChild(tempInput);
+
+  var delBtn = document.createElement('button');
+  delBtn.textContent = '×';
+  delBtn.style.cssText = 'padding:2px 8px;background:#ff3b30;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:11px';
+  delBtn.onclick = function() { row.parentNode.removeChild(row); };
+  row.appendChild(delBtn);
+
+  return row;
+}
+
+function addJudgeRow(key) {
+  var container = document.getElementById('llm-judges-' + key);
+  if (!container) return;
+  var idx = container.children.length;
+  container.appendChild(makeJudgeRow(key, {model: '', temperature: 0}, idx));
 }
 
 function saveLlmConfig() {
@@ -3660,6 +3750,33 @@ function saveLlmConfig() {
       timeout: (function(v) { var n = parseInt(v); return isNaN(n) ? 60 : n; })((document.getElementById('llm-tmo-' + key) || {}).value)
     };
   }
+  // 收集 judges 配置
+  EVAL_JUDGE_KEYS.forEach(function(key) {
+    var enabledChk = document.getElementById('llm-jen-' + key);
+    var container = document.getElementById('llm-judges-' + key);
+    if (!enabledChk || !container) return;
+    var judges = [];
+    if (enabledChk.checked) {
+      for (var i = 0; i < container.children.length; i++) {
+        var row = container.children[i];
+        var inputs = row.querySelectorAll('input');
+        if (inputs.length >= 2) {
+          var m = inputs[0].value.trim();
+          var t = parseFloat(inputs[1].value);
+          if (m) {
+            judges.push({model: m, temperature: isNaN(t) ? 0 : t});
+          }
+        }
+      }
+      if (judges.length < 2) {
+        alert(LLM_CONFIG_LABELS[key] + '：启用多评测员至少需要 2 个 judge');
+        return;
+      }
+    } else {
+      judges = [];  // 关闭 = 空数组
+    }
+    data[key].judges = judges;
+  });
   fetch('/api/llm/config', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -4483,6 +4600,39 @@ function _showEvalDetailV2(c, result) {
       });
       content += '</div>';
     }
+    if (ed.memory_objective_check && ed.memory_objective_check.total_count > 0) {
+      var mc = ed.memory_objective_check;
+      content += '<p style="margin-top:12px"><b>客观记忆检查:</b> <span style="color:' + (mc.mentioned_count === mc.total_count ? '#2e7d32' : '#c62828') + '">' + mc.mentioned_count + '/' + mc.total_count + '</span></p>';
+      if (mc.missed_facts && mc.missed_facts.length > 0) {
+        content += '<div style="background:#fce4ec;padding:6px;border-radius:4px;font-size:11px">';
+        content += '<div style="color:#880e4f;margin-bottom:4px">未提及：</div>';
+        mc.missed_facts.forEach(function(m) {
+          content += '<div style="margin:2px 0">' + (m.category||'') + '.' + (m.fact_key||'') + (m.entity_name ? '[' + m.entity_name + ']' : '') + ' = ' + escapeHtml(m.fact_value||'') + '</div>';
+        });
+        content += '</div>';
+      }
+    }
+    if (ed.deduction_breakdown && ed.deduction_breakdown.length > 0) {
+      content += '<p style="margin-top:12px"><b>链式扣分明细:</b></p>';
+      content += '<div style="background:#fafafa;padding:8px;border-radius:4px;font-size:12px">';
+      var totalDeduct = 0;
+      ed.deduction_breakdown.forEach(function(b) {
+        content += '<div style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid #eee"><span>' + escapeHtml(b.item||'') + '</span><span style="color:#c62828">-' + b.points + '</span></div>';
+        totalDeduct += parseFloat(b.points || 0);
+      });
+      content += '<div style="display:flex;justify-content:space-between;padding:4px 0;font-weight:600"><span>最终分数</span><span>' + (10 - totalDeduct).toFixed(0) + '/10</span></div>';
+      content += '</div>';
+    }
+    if (ed.judges_detail && ed.judges_detail.length > 0) {
+      content += '<p style="margin-top:12px"><b>多评测员明细</b> <span style="font-size:11px;color:#86868b">std=' + (ed.judges_std || 0) + '</span></p>';
+      content += '<div style="background:#f5f5f7;padding:8px;border-radius:4px;font-size:12px">';
+      content += '<table style="width:100%;border-collapse:collapse"><thead><tr style="border-bottom:2px solid #d2d2d7"><th style="text-align:left;padding:4px">模型</th><th style="text-align:center;padding:4px">温度</th><th style="text-align:center;padding:4px">分数</th><th style="text-align:left;padding:4px">标签</th></tr></thead><tbody>';
+      ed.judges_detail.forEach(function(j) {
+        content += '<tr style="border-bottom:1px solid #eee"><td style="padding:4px">' + escapeHtml(j.model||'-') + '</td><td style="text-align:center;padding:4px">' + (j.temperature !== undefined ? j.temperature : '-') + '</td><td style="text-align:center;padding:4px;font-weight:600">' + (j.score !== undefined ? j.score : '-') + '</td><td style="padding:4px;font-size:11px">' + (j.deduction_tags||[]).join('、') + '</td></tr>';
+      });
+      content += '</tbody></table>';
+      content += '</div>';
+    }
   }
   content += '</div>';
 
@@ -5174,6 +5324,39 @@ function _showResultDetail(c, result) {
       ed.deduction_tags.forEach(function(t) {
         content += '<span style="display:inline-block;margin:2px 4px;padding:2px 8px;background:#ffe082;border-radius:10px;color:#5d4037;font-size:11px">' + t + '</span>';
       });
+      content += '</div>';
+    }
+    if (ed.memory_objective_check && ed.memory_objective_check.total_count > 0) {
+      var mc = ed.memory_objective_check;
+      content += '<p style="margin-top:12px"><b>客观记忆检查:</b> <span style="color:' + (mc.mentioned_count === mc.total_count ? '#2e7d32' : '#c62828') + '">' + mc.mentioned_count + '/' + mc.total_count + '</span></p>';
+      if (mc.missed_facts && mc.missed_facts.length > 0) {
+        content += '<div style="background:#fce4ec;padding:6px;border-radius:4px;font-size:11px">';
+        content += '<div style="color:#880e4f;margin-bottom:4px">未提及：</div>';
+        mc.missed_facts.forEach(function(m) {
+          content += '<div style="margin:2px 0">' + (m.category||'') + '.' + (m.fact_key||'') + (m.entity_name ? '[' + m.entity_name + ']' : '') + ' = ' + escapeHtml(m.fact_value||'') + '</div>';
+        });
+        content += '</div>';
+      }
+    }
+    if (ed.deduction_breakdown && ed.deduction_breakdown.length > 0) {
+      content += '<p style="margin-top:12px"><b>链式扣分明细:</b></p>';
+      content += '<div style="background:#fafafa;padding:8px;border-radius:4px;font-size:12px">';
+      var totalDeduct = 0;
+      ed.deduction_breakdown.forEach(function(b) {
+        content += '<div style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid #eee"><span>' + escapeHtml(b.item||'') + '</span><span style="color:#c62828">-' + b.points + '</span></div>';
+        totalDeduct += parseFloat(b.points || 0);
+      });
+      content += '<div style="display:flex;justify-content:space-between;padding:4px 0;font-weight:600"><span>最终分数</span><span>' + (10 - totalDeduct).toFixed(0) + '/10</span></div>';
+      content += '</div>';
+    }
+    if (ed.judges_detail && ed.judges_detail.length > 0) {
+      content += '<p style="margin-top:12px"><b>多评测员明细</b> <span style="font-size:11px;color:#86868b">std=' + (ed.judges_std || 0) + '</span></p>';
+      content += '<div style="background:#f5f5f7;padding:8px;border-radius:4px;font-size:12px">';
+      content += '<table style="width:100%;border-collapse:collapse"><thead><tr style="border-bottom:2px solid #d2d2d7"><th style="text-align:left;padding:4px">模型</th><th style="text-align:center;padding:4px">温度</th><th style="text-align:center;padding:4px">分数</th><th style="text-align:left;padding:4px">标签</th></tr></thead><tbody>';
+      ed.judges_detail.forEach(function(j) {
+        content += '<tr style="border-bottom:1px solid #eee"><td style="padding:4px">' + escapeHtml(j.model||'-') + '</td><td style="text-align:center;padding:4px">' + (j.temperature !== undefined ? j.temperature : '-') + '</td><td style="text-align:center;padding:4px;font-weight:600">' + (j.score !== undefined ? j.score : '-') + '</td><td style="padding:4px;font-size:11px">' + (j.deduction_tags||[]).join('、') + '</td></tr>';
+      });
+      content += '</tbody></table>';
       content += '</div>';
     }
   }

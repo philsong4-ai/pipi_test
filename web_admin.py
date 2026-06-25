@@ -213,6 +213,17 @@ def _ensure_tables():
             except Exception as e:
                 print(f"[STARTUP] Could not add deduction_tags to auto_evaluation: {e}", flush=True)
 
+        # 检查并添加 judges_detail 列（多评测员集成结果 JSON）
+        try:
+            execute_query(conn, "SELECT judges_detail FROM auto_evaluation LIMIT 1", fetch_one=True)
+        except:
+            try:
+                execute_query(conn, "ALTER TABLE auto_evaluation ADD COLUMN judges_detail TEXT")
+                conn.commit()
+                print("[STARTUP] Added judges_detail to auto_evaluation", flush=True)
+            except Exception as e:
+                print(f"[STARTUP] Could not add judges_detail to auto_evaluation: {e}", flush=True)
+
         try:
             execute_query(conn, "SELECT human_score FROM test_results LIMIT 1", fetch_one=True)
         except:
@@ -1079,9 +1090,18 @@ DEFAULT_LLM_CONFIG = {
     "case_gen":       {"model": "qwen3.6-plus",  "temperature": 0.3, "max_tokens": 8192, "timeout": 180},
     "case_regenerate": {"model": "qwen3.6-plus",  "temperature": 0.3, "max_tokens": 8192, "timeout": 180},
     "fact_extract":   {"model": "qwen3.6-plus",  "temperature": 0.3, "max_tokens": 8192, "timeout": 60},
-    "eval_batch":     {"model": "qwen3.6-plus",  "temperature": 0, "max_tokens": 8192, "timeout": 90},
-    "eval_case":      {"model": "qwen3.6-plus",  "temperature": 0, "max_tokens": 8192, "timeout": 60},
-    "eval_realtime":  {"model": "qwen3.6-plus",  "temperature": 0, "max_tokens": 8192, "timeout": 90},
+    "eval_batch":     {"model": "qwen3.6-plus",  "temperature": 0, "max_tokens": 8192, "timeout": 90,
+                       "judges": [{"model": "qwen3.6-plus", "temperature": 0},
+                                  {"model": "deepseek-v4-pro", "temperature": 0},
+                                  {"model": "doubao-seed-2-0-pro", "temperature": 0}]},
+    "eval_case":      {"model": "qwen3.6-plus",  "temperature": 0, "max_tokens": 8192, "timeout": 60,
+                       "judges": [{"model": "qwen3.6-plus", "temperature": 0},
+                                  {"model": "deepseek-v4-pro", "temperature": 0},
+                                  {"model": "doubao-seed-2-0-pro", "temperature": 0}]},
+    "eval_realtime":  {"model": "qwen3.6-plus",  "temperature": 0, "max_tokens": 8192, "timeout": 90,
+                       "judges": [{"model": "qwen3.6-plus", "temperature": 0},
+                                  {"model": "deepseek-v4-pro", "temperature": 0},
+                                  {"model": "doubao-seed-2-0-pro", "temperature": 0}]},
     "case_review":    {"model": "deepseek-v4-pro","temperature": 0.3, "max_tokens": 8192, "timeout": 120},
 }
 
@@ -1114,6 +1134,14 @@ def get_llm_config(key=None):
             elif isinstance(stored, dict):
                 config[k] = dict(v)
                 config[k].update({kk: stored[kk] for kk in ("model", "temperature", "max_tokens", "timeout") if kk in stored})
+                # judges 字段：若 stored 显式提供（含 null/空列表）则用 stored，否则用 DEFAULT 默认
+                if "judges" in stored:
+                    jval = stored["judges"]
+                    if jval is None or (isinstance(jval, list) and len(jval) <= 1):
+                        config[k]["judges"] = jval  # 显式禁用 ensemble
+                    elif isinstance(jval, list):
+                        config[k]["judges"] = jval
+                # 否则保持 DEFAULT 的 judges
             else:
                 config[k] = dict(v)
     else:
@@ -1973,8 +2001,8 @@ def _save_evaluation(message_id, persona_id, eval_result, context):
     execute_query(conn, """
         INSERT INTO auto_evaluation
         (message_id, persona_id, memory_score, memory_reason, emotion_score, emotion_reason,
-         quality_score, quality_reason, persona_score, persona_reason, total_score, eval_context, deduction_tags)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         quality_score, quality_reason, persona_score, persona_reason, total_score, eval_context, deduction_tags, judges_detail)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         message_id, persona_id,
         eval_result.get("memory_score"),
@@ -1986,13 +2014,25 @@ def _save_evaluation(message_id, persona_id, eval_result, context):
         eval_result.get("persona_score"),
         eval_result.get("persona_reason", ""),
         eval_result.get("total_score"),
-        json.dumps({"facts_count": len(context.get("user_facts", [])), "history_len": len(context.get("chat_history", []))}, ensure_ascii=False),
+        json.dumps({
+            "facts_count": len(context.get("user_facts", [])),
+            "history_len": len(context.get("chat_history", [])),
+            "memory_objective_check": eval_result.get("memory_objective_check", {}),
+            "breakdown": {
+                "memory": eval_result.get("memory_deduction_breakdown", []),
+                "emotion": eval_result.get("emotion_deduction_breakdown", []),
+                "quality": eval_result.get("quality_deduction_breakdown", []),
+                "persona": eval_result.get("persona_deduction_breakdown", []),
+            },
+            "judges_std": eval_result.get("judges_std", 0),
+        }, ensure_ascii=False),
         json.dumps({
             "memory": eval_result.get("memory_tags", []),
             "emotion": eval_result.get("emotion_tags", []),
             "quality": eval_result.get("quality_tags", []),
             "persona": eval_result.get("persona_tags", []),
-        }, ensure_ascii=False)
+        }, ensure_ascii=False),
+        json.dumps(eval_result.get("judges_detail", []), ensure_ascii=False) if eval_result.get("judges_detail") else None,
     ))
     conn.commit()
     conn.close()
@@ -4217,6 +4257,10 @@ def _evaluate_task_worker(task_id):
                     "eval_points_check": eval_result.get("eval_points_check", {}),
                     "failure_flags_triggered": eval_result.get("failure_flags_triggered", []),
                     "deduction_tags": eval_result.get("deduction_tags", []),
+                    "deduction_breakdown": eval_result.get("deduction_breakdown", []),
+                    "memory_objective_check": eval_result.get("memory_objective_check", {}),
+                    "judges_detail": eval_result.get("judges_detail", []),
+                    "judges_std": eval_result.get("judges_std", 0),
                 }, ensure_ascii=False)
 
                 if score is not None:
@@ -4338,6 +4382,10 @@ def reevaluate_single_result(result_id):
                 "eval_points_check": eval_result.get("eval_points_check", {}),
                 "failure_flags_triggered": eval_result.get("failure_flags_triggered", []),
                 "deduction_tags": eval_result.get("deduction_tags", []),
+                "deduction_breakdown": eval_result.get("deduction_breakdown", []),
+                "memory_objective_check": eval_result.get("memory_objective_check", {}),
+                "judges_detail": eval_result.get("judges_detail", []),
+                "judges_std": eval_result.get("judges_std", 0),
             }
             eval_detail = json.dumps(eval_detail_obj, ensure_ascii=False)
             execute_query(conn,
@@ -4485,6 +4533,10 @@ def _reevaluate_failed_worker(task_id, result_ids):
                     "eval_points_check": eval_result.get("eval_points_check", {}),
                     "failure_flags_triggered": eval_result.get("failure_flags_triggered", []),
                     "deduction_tags": eval_result.get("deduction_tags", []),
+                    "deduction_breakdown": eval_result.get("deduction_breakdown", []),
+                    "memory_objective_check": eval_result.get("memory_objective_check", {}),
+                    "judges_detail": eval_result.get("judges_detail", []),
+                    "judges_std": eval_result.get("judges_std", 0),
                 }, ensure_ascii=False)
                 execute_query(conn,
                     "UPDATE test_results SET score = %s, deduction_reason = %s, status = %s, eval_detail = %s WHERE id = %s",

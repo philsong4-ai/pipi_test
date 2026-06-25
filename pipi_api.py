@@ -7,6 +7,7 @@ import os
 import re
 import json
 import time
+import unicodedata
 import requests
 from typing import List, Dict, Optional
 
@@ -807,6 +808,73 @@ def _format_facts_grouped(user_facts: List[Dict]) -> str:
     return "\n".join(lines).lstrip("\n")
 
 
+def check_memory_objective(reply_text: str, user_facts: List[Dict] = None, user_message: str = None) -> Dict:
+    """规则化扫描 reply 中是否提及已知事实，作为评测 ground-truth hint。
+    返回 {mentioned_count, total_count, missed_facts, checked_facts}
+    """
+    if not user_facts:
+        return {"mentioned_count": 0, "total_count": 0, "missed_facts": [], "checked_facts": []}
+
+    def norm(s):
+        s = unicodedata.normalize('NFKC', str(s or '')).lower()
+        return re.sub(r'[^\w\s]', '', s)
+
+    reply_n = norm(reply_text)
+
+    # chat 模式：只检查与当前 user_message 相关的事实，避免惩罚未提及无关事实
+    relevant_facts = user_facts
+    if user_message:
+        msg_n = norm(user_message)
+        matched = []
+        for f in user_facts:
+            if norm(f.get('fact_value', '')) and norm(f.get('fact_value', '')) in msg_n:
+                matched.append(f)
+            elif norm(f.get('entity_name', '')) and norm(f.get('entity_name', '')) in msg_n:
+                matched.append(f)
+            elif str(f.get('category', '')) and str(f.get('category', '')) in msg_n:
+                matched.append(f)
+        relevant_facts = matched if matched else user_facts  # 过滤为空则全检
+
+    checked = []
+    for f in relevant_facts:
+        val_n = norm(f.get('fact_value', ''))
+        ent_n = norm(f.get('entity_name', ''))
+        mentioned = (bool(val_n) and val_n in reply_n) or (bool(ent_n) and ent_n in reply_n)
+        checked.append({
+            'fact_key': f.get('fact_key', ''),
+            'fact_value': f.get('fact_value', ''),
+            'entity_name': f.get('entity_name', ''),
+            'category': f.get('category', ''),
+            'mentioned': mentioned,
+        })
+    missed = [{'fact_key': c['fact_key'], 'fact_value': c['fact_value'],
+               'entity_name': c['entity_name'], 'category': c['category']}
+              for c in checked if not c['mentioned']]
+    return {
+        'mentioned_count': len(checked) - len(missed),
+        'total_count': len(checked),
+        'missed_facts': missed,
+        'checked_facts': checked,
+    }
+
+
+def _format_memory_check_for_prompt(check: Dict) -> str:
+    """把 check_memory_objective 结果格式化为 prompt 片段"""
+    if not check or check.get('total_count', 0) == 0:
+        return ""
+    lines = [
+        f"已提及 {check['mentioned_count']}/{check['total_count']} 条相关事实。"
+    ]
+    if check.get('missed_facts'):
+        miss_str = ", ".join(
+            f"{m.get('category','')}.{m.get('fact_key','')}" + (f"[{m['entity_name']}]" if m.get('entity_name') else "") + f"={m.get('fact_value','')}"
+            for m in check['missed_facts']
+        )
+        lines.append(f"未提及：{miss_str}")
+    lines.append("注意：上述为规则化扫描结果，作为 ground truth 参考。若未提及的事实与当前话题无关，可不予扣分。")
+    return "\n".join(lines)
+
+
 def extract_facts_from_message(user_message: str, persona_data: Optional[Dict], existing_facts: Optional[List[Dict]] = None, chat_history: Optional[List[Dict]] = None, model: str = None, temperature: float = None, max_tokens: int = None, timeout: int = 60) -> List[Dict]:
     """
     调用 LLM 从用户消息中提取事实。
@@ -1083,7 +1151,133 @@ def _format_corrections_for_prompt(corrections, eval_type="chat"):
     return "\n".join(lines)
 
 
-def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, corrections: List[Dict] = None, model: str = None, temperature: float = None, max_tokens: int = None, timeout: int = 60) -> Dict:
+def _parse_test_case_eval(data: Dict, memory_check: Dict = None) -> Dict:
+    """解析 evaluate_test_case 的 LLM 输出。
+    若 deduction_breakdown 非空，按 10 - sum(points) 重算 score 强制一致性。
+    """
+    breakdown = data.get("deduction_breakdown", [])
+    if not isinstance(breakdown, list):
+        breakdown = []
+    if breakdown:
+        try:
+            total_deduct = sum(float(b.get("points", 0)) for b in breakdown if isinstance(b, dict))
+            score = max(1, round(10 - total_deduct))
+        except (TypeError, ValueError):
+            score = int(round(data.get("score", 0)))
+    else:
+        score = int(round(data.get("score", 0)))
+        print(f"[COT] missing breakdown, fallback to direct score={score}", flush=True)
+    reason = data.get("deduction_reason", data.get("reason", ""))
+    status = "passed" if score >= 6 else "failed"
+    tags = data.get("deduction_tags", [])
+    if not isinstance(tags, list):
+        tags = []
+    return {
+        "score": score,
+        "deduction_reason": reason,
+        "status": status,
+        "eval_points_check": data.get("eval_points_check", {}),
+        "failure_flags_triggered": data.get("failure_flags_triggered", []),
+        "deduction_tags": tags,
+        "deduction_breakdown": breakdown,
+        "memory_objective_check": memory_check or {},
+    }
+
+
+def _parse_test_case_raw_text(result_text: str, memory_check: Dict = None) -> Dict:
+    """从 LLM 原始文本中解析 JSON 并返回评测结果"""
+    if not result_text:
+        return None
+    clean_text = re.sub(r'```json\s*', '', result_text)
+    clean_text = re.sub(r'```\s*', '', clean_text).strip()
+    try:
+        data = json.loads(clean_text)
+        if "score" in data:
+            return _parse_test_case_eval(data, memory_check)
+    except json.JSONDecodeError:
+        pass
+    start = clean_text.find('{')
+    end = clean_text.rfind('}')
+    if start != -1 and end != -1 and end > start:
+        try:
+            data = json.loads(clean_text[start:end+1])
+            if "score" in data:
+                return _parse_test_case_eval(data, memory_check)
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+def _run_judges_test_case(system_prompt: str, user_prompt: str, judges: List[Dict],
+                           timeout: int = 60, max_tokens: int = 8192,
+                           memory_check: Dict = None) -> Dict:
+    """多评测员顺序调用 + 聚合"""
+    judges_detail = []
+    results = []
+    for j in judges:
+        try:
+            result_text = call_llm_simple(
+                system_prompt, user_prompt,
+                timeout=timeout,
+                model=j.get("model"),
+                temperature=j.get("temperature", 0),
+                max_tokens=max_tokens,
+            )
+            parsed = _parse_test_case_raw_text(result_text, memory_check)
+            if not parsed:
+                parsed = {
+                    "score": 0, "deduction_reason": f"无法解析: {(result_text or '')[:100]}",
+                    "status": "failed", "eval_points_check": {}, "failure_flags_triggered": [],
+                    "deduction_tags": [], "deduction_breakdown": [],
+                    "memory_objective_check": memory_check or {},
+                }
+            print(f"[EVAL JUDGE] model={j.get('model')} score={parsed.get('score')}", flush=True)
+        except Exception as e:
+            parsed = {
+                "score": 0, "deduction_reason": f"评测异常: {str(e)}", "status": "failed",
+                "eval_points_check": {}, "failure_flags_triggered": [],
+                "deduction_tags": [], "deduction_breakdown": [],
+                "memory_objective_check": memory_check or {},
+            }
+            print(f"[EVAL JUDGE] model={j.get('model')} error: {e}", flush=True)
+        judges_detail.append({
+            "model": j.get("model"),
+            "temperature": j.get("temperature", 0),
+            "score": parsed.get("score"),
+            "deduction_tags": parsed.get("deduction_tags", []),
+            "deduction_reason": (parsed.get("deduction_reason") or "")[:200],
+        })
+        results.append(parsed)
+
+    scores = [r.get("score", 0) for r in results]
+    mean = round(sum(scores) / len(scores))
+    # 方差（样本标准差）
+    if len(scores) > 1:
+        avg = sum(scores) / len(scores)
+        std = round(float(sum((s - avg) ** 2 for s in scores) / (len(scores) - 1)) ** 0.5, 2)
+    else:
+        std = 0.0
+    # 选分数最接近 mean 的 judge 作为 median
+    median_idx = min(range(len(scores)), key=lambda i: abs(scores[i] - mean))
+    median = results[median_idx]
+    aggregated = dict(median)
+    aggregated["score"] = mean
+    aggregated["status"] = "passed" if mean >= 6 else "failed"
+    aggregated["judges_detail"] = judges_detail
+    aggregated["judges_std"] = std
+    aggregated["memory_objective_check"] = memory_check or {}
+    # tags 并集去重保序
+    all_tags = []
+    for r in results:
+        for t in r.get("deduction_tags", []):
+            if t not in all_tags:
+                all_tags.append(t)
+    aggregated["deduction_tags"] = all_tags
+    print(f"[EVAL ENSEMBLE] judges={len(judges)} scores={scores} mean={mean} std={std}", flush=True)
+    return aggregated
+
+
+def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, corrections: List[Dict] = None, model: str = None, temperature: float = None, max_tokens: int = None, timeout: int = 60, judges: List[Dict] = None) -> Dict:
     """
     评测单个测试用例，使用用例自带的评分参考。
 
@@ -1115,6 +1309,10 @@ def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, correctio
     failure_flags = case_data.get("failure_flags", "")
 
     facts_text = _format_facts_grouped(user_facts) if user_facts else ""
+
+    # 客观记忆检查（规则化 ground-truth hint）
+    memory_check = check_memory_objective(actual_output, user_facts, user_message=input_text)
+    memory_check_text = _format_memory_check_for_prompt(memory_check)
 
     dim_header = f"【评测维度】{dimension_code}"
     if test_point:
@@ -1158,13 +1356,21 @@ def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, correctio
 【已知用户信息】
 {facts_text or "暂无"}
 
+{memory_check_text if memory_check_text else ""}
+
 【评分规则】
 - 10分制，直接打整数分（1-10）
 - 逐项对照评估点清单检查AI回复，未满足的评估点必须体现在扣分原因中
 - 逐项判定扣分点，任一扣分点触发则分数不得超过5分
 - 对比实际回复与期望回复，评估点满足情况是主要评分依据
 - 重要：AI引用已知用户信息中的事实不算幻觉，只有捏造新事实才算幻觉。expected_output中引用的用户信息如果不在已知用户信息列表中，视为虚构事实，扣分并标注
-- 返回JSON格式: {{"score": 分数, "deduction_reason": "扣分原因或评价", "eval_points_check": {{"评估点1": true/false, ...}}, "failure_flags_triggered": ["触发的扣分点"], "deduction_tags": ["短标签1", "短标签2"]}}
+
+【链式扣分规则】
+- 先列 deduction_breakdown（每项含 item 描述 + points 扣分点数，0 项表示满分）
+- score = max(1, 10 - sum(breakdown.points)) 四舍五入取整
+- 必须先列扣分项再算分，不要先打分再补理由
+
+- 返回JSON格式: {{"deduction_breakdown": [{{"item": "扣分项描述", "points": 1.5}}], "score": 分数, "deduction_reason": "扣分原因或评价", "eval_points_check": {{"评估点1": true/false, ...}}, "failure_flags_triggered": ["触发的扣分点"], "deduction_tags": ["短标签1", "短标签2"]}}
 
 【deduction_tags 字段要求】
 - 2-5个短标签，每个≤6字，描述本次回复实际暴露的失败模式
@@ -1185,9 +1391,16 @@ def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, correctio
 请评分:"""
 
     try:
+        # 多评测员集成：3 个不同模型顺序调用取均值
+        if judges and len(judges) >= 2:
+            return _run_judges_test_case(
+                system_prompt, user_prompt, judges,
+                timeout=timeout, max_tokens=max_tokens,
+                memory_check=memory_check,
+            )
         result_text = call_llm_simple(system_prompt, user_prompt, timeout=timeout, model=model, temperature=temperature, max_tokens=max_tokens)
         if not result_text:
-            return {"score": 0, "deduction_reason": "评测LLM无响应", "status": "failed", "deduction_tags": []}
+            return {"score": 0, "deduction_reason": "评测LLM无响应", "status": "failed", "deduction_tags": [], "deduction_breakdown": [], "memory_objective_check": memory_check}
 
         print(f"[EVAL LLM RAW] {case_id}: {result_text[:300]}", flush=True)
 
@@ -1197,20 +1410,7 @@ def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, correctio
 
         # 隐藏的解析函数
         def _parse_eval_result(data):
-            score = int(round(data.get("score", 0)))
-            reason = data.get("deduction_reason", data.get("reason", ""))
-            status = "passed" if score >= 6 else "failed"
-            tags = data.get("deduction_tags", [])
-            if not isinstance(tags, list):
-                tags = []
-            return {
-                "score": score,
-                "deduction_reason": reason,
-                "status": status,
-                "eval_points_check": data.get("eval_points_check", {}),
-                "failure_flags_triggered": data.get("failure_flags_triggered", []),
-                "deduction_tags": tags,
-            }
+            return _parse_test_case_eval(data, memory_check)
 
         # 方法1: 直接尝试解析整个文本
         try:
@@ -1232,9 +1432,9 @@ def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, correctio
             except json.JSONDecodeError:
                 pass
 
-        return {"score": 0, "deduction_reason": f"无法解析评测结果: {clean_text[:100]}", "status": "failed", "eval_points_check": {}, "failure_flags_triggered": [], "deduction_tags": []}
+        return {"score": 0, "deduction_reason": f"无法解析评测结果: {clean_text[:100]}", "status": "failed", "eval_points_check": {}, "failure_flags_triggered": [], "deduction_tags": [], "deduction_breakdown": [], "memory_objective_check": memory_check}
     except Exception as e:
-        return {"score": 0, "deduction_reason": f"评测异常: {str(e)}", "status": "failed", "eval_points_check": {}, "failure_flags_triggered": [], "deduction_tags": []}
+        return {"score": 0, "deduction_reason": f"评测异常: {str(e)}", "status": "failed", "eval_points_check": {}, "failure_flags_triggered": [], "deduction_tags": [], "deduction_breakdown": [], "memory_objective_check": memory_check if 'memory_check' in locals() else {}}
 
 
 # ─── 对话实时评测 ───────────────────────────────────
@@ -1250,7 +1450,8 @@ def evaluate_chat_reply(
     model: str = None,
     temperature: float = None,
     max_tokens: int = None,
-    timeout: int = 90
+    timeout: int = 90,
+    judges: List[Dict] = None
 ) -> Dict:
     """
     对话窗口实时评测AI回复。
@@ -1277,6 +1478,10 @@ def evaluate_chat_reply(
     """
     # 构建用户事实文本（按分类分组）
     facts_text = _format_facts_grouped(user_facts)
+
+    # 客观记忆检查（规则化 ground-truth hint）
+    memory_check = check_memory_objective(reply_text, user_facts, user_message=user_message)
+    memory_check_text = _format_memory_check_for_prompt(memory_check)
     
     # 构建对话历史文本
     history_text = "无历史对话"
@@ -1307,6 +1512,8 @@ def evaluate_chat_reply(
 【已知用户信息】
 {facts}
 
+{memory_check}
+
 【用户画像】
 {persona}
 
@@ -1316,12 +1523,18 @@ def evaluate_chat_reply(
 3. 回复质量(quality)：回复是否自然流畅、长度适中、有实际内容
 4. 人设一致(persona)：是否符合秋秋的人设（语气词自然、不做客服不做说教、知道分寸）
 
+【链式扣分规则】
+- 每维度先列 *_deduction_breakdown（每项含 item 描述 + points 扣分点数，0 项表示满分）
+- *_score = max(1, 10 - sum(*_breakdown.points)) 四舍五入取整
+- 必须先列扣分项再算分，不要先打分再补理由
+
 【评分规则】
 - 每项10分制，整数打分
 - 扣分必须写明原因，满分可不写原因
 - 返回严格JSON格式""".format(
         toy_info=toy_info,
         facts=facts_text,
+        memory_check=memory_check_text or "",
         persona=persona_text or "未提供"
     )
 
@@ -1339,15 +1552,19 @@ def evaluate_chat_reply(
 
 请评测秋秋的回复，返回JSON：
 {{
+  "memory_deduction_breakdown": [{{"item": "扣分项", "points": 1.5}}],
   "memory_score": 分数,
   "memory_reason": "扣分原因或空",
   "memory_tags": ["短标签1"],
+  "emotion_deduction_breakdown": [{{"item": "扣分项", "points": 1.5}}],
   "emotion_score": 分数,
   "emotion_reason": "扣分原因或空",
   "emotion_tags": ["短标签1"],
+  "quality_deduction_breakdown": [{{"item": "扣分项", "points": 1.5}}],
   "quality_score": 分数,
   "quality_reason": "扣分原因或空",
   "quality_tags": ["短标签1"],
+  "persona_deduction_breakdown": [{{"item": "扣分项", "points": 1.5}}],
   "persona_score": 分数,
   "persona_reason": "扣分原因或空",
   "persona_tags": ["短标签1"]
@@ -1366,27 +1583,48 @@ def evaluate_chat_reply(
     )
     
     try:
+        if judges and len(judges) >= 2:
+            return _run_judges_chat_reply(
+                system_prompt, user_prompt, judges,
+                timeout=timeout, max_tokens=max_tokens,
+                memory_check=memory_check,
+            )
         result_text = call_llm_simple(system_prompt, user_prompt, timeout=timeout, model=model, temperature=temperature, max_tokens=max_tokens)
         print(f"[CHAT EVAL] model={model or EXTRACT_LLM_MODEL} result_text len: {len(result_text) if result_text else 0}", flush=True)
         if not result_text:
-            return _default_eval_result("LLM无响应")
+            return _default_eval_result("LLM无响应", memory_check=memory_check)
         
         # 解析JSON
         match = re.search(r'\{[^{}]*\}', result_text, re.DOTALL)
         if match:
             data = json.loads(match.group())
-            # 计算总分
+            # 链式扣分：若 *_deduction_breakdown 非空，按 10 - sum(points) 重算该维度 score
             scores = []
-            for key in ["memory_score", "emotion_score", "quality_score", "persona_score"]:
-                s = data.get(key, 0)
+            for dim in ["memory", "emotion", "quality", "persona"]:
+                breakdown_key = f"{dim}_deduction_breakdown"
+                score_key = f"{dim}_score"
+                breakdown = data.get(breakdown_key, [])
+                if not isinstance(breakdown, list):
+                    breakdown = []
+                if breakdown:
+                    try:
+                        total_deduct = sum(float(b.get("points", 0)) for b in breakdown if isinstance(b, dict))
+                        data[score_key] = max(1, round(10 - total_deduct))
+                    except (TypeError, ValueError):
+                        pass
+                else:
+                    print(f"[COT] chat missing {breakdown_key}, fallback to direct {score_key}", flush=True)
+                data[breakdown_key] = breakdown
+
+                s = data.get(score_key, 0)
                 if isinstance(s, (int, float)) and 1 <= s <= 10:
                     scores.append(s)
                 else:
                     scores.append(5)  # 默认中等分
-                    data[key] = 5
-            
+                    data[score_key] = 5
+
             data["total_score"] = round(sum(scores) / len(scores), 1) if scores else 5.0
-            
+
             # 确保所有字段存在
             for key in ["memory_reason", "emotion_reason", "quality_reason", "persona_reason"]:
                 if key not in data:
@@ -1397,30 +1635,164 @@ def evaluate_chat_reply(
                     val = []
                 data[key] = val
 
+            # 客观记忆检查结果
+            data["memory_objective_check"] = memory_check
+
             return data
-        
-        return _default_eval_result(f"无法解析: {result_text[:100]}")
-        
+
+        return _default_eval_result(f"无法解析: {result_text[:100]}", memory_check=memory_check)
+
     except Exception as e:
-        return _default_eval_result(f"评测异常: {str(e)}")
+        return _default_eval_result(f"评测异常: {str(e)}", memory_check=memory_check if 'memory_check' in locals() else {})
 
 
-def _default_eval_result(error_msg: str) -> Dict:
+def _parse_chat_eval_raw_text(result_text: str, memory_check: Dict = None) -> Dict:
+    """解析 evaluate_chat_reply 的 LLM 输出（单裁判路径用）"""
+    if not result_text:
+        return None
+    match = re.search(r'\{[^{}]*\}', result_text, re.DOTALL)
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group())
+    except json.JSONDecodeError:
+        return None
+
+    scores = []
+    for dim in ["memory", "emotion", "quality", "persona"]:
+        breakdown_key = f"{dim}_deduction_breakdown"
+        score_key = f"{dim}_score"
+        breakdown = data.get(breakdown_key, [])
+        if not isinstance(breakdown, list):
+            breakdown = []
+        if breakdown:
+            try:
+                total_deduct = sum(float(b.get("points", 0)) for b in breakdown if isinstance(b, dict))
+                data[score_key] = max(1, round(10 - total_deduct))
+            except (TypeError, ValueError):
+                pass
+        else:
+            print(f"[COT] chat missing {breakdown_key}, fallback to direct {score_key}", flush=True)
+        data[breakdown_key] = breakdown
+
+        s = data.get(score_key, 0)
+        if isinstance(s, (int, float)) and 1 <= s <= 10:
+            scores.append(s)
+        else:
+            scores.append(5)
+            data[score_key] = 5
+
+    data["total_score"] = round(sum(scores) / len(scores), 1) if scores else 5.0
+
+    for key in ["memory_reason", "emotion_reason", "quality_reason", "persona_reason"]:
+        if key not in data:
+            data[key] = ""
+    for key in ["memory_tags", "emotion_tags", "quality_tags", "persona_tags"]:
+        val = data.get(key, [])
+        if not isinstance(val, list):
+            val = []
+        data[key] = val
+
+    data["memory_objective_check"] = memory_check or {}
+    return data
+
+
+def _run_judges_chat_reply(system_prompt: str, user_prompt: str, judges: List[Dict],
+                             timeout: int = 90, max_tokens: int = 8192,
+                             memory_check: Dict = None) -> Dict:
+    """多评测员顺序调用 + 聚合（chat 4 维度分别聚合）"""
+    judges_detail = []
+    results = []
+    for j in judges:
+        try:
+            result_text = call_llm_simple(
+                system_prompt, user_prompt,
+                timeout=timeout,
+                model=j.get("model"),
+                temperature=j.get("temperature", 0),
+                max_tokens=max_tokens,
+            )
+            parsed = _parse_chat_eval_raw_text(result_text, memory_check)
+            if not parsed:
+                parsed = _default_eval_result(f"无法解析: {(result_text or '')[:100]}", memory_check=memory_check)
+            print(f"[CHAT EVAL JUDGE] model={j.get('model')} total={parsed.get('total_score')}", flush=True)
+        except Exception as e:
+            parsed = _default_eval_result(f"评测异常: {str(e)}", memory_check=memory_check)
+            print(f"[CHAT EVAL JUDGE] model={j.get('model')} error: {e}", flush=True)
+        judges_detail.append({
+            "model": j.get("model"),
+            "temperature": j.get("temperature", 0),
+            "scores": {
+                "memory": parsed.get("memory_score"),
+                "emotion": parsed.get("emotion_score"),
+                "quality": parsed.get("quality_score"),
+                "persona": parsed.get("persona_score"),
+                "total": parsed.get("total_score"),
+            },
+            "tags": {
+                "memory": parsed.get("memory_tags", []),
+                "emotion": parsed.get("emotion_tags", []),
+                "quality": parsed.get("quality_tags", []),
+                "persona": parsed.get("persona_tags", []),
+            },
+        })
+        results.append(parsed)
+
+    # 每维度取均值
+    aggregated = {}
+    for dim in ["memory", "emotion", "quality", "persona"]:
+        s_list = [r.get(f"{dim}_score", 5) for r in results]
+        mean_s = round(sum(s_list) / len(s_list)) if s_list else 5
+        aggregated[f"{dim}_score"] = mean_s
+        # tags 并集
+        all_tags = []
+        for r in results:
+            for t in r.get(f"{dim}_tags", []):
+                if t not in all_tags:
+                    all_tags.append(t)
+        aggregated[f"{dim}_tags"] = all_tags
+        # breakdown 取分数最接近均值的 judge
+        idx = min(range(len(s_list)), key=lambda i: abs(s_list[i] - mean_s))
+        aggregated[f"{dim}_deduction_breakdown"] = results[idx].get(f"{dim}_deduction_breakdown", [])
+        aggregated[f"{dim}_reason"] = results[idx].get(f"{dim}_reason", "")
+
+    # 总分
+    total_scores = [r.get("total_score", 5.0) for r in results]
+    aggregated["total_score"] = round(sum(total_scores) / len(total_scores), 1) if total_scores else 5.0
+    # 总分方差
+    if len(total_scores) > 1:
+        avg = sum(total_scores) / len(total_scores)
+        std = round(float(sum((s - avg) ** 2 for s in total_scores) / (len(total_scores) - 1)) ** 0.5, 2)
+    else:
+        std = 0.0
+    aggregated["judges_detail"] = judges_detail
+    aggregated["judges_std"] = std
+    aggregated["memory_objective_check"] = memory_check or {}
+    print(f"[CHAT EVAL ENSEMBLE] judges={len(judges)} totals={total_scores} mean={aggregated['total_score']} std={std}", flush=True)
+    return aggregated
+
+
+def _default_eval_result(error_msg: str, memory_check: Dict = None) -> Dict:
     """返回默认评测结果"""
     return {
         "memory_score": 5,
         "memory_reason": error_msg,
         "memory_tags": [],
+        "memory_deduction_breakdown": [],
         "emotion_score": 5,
         "emotion_reason": "",
         "emotion_tags": [],
+        "emotion_deduction_breakdown": [],
         "quality_score": 5,
         "quality_reason": "",
         "quality_tags": [],
+        "quality_deduction_breakdown": [],
         "persona_score": 5,
         "persona_reason": "",
         "persona_tags": [],
-        "total_score": 5.0
+        "persona_deduction_breakdown": [],
+        "total_score": 5.0,
+        "memory_objective_check": memory_check or {},
     }
 
 
