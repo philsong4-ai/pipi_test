@@ -1756,10 +1756,11 @@ def _run_judges_chat_reply(system_prompt: str, user_prompt: str, judges: List[Di
         aggregated[f"{dim}_deduction_breakdown"] = results[idx].get(f"{dim}_deduction_breakdown", [])
         aggregated[f"{dim}_reason"] = results[idx].get(f"{dim}_reason", "")
 
-    # 总分
+    # 总分 = 4 维度聚合得分的均值（与单 judge 内部算法对齐）
+    dim_means = [aggregated.get(f"{dim}_score", 5) for dim in ["memory", "emotion", "quality", "persona"]]
+    aggregated["total_score"] = round(sum(dim_means) / len(dim_means), 1) if dim_means else 5.0
+    # 总分方差（基于各 judge 自己的 total_score）
     total_scores = [r.get("total_score", 5.0) for r in results]
-    aggregated["total_score"] = round(sum(total_scores) / len(total_scores), 1) if total_scores else 5.0
-    # 总分方差
     if len(total_scores) > 1:
         avg = sum(total_scores) / len(total_scores)
         std = round(float(sum((s - avg) ** 2 for s in total_scores) / (len(total_scores) - 1)) ** 0.5, 2)
