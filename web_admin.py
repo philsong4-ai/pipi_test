@@ -7655,7 +7655,7 @@ def _reset_retry_count(persona_id, task_id=None):
         conn.close()
 
 
-def async_review_cases(case_ids, auto_regenerate=True):
+def async_review_cases(case_ids, auto_regenerate=True, regen_depth=0):
     """异步 LLM 复核用例质量，不合格自动重生成（最多2次）"""
     import threading
     def _review_worker():
@@ -7722,7 +7722,7 @@ def async_review_cases(case_ids, auto_regenerate=True):
 
             # 审核完成后，检查不合格用例并自动重生成
             if auto_regenerate:
-                _auto_regenerate_failed_cases(reviewed_cases)
+                _auto_regenerate_failed_cases(reviewed_cases, regen_depth=regen_depth)
 
         except Exception as e:
             print(f"[QUALITY REVIEW ERROR] {e}", flush=True)
