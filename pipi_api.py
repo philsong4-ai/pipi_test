@@ -1164,7 +1164,12 @@ def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, correctio
 - 逐项判定扣分点，任一扣分点触发则分数不得超过5分
 - 对比实际回复与期望回复，评估点满足情况是主要评分依据
 - 重要：AI引用已知用户信息中的事实不算幻觉，只有捏造新事实才算幻觉。expected_output中引用的用户信息如果不在已知用户信息列表中，视为虚构事实，扣分并标注
-- 返回JSON格式: {{"score": 分数, "deduction_reason": "扣分原因或评价", "eval_points_check": {{"评估点1": true/false, ...}}, "failure_flags_triggered": ["触发的扣分点"]}}"""
+- 返回JSON格式: {{"score": 分数, "deduction_reason": "扣分原因或评价", "eval_points_check": {{"评估点1": true/false, ...}}, "failure_flags_triggered": ["触发的扣分点"], "deduction_tags": ["短标签1", "短标签2"]}}
+
+【deduction_tags 字段要求】
+- 2-5个短标签，每个≤6字，描述本次回复实际暴露的失败模式
+- 常见示例：忘记事实/说教语气/越界承诺/套话模板/情绪冷漠/编造事实/回复过短/人设不符/拒绝生硬/幽默不当
+- 回复优秀无问题时返回空数组 []"""
 
     # Few-shot 纠正案例
     corrections_text = _format_corrections_for_prompt(corrections, eval_type="test_case") if corrections else ""
@@ -1182,7 +1187,7 @@ def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, correctio
     try:
         result_text = call_llm_simple(system_prompt, user_prompt, timeout=timeout, model=model, temperature=temperature, max_tokens=max_tokens)
         if not result_text:
-            return {"score": 0, "deduction_reason": "评测LLM无响应", "status": "failed"}
+            return {"score": 0, "deduction_reason": "评测LLM无响应", "status": "failed", "deduction_tags": []}
 
         print(f"[EVAL LLM RAW] {case_id}: {result_text[:300]}", flush=True)
 
@@ -1195,12 +1200,16 @@ def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, correctio
             score = int(round(data.get("score", 0)))
             reason = data.get("deduction_reason", data.get("reason", ""))
             status = "passed" if score >= 6 else "failed"
+            tags = data.get("deduction_tags", [])
+            if not isinstance(tags, list):
+                tags = []
             return {
                 "score": score,
                 "deduction_reason": reason,
                 "status": status,
                 "eval_points_check": data.get("eval_points_check", {}),
                 "failure_flags_triggered": data.get("failure_flags_triggered", []),
+                "deduction_tags": tags,
             }
 
         # 方法1: 直接尝试解析整个文本
@@ -1223,9 +1232,9 @@ def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, correctio
             except json.JSONDecodeError:
                 pass
 
-        return {"score": 0, "deduction_reason": f"无法解析评测结果: {clean_text[:100]}", "status": "failed", "eval_points_check": {}, "failure_flags_triggered": []}
+        return {"score": 0, "deduction_reason": f"无法解析评测结果: {clean_text[:100]}", "status": "failed", "eval_points_check": {}, "failure_flags_triggered": [], "deduction_tags": []}
     except Exception as e:
-        return {"score": 0, "deduction_reason": f"评测异常: {str(e)}", "status": "failed", "eval_points_check": {}, "failure_flags_triggered": []}
+        return {"score": 0, "deduction_reason": f"评测异常: {str(e)}", "status": "failed", "eval_points_check": {}, "failure_flags_triggered": [], "deduction_tags": []}
 
 
 # ─── 对话实时评测 ───────────────────────────────────
@@ -1332,13 +1341,25 @@ def evaluate_chat_reply(
 {{
   "memory_score": 分数,
   "memory_reason": "扣分原因或空",
+  "memory_tags": ["短标签1"],
   "emotion_score": 分数,
   "emotion_reason": "扣分原因或空",
+  "emotion_tags": ["短标签1"],
   "quality_score": 分数,
   "quality_reason": "扣分原因或空",
+  "quality_tags": ["短标签1"],
   "persona_score": 分数,
-  "persona_reason": "扣分原因或空"
-}}""".format(
+  "persona_reason": "扣分原因或空",
+  "persona_tags": ["短标签1"]
+}}
+
+【*_tags 字段要求】
+- 每个维度的 *_tags 是 0-5个短标签（≤6字），描述该维度实际暴露的失败模式
+- memory常见：忘记事实/记错事实/上下文断裂
+- emotion常见：情绪冷漠/虚假共情/情绪错位
+- quality常见：说教语气/套话模板/回复过短/幽默不当
+- persona常见：人设不符/越界承诺/安全违规
+- 该维度无问题时返回空数组 []""".format(
         history=history_text,
         user_msg=user_message,
         reply=reply_text
@@ -1370,7 +1391,12 @@ def evaluate_chat_reply(
             for key in ["memory_reason", "emotion_reason", "quality_reason", "persona_reason"]:
                 if key not in data:
                     data[key] = ""
-            
+            for key in ["memory_tags", "emotion_tags", "quality_tags", "persona_tags"]:
+                val = data.get(key, [])
+                if not isinstance(val, list):
+                    val = []
+                data[key] = val
+
             return data
         
         return _default_eval_result(f"无法解析: {result_text[:100]}")
@@ -1384,12 +1410,16 @@ def _default_eval_result(error_msg: str) -> Dict:
     return {
         "memory_score": 5,
         "memory_reason": error_msg,
+        "memory_tags": [],
         "emotion_score": 5,
         "emotion_reason": "",
+        "emotion_tags": [],
         "quality_score": 5,
         "quality_reason": "",
+        "quality_tags": [],
         "persona_score": 5,
         "persona_reason": "",
+        "persona_tags": [],
         "total_score": 5.0
     }
 

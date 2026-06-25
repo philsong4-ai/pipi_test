@@ -191,6 +191,13 @@ body{background:#f5f5f7;color:#1d1d1f}
         </div>
       </div>
     </div>
+
+    <div style="margin-top:24px">
+      <h4 style="font-size:14px;margin-bottom:12px;color:#1d1d1f">结构化扣分标签 TOP 20</h4>
+      <div style="height:360px;background:#fafafa;border-radius:8px;padding:12px">
+        <canvas id="chart-tags"></canvas>
+      </div>
+    </div>
   </div>
 </div>
 <!-- 用例生成页面 -->
@@ -1500,18 +1507,38 @@ function showEvalDetail(msgId) {
       alert('暂无评测数据');
       return;
     }
+    var tagsMap = {};
+    if (d.deduction_tags) {
+      try {
+        var parsed = typeof d.deduction_tags === 'string' ? JSON.parse(d.deduction_tags) : d.deduction_tags;
+        if (parsed && typeof parsed === 'object') tagsMap = parsed;
+      } catch(e) {}
+    }
+    function renderTags(tags) {
+      if (!tags || !tags.length) return '';
+      var h = '<div style="margin-top:4px">';
+      tags.forEach(function(t) {
+        h += '<span style="display:inline-block;margin:2px 4px;padding:2px 8px;background:#ffe082;border-radius:10px;color:#5d4037;font-size:11px">' + escapeHtml(t) + '</span>';
+      });
+      h += '</div>';
+      return h;
+    }
     var html = '<div class="eval-detail">';
     html += '<div class="eval-dim"><div class="dim-name">记忆运用（客观）</div><div class="dim-score">' + d.memory_score + '/10</div>';
     if (d.memory_reason) html += '<div class="dim-reason">扣分原因: ' + escapeHtml(d.memory_reason) + '</div>';
+    html += renderTags(tagsMap.memory);
     html += '</div>';
     html += '<div class="eval-dim"><div class="dim-name">情感回应（主观）</div><div class="dim-score">' + d.emotion_score + '/10</div>';
     if (d.emotion_reason) html += '<div class="dim-reason">扣分原因: ' + escapeHtml(d.emotion_reason) + '</div>';
+    html += renderTags(tagsMap.emotion);
     html += '</div>';
     html += '<div class="eval-dim"><div class="dim-name">回复质量（主观）</div><div class="dim-score">' + d.quality_score + '/10</div>';
     if (d.quality_reason) html += '<div class="dim-reason">扣分原因: ' + escapeHtml(d.quality_reason) + '</div>';
+    html += renderTags(tagsMap.quality);
     html += '</div>';
     html += '<div class="eval-dim"><div class="dim-name">人设一致（主观）</div><div class="dim-score">' + (d.persona_score !== null && d.persona_score !== undefined ? d.persona_score : '-') + '/10</div>';
     if (d.persona_reason) html += '<div class="dim-reason">扣分原因: ' + escapeHtml(d.persona_reason) + '</div>';
+    html += renderTags(tagsMap.persona);
     html += '</div>';
     html += '<div class="eval-dim" style="background:#f5f5f7;padding:12px;border-radius:8px;margin-top:8px"><div class="dim-name">总分</div><div class="dim-score" style="font-size:24px;color:#f5a623">⭐ ' + d.total_score.toFixed(1) + '</div></div>';
     html += '</div>';
@@ -2190,6 +2217,7 @@ document.querySelectorAll('.nav-item').forEach(function(btn) {
 var trendChart = null;
 var distributionChart = null;
 var compareChart = null;
+var tagsChart = null;
 var compareMode = false;
 var selectedCompareUsers = [];
 
@@ -2199,6 +2227,7 @@ function loadEvalStats() {
   loadStatsDistribution(personaId);
   loadStatsReasons(personaId);
   loadStatsUserRank();
+  loadStatsTags(personaId);
 }
 
 function loadStatsTrend(personaId) {
@@ -2269,6 +2298,37 @@ function loadStatsReasons(personaId) {
     renderReasons('reasons-emotion', data.emotion);
     renderReasons('reasons-quality', data.quality);
     renderReasons('reasons-persona', data.persona || []);
+  });
+}
+
+function loadStatsTags(personaId) {
+  var url = '/api/eval/stats/tags?days=30';
+  if (personaId) url += '&persona_id=' + encodeURIComponent(personaId);
+
+  fetch(url).then(r => r.json()).then(function(data) {
+    var ctx = document.getElementById('chart-tags').getContext('2d');
+    if (tagsChart) tagsChart.destroy();
+
+    var items = data.combined_top20 || [];
+    items.reverse();
+    tagsChart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: items.map(function(x) { return x.tag; }),
+        datasets: [{
+          label: '出现次数',
+          data: items.map(function(x) { return x.count; }),
+          backgroundColor: '#ff9500'
+        }]
+      },
+      options: {
+        indexAxis: 'y',
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {legend: {display: false}},
+        scales: {x: {beginAtZero: true, ticks: {precision: 0}}}
+      }
+    });
   });
 }
 
@@ -4415,6 +4475,14 @@ function _showEvalDetailV2(c, result) {
       });
       content += '</div>';
     }
+    if (ed.deduction_tags && ed.deduction_tags.length > 0) {
+      content += '<p style="margin-top:12px"><b>结构化扣分标签:</b></p>';
+      content += '<div style="background:#fff8e1;padding:8px;border-radius:4px;font-size:12px">';
+      ed.deduction_tags.forEach(function(t) {
+        content += '<span style="display:inline-block;margin:2px 4px;padding:2px 8px;background:#ffe082;border-radius:10px;color:#5d4037;font-size:11px">' + t + '</span>';
+      });
+      content += '</div>';
+    }
   }
   content += '</div>';
 
@@ -5097,6 +5165,14 @@ function _showResultDetail(c, result) {
       content += '<div style="background:#fff0f0;padding:8px;border-radius:4px;font-size:12px">';
       ed.failure_flags_triggered.forEach(function(f) {
         content += '<div style="margin:2px 0;color:#c62828">&#9888; ' + f + '</div>';
+      });
+      content += '</div>';
+    }
+    if (ed.deduction_tags && ed.deduction_tags.length > 0) {
+      content += '<p style="margin-top:12px"><b>结构化扣分标签:</b></p>';
+      content += '<div style="background:#fff8e1;padding:8px;border-radius:4px;font-size:12px">';
+      ed.deduction_tags.forEach(function(t) {
+        content += '<span style="display:inline-block;margin:2px 4px;padding:2px 8px;background:#ffe082;border-radius:10px;color:#5d4037;font-size:11px">' + t + '</span>';
       });
       content += '</div>';
     }

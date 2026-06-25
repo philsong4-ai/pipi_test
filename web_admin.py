@@ -202,6 +202,17 @@ def _ensure_tables():
             except Exception as e:
                 print(f"[STARTUP] Could not add human columns to auto_evaluation: {e}", flush=True)
 
+        # 检查并添加 deduction_tags 列（结构化扣分标签，JSON 字符串）
+        try:
+            execute_query(conn, "SELECT deduction_tags FROM auto_evaluation LIMIT 1", fetch_one=True)
+        except:
+            try:
+                execute_query(conn, "ALTER TABLE auto_evaluation ADD COLUMN deduction_tags TEXT")
+                conn.commit()
+                print("[STARTUP] Added deduction_tags to auto_evaluation", flush=True)
+            except Exception as e:
+                print(f"[STARTUP] Could not add deduction_tags to auto_evaluation: {e}", flush=True)
+
         try:
             execute_query(conn, "SELECT human_score FROM test_results LIMIT 1", fetch_one=True)
         except:
@@ -1365,6 +1376,89 @@ def eval_stats_reasons():
     return jsonify(result)
 
 
+@app.route("/api/eval/stats/tags", methods=["GET"])
+def eval_stats_tags():
+    """结构化扣分标签统计"""
+    persona_id = request.args.get("persona_id", "").strip()
+    days = int(request.args.get("days", 30))
+
+    conn = get_db_connection()
+
+    def collect_from_test_results():
+        """从 test_results.eval_detail JSON 抽 deduction_tags"""
+        from collections import Counter
+        counter = Counter()
+        params = []
+        where = "WHERE eval_detail IS NOT NULL AND eval_detail != ''"
+        if persona_id:
+            where += " AND persona_id = ?"
+            params.append(persona_id)
+        if days > 0:
+            where += " AND executed_at >= DATE_SUB(NOW(), INTERVAL ? DAY)"
+            params.append(days)
+        rows = execute_query(conn, f"""
+            SELECT eval_detail FROM test_results {where}
+        """, tuple(params), fetch_all=True)
+        for r in rows:
+            try:
+                d = json.loads(row_to_dict(r)["eval_detail"])
+                tags = d.get("deduction_tags", [])
+                if isinstance(tags, list):
+                    for t in tags:
+                        if isinstance(t, str) and t.strip():
+                            counter[t.strip()] += 1
+            except:
+                continue
+        return [{"tag": k, "count": v} for k, v in counter.most_common(20)]
+
+    def collect_from_auto_evaluation():
+        """从 auto_evaluation.deduction_tags JSON 抽 4 维度 tags"""
+        from collections import Counter
+        counter = Counter()
+        params = []
+        where = "WHERE deduction_tags IS NOT NULL AND deduction_tags != ''"
+        if persona_id:
+            where += " AND persona_id = ?"
+            params.append(persona_id)
+        if days > 0:
+            where += " AND created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)"
+            params.append(days)
+        rows = execute_query(conn, f"""
+            SELECT deduction_tags FROM auto_evaluation {where}
+        """, tuple(params), fetch_all=True)
+        for r in rows:
+            try:
+                d = json.loads(row_to_dict(r)["deduction_tags"])
+                for dim in ["memory", "emotion", "quality", "persona"]:
+                    tags = d.get(dim, [])
+                    if isinstance(tags, list):
+                        for t in tags:
+                            if isinstance(t, str) and t.strip():
+                                counter[t.strip()] += 1
+            except:
+                continue
+        return [{"tag": k, "count": v} for k, v in counter.most_common(20)]
+
+    test_case_tags = collect_from_test_results()
+    chat_tags = collect_from_auto_evaluation()
+
+    # 合并 top 20
+    from collections import Counter
+    combined = Counter()
+    for item in test_case_tags:
+        combined[item["tag"]] += item["count"]
+    for item in chat_tags:
+        combined[item["tag"]] += item["count"]
+    combined_top20 = [{"tag": k, "count": v} for k, v in combined.most_common(20)]
+
+    conn.close()
+    return jsonify({
+        "test_case_tags": test_case_tags,
+        "chat_tags": chat_tags,
+        "combined_top20": combined_top20
+    })
+
+
 @app.route("/api/eval/stats/by_user", methods=["GET"])
 def eval_stats_by_user():
     """用户评分对比"""
@@ -1879,8 +1973,8 @@ def _save_evaluation(message_id, persona_id, eval_result, context):
     execute_query(conn, """
         INSERT INTO auto_evaluation
         (message_id, persona_id, memory_score, memory_reason, emotion_score, emotion_reason,
-         quality_score, quality_reason, persona_score, persona_reason, total_score, eval_context)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         quality_score, quality_reason, persona_score, persona_reason, total_score, eval_context, deduction_tags)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         message_id, persona_id,
         eval_result.get("memory_score"),
@@ -1892,7 +1986,13 @@ def _save_evaluation(message_id, persona_id, eval_result, context):
         eval_result.get("persona_score"),
         eval_result.get("persona_reason", ""),
         eval_result.get("total_score"),
-        json.dumps({"facts_count": len(context.get("user_facts", [])), "history_len": len(context.get("chat_history", []))}, ensure_ascii=False)
+        json.dumps({"facts_count": len(context.get("user_facts", [])), "history_len": len(context.get("chat_history", []))}, ensure_ascii=False),
+        json.dumps({
+            "memory": eval_result.get("memory_tags", []),
+            "emotion": eval_result.get("emotion_tags", []),
+            "quality": eval_result.get("quality_tags", []),
+            "persona": eval_result.get("persona_tags", []),
+        }, ensure_ascii=False)
     ))
     conn.commit()
     conn.close()
@@ -4116,6 +4216,7 @@ def _evaluate_task_worker(task_id):
                 eval_detail = json.dumps({
                     "eval_points_check": eval_result.get("eval_points_check", {}),
                     "failure_flags_triggered": eval_result.get("failure_flags_triggered", []),
+                    "deduction_tags": eval_result.get("deduction_tags", []),
                 }, ensure_ascii=False)
 
                 if score is not None:
@@ -4236,6 +4337,7 @@ def reevaluate_single_result(result_id):
             eval_detail_obj = {
                 "eval_points_check": eval_result.get("eval_points_check", {}),
                 "failure_flags_triggered": eval_result.get("failure_flags_triggered", []),
+                "deduction_tags": eval_result.get("deduction_tags", []),
             }
             eval_detail = json.dumps(eval_detail_obj, ensure_ascii=False)
             execute_query(conn,
@@ -4382,6 +4484,7 @@ def _reevaluate_failed_worker(task_id, result_ids):
                 eval_detail2 = json.dumps({
                     "eval_points_check": eval_result.get("eval_points_check", {}),
                     "failure_flags_triggered": eval_result.get("failure_flags_triggered", []),
+                    "deduction_tags": eval_result.get("deduction_tags", []),
                 }, ensure_ascii=False)
                 execute_query(conn,
                     "UPDATE test_results SET score = %s, deduction_reason = %s, status = %s, eval_detail = %s WHERE id = %s",
