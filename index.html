@@ -198,6 +198,36 @@ body{background:#f5f5f7;color:#1d1d1f}
         <canvas id="chart-tags"></canvas>
       </div>
     </div>
+
+    <div style="margin-top:24px">
+      <h4 style="font-size:14px;margin-bottom:12px;color:#1d1d1f">Judge 分歧度</h4>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:16px">
+        <div style="background:#fafafa;border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:11px;color:#86868b">平均 std</div>
+          <div id="stat-avg-std" style="font-size:24px;font-weight:600;color:#1d1d1f">-</div>
+        </div>
+        <div style="background:#fafafa;border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:11px;color:#86868b">高分歧用例数</div>
+          <div id="stat-high-count" style="font-size:24px;font-weight:600;color:#ff9500">-</div>
+        </div>
+        <div style="background:#fafafa;border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:11px;color:#86868b">高分歧占比</div>
+          <div id="stat-high-ratio" style="font-size:24px;font-weight:600;color:#ff2d55">-</div>
+        </div>
+      </div>
+      <div style="background:#fafafa;border-radius:8px;padding:12px;max-height:320px;overflow-y:auto">
+        <table id="disagreement-table" style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead><tr style="border-bottom:2px solid #d2d2d7">
+            <th style="text-align:left;padding:6px">case_id</th>
+            <th style="text-align:center;padding:6px">score</th>
+            <th style="text-align:center;padding:6px">std</th>
+            <th style="text-align:left;padding:6px">judges</th>
+            <th style="text-align:center;padding:6px">操作</th>
+          </tr></thead>
+          <tbody id="disagreement-tbody"></tbody>
+        </table>
+      </div>
+    </div>
   </div>
 </div>
 <!-- 用例生成页面 -->
@@ -2236,6 +2266,7 @@ function loadEvalStats() {
   loadStatsReasons(personaId);
   loadStatsUserRank();
   loadStatsTags(personaId);
+  loadStatsDisagreement(personaId);
 }
 
 function loadStatsTrend(personaId) {
@@ -2337,6 +2368,46 @@ function loadStatsTags(personaId) {
         scales: {x: {beginAtZero: true, ticks: {precision: 0}}}
       }
     });
+  });
+}
+
+function loadStatsDisagreement(personaId) {
+  var url = '/api/eval/stats/disagreement?days=30';
+  if (personaId) url += '&persona_id=' + encodeURIComponent(personaId);
+  fetch(url).then(r => r.json()).then(function(data) {
+    document.getElementById('stat-avg-std').textContent = data.avg_std;
+    document.getElementById('stat-high-count').textContent = data.high_disagreement_count;
+    document.getElementById('stat-high-ratio').textContent = (data.high_disagreement_ratio * 100).toFixed(1) + '%';
+    var tbody = document.getElementById('disagreement-tbody');
+    tbody.innerHTML = '';
+    (data.high_disagreement_cases || []).forEach(function(c) {
+      var judges = (c.judges_detail || []).map(function(j) {
+        var m = (j.model || '').split('/').pop();
+        return m + ':' + j.score;
+      }).join(' / ');
+      var viewBtn = c.case_db_id ? '<button onclick="viewDisagreementCase(' + c.result_id + ', ' + c.case_db_id + ')" style="padding:2px 8px;background:#0071e3;color:#fff;border:none;border-radius:4px;font-size:11px;cursor:pointer">查看</button>' : '-';
+      var tr = '<tr style="border-bottom:1px solid #eee">' +
+        '<td style="padding:6px">' + escapeHtml(c.case_code || '') + (c.needs_review ? ' <span style="color:#ff9500;font-size:10px;border:1px solid #ff9500;padding:1px 4px;border-radius:3px;margin-left:4px">需复核</span>' : '') + '</td>' +
+        '<td style="text-align:center;padding:6px;font-weight:600">' + (c.score !== null && c.score !== undefined ? c.score : '-') + '</td>' +
+        '<td style="text-align:center;padding:6px;color:#ff9500">' + c.judges_std + '</td>' +
+        '<td style="padding:6px;font-size:11px;color:#86868b">' + escapeHtml(judges) + '</td>' +
+        '<td style="text-align:center;padding:6px">' + viewBtn + '</td>' +
+        '</tr>';
+      tbody.insertAdjacentHTML('beforeend', tr);
+    });
+  });
+}
+
+function viewDisagreementCase(resultId, caseDbId) {
+  Promise.all([
+    fetch('/api/test_cases/' + caseDbId).then(r => r.json()),
+    fetch('/api/test_results/' + resultId).then(r => r.json())
+  ]).then(function(data) {
+    var c = data[0];
+    var result = data[1];
+    _evalResultListV2 = [result];
+    _evalResultIndexV2 = 0;
+    _showEvalDetailV2(c, result);
   });
 }
 
@@ -4385,7 +4456,7 @@ function loadTaskExecResults() {
         var inputText = (r.input_text || '').substring(0, 50) + ((r.input_text||'').length > 50 ? '...' : '');
         var outputText = (r.actual_output || '').substring(0, 50) + ((r.actual_output||'').length > 50 ? '...' : '');
         html += '<tr style="border-bottom:1px solid #e8e8ed">';
-        html += '<td style="padding:6px;font-family:monospace;font-size:10px">' + (r.case_code || '-') + '</td>';
+        html += '<td style="padding:6px;font-family:monospace;font-size:10px">' + (r.case_code || '-') + (r.needs_review ? ' <span style="color:#ff9500;font-size:10px;border:1px solid #ff9500;padding:1px 4px;border-radius:3px;margin-left:4px">需复核</span>' : '') + '</td>';
         html += '<td style="padding:6px;text-align:center">' + (r.dimension_code || '-') + '</td>';
         html += '<td style="padding:6px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + (r.input_text||'').replace(/"/g,'&quot;') + '">' + inputText + '</td>';
         html += '<td style="padding:6px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + (r.actual_output||'').replace(/"/g,'&quot;') + '">' + outputText + '</td>';
@@ -4438,7 +4509,7 @@ function loadTaskEvalResults() {
       results.forEach(function(r) {
         var statusBadge = r.status === 'passed' ? '<span style="color:#34c759">通过</span>' : '<span style="color:#ff3b30">失败</span>';
         html += '<tr style="border-bottom:1px solid #e8e8ed">';
-        html += '<td style="padding:6px;font-family:monospace;font-size:10px">' + (r.case_code || '-') + '</td>';
+        html += '<td style="padding:6px;font-family:monospace;font-size:10px">' + (r.case_code || '-') + (r.needs_review ? ' <span style="color:#ff9500;font-size:10px;border:1px solid #ff9500;padding:1px 4px;border-radius:3px;margin-left:4px">需复核</span>' : '') + '</td>';
         html += '<td style="padding:6px;text-align:center">' + (r.dimension_code || '-') + '</td>';
         html += '<td style="padding:6px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (r.title || '-') + '</td>';
         html += '<td style="padding:6px;text-align:center;font-weight:600;color:' + ((r.human_score !== null && r.human_score !== undefined ? r.human_score : r.score) >= 6 ? '#34c759' : '#ff3b30') + '">' + (r.human_score !== null && r.human_score !== undefined ? r.human_score + ' \u270f\ufe0f' : (r.score || '-')) + '</td>';

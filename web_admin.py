@@ -247,6 +247,17 @@ def _ensure_tables():
             except Exception as e:
                 print(f"[STARTUP] Could not add eval_detail to test_cases: {e}", flush=True)
 
+        # test_results 加 needs_review 列（judge 分歧超阈值时标记，前端列表 badge 提示）
+        try:
+            execute_query(conn, "SELECT needs_review FROM test_results LIMIT 1", fetch_one=True)
+        except:
+            try:
+                execute_query(conn, "ALTER TABLE test_results ADD COLUMN needs_review TINYINT(1) DEFAULT 0")
+                conn.commit()
+                print("[STARTUP] Added needs_review to test_results", flush=True)
+            except Exception as e:
+                print(f"[STARTUP] Could not add needs_review to test_results: {e}", flush=True)
+
         # 创建 eval_corrections 表（few-shot 纠正案例）
         try:
             execute_query(conn, "SELECT 1 FROM eval_corrections LIMIT 1", fetch_one=True)
@@ -1496,6 +1507,77 @@ def eval_stats_tags():
         "test_case_tags": test_case_tags,
         "chat_tags": chat_tags,
         "combined_top20": combined_top20
+    })
+
+
+@app.route("/api/eval/stats/disagreement", methods=["GET"])
+def eval_stats_disagreement():
+    """judge 分歧度统计：avg_std / 高分歧占比 / 高分歧用例列表"""
+    persona_id = request.args.get("persona_id", "").strip()
+    days = int(request.args.get("days", 30))
+    task_id = request.args.get("task_id", "").strip()
+
+    conn = get_db_connection()
+    params = []
+    where = "WHERE r.eval_detail IS NOT NULL AND r.eval_detail != ''"
+    if persona_id:
+        where += " AND t.persona_id = ?"
+        params.append(persona_id)
+    if days > 0:
+        where += " AND r.executed_at >= DATE_SUB(NOW(), INTERVAL ? DAY)"
+        params.append(days)
+    if task_id:
+        where += " AND r.task_id = ?"
+        params.append(task_id)
+
+    rows = execute_query(conn, f"""
+        SELECT r.id, r.case_id, r.task_id, r.score, r.status, r.executed_at, r.eval_detail, r.needs_review,
+               c.case_id as case_code
+        FROM test_results r
+        LEFT JOIN test_cases c ON r.case_id = c.id
+        LEFT JOIN test_tasks t ON r.task_id = t.id
+        {where}
+        ORDER BY r.executed_at DESC
+        LIMIT 500
+    """, tuple(params), fetch_all=True)
+
+    stds = []
+    high_disagreement = []
+    for r in rows or []:
+        r = row_to_dict(r)
+        try:
+            d = json.loads(r.get("eval_detail") or "{}")
+            std = float(d.get("judges_std") or 0)
+            stds.append(std)
+            if std >= JUDGE_DISAGREEMENT_THRESHOLD:
+                high_disagreement.append({
+                    "result_id": r["id"],
+                    "case_db_id": r.get("case_id"),
+                    "case_code": r.get("case_code"),
+                    "task_id": r.get("task_id"),
+                    "score": r.get("score"),
+                    "status": r.get("status"),
+                    "judges_std": std,
+                    "judges_detail": d.get("judges_detail", []),
+                    "executed_at": str(r.get("executed_at") or "")[:19],
+                    "needs_review": bool(r.get("needs_review")),
+                })
+        except Exception:
+            continue
+
+    conn.close()
+
+    avg_std = round(sum(stds) / len(stds), 2) if stds else 0
+    high_count = sum(1 for s in stds if s >= JUDGE_DISAGREEMENT_THRESHOLD)
+    high_ratio = round(high_count / len(stds), 3) if stds else 0
+
+    return jsonify({
+        "total": len(stds),
+        "avg_std": avg_std,
+        "high_disagreement_count": high_count,
+        "high_disagreement_ratio": high_ratio,
+        "threshold": JUDGE_DISAGREEMENT_THRESHOLD,
+        "high_disagreement_cases": high_disagreement[:50],
     })
 
 
@@ -4206,6 +4288,9 @@ def _load_user_facts(conn, persona_id):
 # ─── 评测共享核心 ───────────────────────────────────
 # 并发闸：限制同时调用 LLM 的评测线程数，防止 burst 请求打爆 LLM 代理
 _EVAL_SEMAPHORE = threading.Semaphore(8)
+# judge 分歧阈值：std ≥ 此值标记 needs_review
+# 经验值：3 个 judge 整数打分，std > 2 通常意味着分歧明显（如 8/4/8 → std=2.31）
+JUDGE_DISAGREEMENT_THRESHOLD = 2.0
 
 
 def _eval_case_core(result_row: Dict, conn, chat_corrections: List[Dict] = None,
@@ -4280,7 +4365,20 @@ def _eval_case_core(result_row: Dict, conn, chat_corrections: List[Dict] = None,
             "UPDATE test_results SET score = %s, deduction_reason = %s, status = %s, eval_detail = %s WHERE id = %s",
             (score, reason, status, eval_detail, result_row["id"]))
     conn.commit()
-    return {"success": True, "score": score, "status": status, "reason": reason}
+
+    # judge 分歧超阈值 → 标记 needs_review（仅 test_results 路径）
+    judges_std = eval_result.get("judges_std", 0) or 0
+    needs_review = 1 if (judges_std and float(judges_std) >= JUDGE_DISAGREEMENT_THRESHOLD) else 0
+    if needs_review and target_table == "test_results":
+        execute_query(conn,
+            "UPDATE test_results SET needs_review = " + ("%s" if USE_MYSQL else "?") +
+            " WHERE id = " + ("%s" if USE_MYSQL else "?"),
+            (needs_review, result_row["id"]))
+        conn.commit()
+        print(f"[EVAL-CORE] {case_code} marked needs_review (std={judges_std})", flush=True)
+
+    return {"success": True, "score": score, "status": status, "reason": reason,
+            "needs_review": needs_review, "judges_std": judges_std}
 
 
 def _evaluate_task_worker(task_id):
@@ -4564,7 +4662,7 @@ def get_test_results():
     ph = "%s" if USE_MYSQL else "?"
 
     sql = """SELECT r.id, r.task_id, r.case_id, r.actual_output, r.executed_at, r.score, r.deduction_reason, r.status, r.eval_detail,
-                   r.human_score, r.human_note,
+                   r.human_score, r.human_note, r.needs_review,
                     c.case_id as case_code, c.dimension_code, c.title, c.test_point, c.input_text, c.expected_output, c.evaluation_points
              FROM test_results r
              JOIN test_cases c ON r.case_id = c.id
@@ -4614,6 +4712,7 @@ def get_test_results():
             "eval_detail": _parse_eval_detail(row.get("eval_detail")),
             "human_score": row.get("human_score"),
             "human_note": row.get("human_note"),
+            "needs_review": bool(row.get("needs_review")),
         })
 
     return jsonify(results)
