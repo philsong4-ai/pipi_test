@@ -11,6 +11,7 @@ import sys
 import random
 import threading
 import datetime
+from typing import Dict, List
 
 # 给 print() 加时间戳
 import builtins
@@ -234,6 +235,17 @@ def _ensure_tables():
                 print("[STARTUP] Added human_score and human_note to test_results", flush=True)
             except Exception as e:
                 print(f"[STARTUP] Could not add human columns to test_results: {e}", flush=True)
+
+        # test_cases 加 eval_detail 列（让 _evaluate_cases_worker 也能写结构化评测详情，统一查询界面）
+        try:
+            execute_query(conn, "SELECT eval_detail FROM test_cases LIMIT 1", fetch_one=True)
+        except:
+            try:
+                execute_query(conn, "ALTER TABLE test_cases ADD COLUMN eval_detail TEXT")
+                conn.commit()
+                print("[STARTUP] Added eval_detail to test_cases", flush=True)
+            except Exception as e:
+                print(f"[STARTUP] Could not add eval_detail to test_cases: {e}", flush=True)
 
         # 创建 eval_corrections 表（few-shot 纠正案例）
         try:
@@ -1569,15 +1581,16 @@ def eval_score():
     toy_persona = row_to_dict(toy_row) if toy_row else None
 
     llm_config = get_llm_config()
-    result = pipi_api.evaluate_chat_reply(
-        reply_text=reply_text,
-        user_message=user_message,
-        chat_history=chat_history,
-        user_facts=user_facts,
-        persona_data=persona_data,
-        toy_persona=toy_persona,
-        **llm_config["eval_realtime"]
-    )
+    with _EVAL_SEMAPHORE:
+        result = pipi_api.evaluate_chat_reply(
+            reply_text=reply_text,
+            user_message=user_message,
+            chat_history=chat_history,
+            user_facts=user_facts,
+            persona_data=persona_data,
+            toy_persona=toy_persona,
+            **llm_config["eval_realtime"]
+        )
 
     return jsonify(result)
 
@@ -1705,15 +1718,16 @@ def simulate_chat():
                 conn.close()
 
                 llm_config2 = get_llm_config()
-                eval_result = pipi_api.evaluate_chat_reply(
-                    reply_text=reply_text,
-                    user_message=user_message,
-                    chat_history=context.get("chat_history", []),
-                    user_facts=context.get("user_facts", []),
-                    persona_data=context.get("persona_data"),
-                    toy_persona=context.get("toy_persona"),
-                    **llm_config2["eval_realtime"]
-                )
+                with _EVAL_SEMAPHORE:
+                    eval_result = pipi_api.evaluate_chat_reply(
+                        reply_text=reply_text,
+                        user_message=user_message,
+                        chat_history=context.get("chat_history", []),
+                        user_facts=context.get("user_facts", []),
+                        persona_data=context.get("persona_data"),
+                        toy_persona=context.get("toy_persona"),
+                        **llm_config2["eval_realtime"]
+                    )
 
                 if eval_result and eval_result.get("total_score") is not None:
                     _save_evaluation(reply_id, persona_id, eval_result, context)
@@ -1793,18 +1807,19 @@ def _batch_evaluate_worker(pending_msgs):
             context = _build_eval_context(conn, persona_id, msg_id)
             conn.close()
 
-            # 调用评测
+            # 调用评测（并发闸保护，防止 burst 请求打爆 LLM）
             llm_config = get_llm_config()
-            eval_result = pipi_api.evaluate_chat_reply(
-                reply_text=reply_text,
-                user_message=user_message,
-                chat_history=context['chat_history'],
-                user_facts=context['user_facts'],
-                persona_data=context['persona_data'],
-                toy_persona=context.get('toy_persona'),
-                corrections=corrections,
-                **llm_config["eval_batch"]
-            )
+            with _EVAL_SEMAPHORE:
+                eval_result = pipi_api.evaluate_chat_reply(
+                    reply_text=reply_text,
+                    user_message=user_message,
+                    chat_history=context['chat_history'],
+                    user_facts=context['user_facts'],
+                    persona_data=context['persona_data'],
+                    toy_persona=context.get('toy_persona'),
+                    corrections=corrections,
+                    **llm_config["eval_batch"]
+                )
 
             # 保存结果
             _save_evaluation(msg_id, persona_id, eval_result, context)
@@ -2299,16 +2314,17 @@ def _evaluate_and_save(msg_id, persona_id, user_message, reply_text, persona_dat
 
         corrections = _load_recent_corrections(eval_type="chat", limit=20)
         llm_config = get_llm_config()
-        eval_result = pipi_api.evaluate_chat_reply(
-            reply_text=reply_text,
-            user_message=user_message,
-            chat_history=context['chat_history'],
-            user_facts=context['user_facts'],
-            persona_data=context['persona_data'],
-            toy_persona=context.get('toy_persona'),
-            corrections=corrections,
-            **llm_config["eval_realtime"]
-        )
+        with _EVAL_SEMAPHORE:
+            eval_result = pipi_api.evaluate_chat_reply(
+                reply_text=reply_text,
+                user_message=user_message,
+                chat_history=context['chat_history'],
+                user_facts=context['user_facts'],
+                persona_data=context['persona_data'],
+                toy_persona=context.get('toy_persona'),
+                corrections=corrections,
+                **llm_config["eval_realtime"]
+            )
 
         _save_evaluation(msg_id, persona_id, eval_result, context)
         print(f"[REALTIME EVAL] {msg_id} => {eval_result.get('total_score')}", flush=True)
@@ -4187,6 +4203,86 @@ def _load_user_facts(conn, persona_id):
     return [row_to_dict(f) for f in facts] if facts else []
 
 
+# ─── 评测共享核心 ───────────────────────────────────
+# 并发闸：限制同时调用 LLM 的评测线程数，防止 burst 请求打爆 LLM 代理
+_EVAL_SEMAPHORE = threading.Semaphore(8)
+
+
+def _eval_case_core(result_row: Dict, conn, chat_corrections: List[Dict] = None,
+                    user_facts: List[Dict] = None, retry_on_error: bool = True,
+                    target_table: str = "test_results") -> Dict:
+    """共享评测核心。从 test_results JOIN test_cases 的行出发，跑完评测 + 写回 DB。
+    替代 _evaluate_task_worker / _reevaluate_failed_worker / reevaluate_single_result 中的重复逻辑。
+    target_table: "test_results"（默认）或 "test_cases"（_evaluate_cases_worker 路径用）。
+    返回 {success, score, status, reason, error_kind}。
+    """
+    case_code = result_row.get("case_id", "")
+    dim_code = result_row.get("dimension_code", "")
+    chat_corrections = chat_corrections if chat_corrections is not None else _load_recent_corrections(eval_type="chat", limit=10)
+    test_corrections = _load_recent_corrections(eval_type="test_case", dimension_code=dim_code, limit=10)
+    combined = (chat_corrections or []) + (test_corrections or [])
+
+    # 统一 case_data 构建（含 score_2/6/10_desc，缺失则不传）
+    case_data = {
+        "case_id": case_code,
+        "dimension_code": dim_code,
+        "title": result_row.get("title", ""),
+        "test_point": result_row.get("test_point", ""),
+        "input_text": result_row.get("input_text", ""),
+        "expected_output": result_row.get("expected_output", ""),
+        "actual_output": result_row.get("actual_output", ""),
+        "evaluation_points": result_row.get("evaluation_points", ""),
+        "failure_flags": result_row.get("failure_flags", ""),
+    }
+    for desc_key in ("score_2_desc", "score_6_desc", "score_10_desc"):
+        if result_row.get(desc_key):
+            case_data[desc_key] = result_row[desc_key]
+
+    llm_config = get_llm_config()
+    eval_kwargs = dict(corrections=combined, user_facts=user_facts or [], **llm_config["eval_case"])
+
+    # 并发闸 + typed 失败重试（替代中文 reason 嗅探）
+    with _EVAL_SEMAPHORE:
+        eval_result = pipi_api.evaluate_test_case(case_data, **eval_kwargs)
+        error_kind = eval_result.get("error_kind", "")
+        if retry_on_error and error_kind in ("no_response", "exception", "timeout"):
+            print(f"[EVAL-CORE] {case_code} retry after {error_kind}", flush=True)
+            eval_result = pipi_api.evaluate_test_case(case_data, **eval_kwargs)
+
+    score = eval_result.get("score")
+    reason = eval_result.get("deduction_reason", "")
+    status = eval_result.get("status", "evaluated")
+
+    if score is None:
+        return {"success": False, "reason": reason, "error_kind": error_kind}
+
+    # eval_detail JSON 序列化收敛到一处（替换 4256/4381/4532 三处手写）
+    eval_detail = json.dumps({
+        "eval_points_check": eval_result.get("eval_points_check", {}),
+        "failure_flags_triggered": eval_result.get("failure_flags_triggered", []),
+        "deduction_tags": eval_result.get("deduction_tags", []),
+        "deduction_breakdown": eval_result.get("deduction_breakdown", []),
+        "memory_objective_check": eval_result.get("memory_objective_check", {}),
+        "judges_detail": eval_result.get("judges_detail", []),
+        "judges_std": eval_result.get("judges_std", 0),
+    }, ensure_ascii=False)
+
+    if target_table == "test_cases":
+        execute_query(conn,
+            "UPDATE test_cases SET score = " + ("%s" if USE_MYSQL else "?") +
+            ", deduction_reason = " + ("%s" if USE_MYSQL else "?") +
+            ", status = " + ("%s" if USE_MYSQL else "?") +
+            ", eval_detail = " + ("%s" if USE_MYSQL else "?") +
+            " WHERE id = " + ("%s" if USE_MYSQL else "?"),
+            (score, reason, status, eval_detail, result_row["id"]))
+    else:
+        execute_query(conn,
+            "UPDATE test_results SET score = %s, deduction_reason = %s, status = %s, eval_detail = %s WHERE id = %s",
+            (score, reason, status, eval_detail, result_row["id"]))
+    conn.commit()
+    return {"success": True, "score": score, "status": status, "reason": reason}
+
+
 def _evaluate_task_worker(task_id):
     """后台评测测试任务"""
     try:
@@ -4220,57 +4316,14 @@ def _evaluate_task_worker(task_id):
             print(f"[TASK-EVAL] {task_id} evaluating {case_code}...", flush=True)
 
             try:
-                # 按维度加载相关的 test_case 纠正案例
-                dim_code = result.get("dimension_code", "")
-                test_corrections = _load_recent_corrections(eval_type="test_case", dimension_code=dim_code, limit=10)
-                combined_corrections = (chat_corrections or []) + (test_corrections or [])
-
-                # 构建评测用例数据
-                case_data = {
-                    "case_id": case_code,
-                    "dimension_code": result["dimension_code"],
-                    "title": result["title"],
-                    "test_point": result.get("test_point", ""),
-                    "input_text": result["input_text"],
-                    "expected_output": result["expected_output"],
-                    "actual_output": result["actual_output"],
-                    "evaluation_points": result.get("evaluation_points", ""),
-                    "failure_flags": result["failure_flags"],
-                }
-
-                llm_config = get_llm_config()
-                eval_result = pipi_api.evaluate_test_case(case_data, corrections=combined_corrections, user_facts=user_facts, **llm_config["eval_case"])
-                score = eval_result.get("score")
-                reason = eval_result.get("deduction_reason", "")
-                status = eval_result.get("status", "evaluated")
-
-                # 超时或无响应时重试1次
-                if score == 0 and ("超时" in str(reason) or "无响应" in str(reason) or "异常" in str(reason)):
-                    print(f"[TASK-EVAL] {case_code} retry after timeout/error: {reason}", flush=True)
-                    eval_result = pipi_api.evaluate_test_case(case_data, corrections=combined_corrections, user_facts=user_facts, **llm_config["eval_case"])
-                    score = eval_result.get("score")
-                    reason = eval_result.get("deduction_reason", "")
-                    status = eval_result.get("status", "evaluated")
-
-                # 结构化评测详情
-                eval_detail = json.dumps({
-                    "eval_points_check": eval_result.get("eval_points_check", {}),
-                    "failure_flags_triggered": eval_result.get("failure_flags_triggered", []),
-                    "deduction_tags": eval_result.get("deduction_tags", []),
-                    "deduction_breakdown": eval_result.get("deduction_breakdown", []),
-                    "memory_objective_check": eval_result.get("memory_objective_check", {}),
-                    "judges_detail": eval_result.get("judges_detail", []),
-                    "judges_std": eval_result.get("judges_std", 0),
-                }, ensure_ascii=False)
-
-                if score is not None:
-                    execute_query(conn,
-                        "UPDATE test_results SET score = %s, deduction_reason = %s, status = %s, eval_detail = %s WHERE id = %s",
-                        (score, reason, status, eval_detail, result["id"]))
-                    if status == "passed":
+                core_result = _eval_case_core(result, conn, chat_corrections=chat_corrections, user_facts=user_facts)
+                if core_result.get("success"):
+                    if core_result.get("status") == "passed":
                         passed += 1
                     else:
                         failed += 1
+                else:
+                    print(f"[TASK-EVAL] {case_code} failed: {core_result.get('reason')}", flush=True)
 
             except Exception as e:
                 print(f"[TASK-EVAL ERROR] {case_code}: {e}", flush=True)
@@ -4353,60 +4406,23 @@ def reevaluate_single_result(result_id):
     print(f"[RE-EVAL] Re-evaluating {case_code} (result_id={result_id})...", flush=True)
 
     try:
-        # 构建评测用例数据
-        case_data = {
-            "case_id": case_code,
-            "dimension_code": result["dimension_code"],
-            "title": result["title"],
-                    "test_point": result.get("test_point", ""),
-            "input_text": result["input_text"],
-            "expected_output": result["expected_output"],
-            "actual_output": result["actual_output"],
-            "evaluation_points": result.get("evaluation_points", ""),
-            "failure_flags": result["failure_flags"],
-        }
-
-        # 加载相关纠正案例
-        chat_corrections = _load_recent_corrections(eval_type="chat", limit=5)
-        test_corrections = _load_recent_corrections(eval_type="test_case", dimension_code=result.get("dimension_code", ""), limit=10)
-        combined_corrections = (chat_corrections or []) + (test_corrections or [])
-
-        llm_config = get_llm_config()
-        eval_result = pipi_api.evaluate_test_case(case_data, corrections=combined_corrections, user_facts=user_facts, **llm_config["eval_case"])
-        score = eval_result.get("score")
-        reason = eval_result.get("deduction_reason", "")
-        status = eval_result.get("status", "evaluated")
-
-        if score is not None:
-            eval_detail_obj = {
-                "eval_points_check": eval_result.get("eval_points_check", {}),
-                "failure_flags_triggered": eval_result.get("failure_flags_triggered", []),
-                "deduction_tags": eval_result.get("deduction_tags", []),
-                "deduction_breakdown": eval_result.get("deduction_breakdown", []),
-                "memory_objective_check": eval_result.get("memory_objective_check", {}),
-                "judges_detail": eval_result.get("judges_detail", []),
-                "judges_std": eval_result.get("judges_std", 0),
-            }
-            eval_detail = json.dumps(eval_detail_obj, ensure_ascii=False)
-            execute_query(conn,
-                "UPDATE test_results SET score = %s, deduction_reason = %s, status = %s, eval_detail = %s WHERE id = %s",
-                (score, reason, status, eval_detail, result_id))
-            conn.commit()
-            print(f"[RE-EVAL] {case_code} => score={score}, status={status}", flush=True)
+        core_result = _eval_case_core(result, conn, user_facts=user_facts)
+        if core_result.get("success"):
+            print(f"[RE-EVAL] {case_code} => score={core_result.get('score')}, status={core_result.get('status')}", flush=True)
             conn.close()
             return jsonify({
                 "success": True,
                 "case_id": case_code,
-                "score": score,
-                "deduction_reason": reason,
-                "status": status
+                "score": core_result.get("score"),
+                "deduction_reason": core_result.get("reason"),
+                "status": core_result.get("status")
             })
         else:
             conn.close()
             return jsonify({
                 "success": False,
                 "case_id": case_code,
-                "error": reason or "评测失败"
+                "error": core_result.get("reason") or "评测失败"
             }), 500
 
     except Exception as e:
@@ -4502,51 +4518,13 @@ def _reevaluate_failed_worker(task_id, result_ids):
         print(f"[RE-EVAL BATCH] {task_id} re-evaluating {case_code}...", flush=True)
 
         try:
-            # 按维度加载 test_case 纠正案例
-            dim_code = result.get("dimension_code", "")
-            test_corrections = _load_recent_corrections(eval_type="test_case", dimension_code=dim_code, limit=10)
-            combined_corrections = (chat_corrections or []) + (test_corrections or [])
-
-            case_data = {
-                "case_id": case_code,
-                "dimension_code": result["dimension_code"],
-                "title": result["title"],
-                    "test_point": result.get("test_point", ""),
-                "input_text": result["input_text"],
-                "expected_output": result["expected_output"],
-                "actual_output": result["actual_output"],
-                "evaluation_points": result.get("evaluation_points", ""),
-                "failure_flags": result["failure_flags"],
-                "score_2_desc": result["score_2_desc"],
-                "score_6_desc": result["score_6_desc"],
-                "score_10_desc": result["score_10_desc"],
-            }
-
-            llm_config = get_llm_config()
-            eval_result = pipi_api.evaluate_test_case(case_data, corrections=combined_corrections, user_facts=user_facts, **llm_config["eval_case"])
-            score = eval_result.get("score")
-            reason = eval_result.get("deduction_reason", "")
-            status = eval_result.get("status", "evaluated")
-
-            if score is not None:
-                eval_detail2 = json.dumps({
-                    "eval_points_check": eval_result.get("eval_points_check", {}),
-                    "failure_flags_triggered": eval_result.get("failure_flags_triggered", []),
-                    "deduction_tags": eval_result.get("deduction_tags", []),
-                    "deduction_breakdown": eval_result.get("deduction_breakdown", []),
-                    "memory_objective_check": eval_result.get("memory_objective_check", {}),
-                    "judges_detail": eval_result.get("judges_detail", []),
-                    "judges_std": eval_result.get("judges_std", 0),
-                }, ensure_ascii=False)
-                execute_query(conn,
-                    "UPDATE test_results SET score = %s, deduction_reason = %s, status = %s, eval_detail = %s WHERE id = %s",
-                    (score, reason, status, eval_detail2, result_id))
-                conn.commit()
+            core_result = _eval_case_core(result, conn, chat_corrections=chat_corrections, user_facts=user_facts)
+            if core_result.get("success"):
                 success_count += 1
-                print(f"[RE-EVAL BATCH] {case_code} => score={score}", flush=True)
+                print(f"[RE-EVAL BATCH] {case_code} => score={core_result.get('score')}", flush=True)
             else:
                 fail_count += 1
-                print(f"[RE-EVAL BATCH] {case_code} failed: {reason}", flush=True)
+                print(f"[RE-EVAL BATCH] {case_code} failed: {core_result.get('reason')}", flush=True)
 
         except Exception as e:
             fail_count += 1
@@ -6431,37 +6409,24 @@ def _evaluate_cases_worker(task_id):
                 # 加载用户事实
                 user_facts = _load_user_facts(conn, case.get("persona_id")) if case.get("persona_id") else []
 
-                # 按维度加载测试纠正案例
-                dim_code = case.get("dimension_code", "")
-                test_corrections = _load_recent_corrections(eval_type="test_case", dimension_code=dim_code, limit=10)
-                combined_corrections = (chat_corrections or []) + (test_corrections or [])
+                core_result = _eval_case_core(
+                    case, conn, chat_corrections=chat_corrections, user_facts=user_facts,
+                    target_table="test_cases",
+                )
 
-                # 调用评测函数
-                llm_config = get_llm_config()
-                result = pipi_api.evaluate_test_case(case, corrections=combined_corrections, user_facts=user_facts, **llm_config["eval_case"])
-
-                score = result.get("score")
-                reason = result.get("deduction_reason", "")
-                status = result.get("status", "pending")
-
-                if score is not None:
-                    # 更新数据库
-                    execute_query(conn,
-                        "UPDATE test_cases SET score = " + ("%s" if USE_MYSQL else "?") +
-                        ", deduction_reason = " + ("%s" if USE_MYSQL else "?") +
-                        ", status = " + ("%s" if USE_MYSQL else "?") +
-                        " WHERE id = " + ("%s" if USE_MYSQL else "?"),
-                        (score, reason, status, case_id))
-                    conn.commit()
+                if core_result.get("success"):
                     task["evaluated_count"] += 1
-                    if status == "passed":
+                    if core_result.get("status") == "passed":
                         task["passed_count"] += 1
                     else:
                         task["failed_count"] += 1
+                    score = core_result.get("score")
                 else:
-                    task["errors"].append({"case_id": case["case_id"], "error": reason})
+                    score = None
+                    task["errors"].append({"case_id": case["case_id"], "error": core_result.get("reason")})
 
             except Exception as e:
+                score = None
                 print(f"[EVAL ERROR] {case['case_id']}: {e}", flush=True)
                 task["errors"].append({"case_id": case["case_id"], "error": str(e)})
 

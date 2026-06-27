@@ -9,7 +9,8 @@ import json
 import time
 import unicodedata
 import requests
-from typing import List, Dict, Optional
+from dataclasses import dataclass, field, asdict
+from typing import List, Dict, Optional, Any
 
 # ─── 配置 ─────────────────────────────────────────
 API_URL = "https://<DOLL_API_DOMAIN>/toy/v1/chat/completions"
@@ -1158,6 +1159,60 @@ def _format_corrections_for_prompt(corrections, eval_type="chat"):
     return "\n".join(lines)
 
 
+@dataclass
+class EvalResult:
+    """评测结果值对象。case_path 用 score/reason/status；chat_path 用 4 维分项。
+    error_kind: typed 失败模式，替代中文 reason 嗅探。可选值：
+    "" / "no_response" / "parse_failed" / "exception" / "timeout"
+    """
+    # case_path 字段
+    score: Optional[int] = None
+    deduction_reason: str = ""
+    status: str = "evaluated"
+    eval_points_check: Dict = field(default_factory=dict)
+    failure_flags_triggered: List = field(default_factory=list)
+    deduction_tags: List = field(default_factory=list)
+    deduction_breakdown: List = field(default_factory=list)
+    memory_objective_check: Dict = field(default_factory=dict)
+    judges_detail: List = field(default_factory=list)
+    judges_std: float = 0.0
+    # chat_path 字段（case_path 不用）
+    memory_score: int = 5
+    memory_reason: str = ""
+    memory_tags: List = field(default_factory=list)
+    memory_deduction_breakdown: List = field(default_factory=list)
+    emotion_score: int = 5
+    emotion_reason: str = ""
+    emotion_tags: List = field(default_factory=list)
+    emotion_deduction_breakdown: List = field(default_factory=list)
+    quality_score: int = 5
+    quality_reason: str = ""
+    quality_tags: List = field(default_factory=list)
+    quality_deduction_breakdown: List = field(default_factory=list)
+    persona_score: int = 5
+    persona_reason: str = ""
+    persona_tags: List = field(default_factory=list)
+    persona_deduction_breakdown: List = field(default_factory=list)
+    total_score: float = 5.0
+    # typed 失败模式
+    error_kind: str = ""
+
+    def to_eval_detail_json(self) -> str:
+        """序列化为 test_results.eval_detail 列存的 JSON（case_path 用）。"""
+        return json.dumps({
+            "eval_points_check": self.eval_points_check,
+            "failure_flags_triggered": self.failure_flags_triggered,
+            "deduction_tags": self.deduction_tags,
+            "deduction_breakdown": self.deduction_breakdown,
+            "memory_objective_check": self.memory_objective_check,
+            "judges_detail": self.judges_detail,
+            "judges_std": self.judges_std,
+        }, ensure_ascii=False)
+
+    def to_dict(self) -> Dict:
+        return asdict(self)
+
+
 def _parse_test_case_eval(data: Dict, memory_check: Dict = None) -> Dict:
     """解析 evaluate_test_case 的 LLM 输出。
     若 deduction_breakdown 非空，按 10 - sum(points) 重算 score 强制一致性。
@@ -1237,6 +1292,7 @@ def _run_judges_test_case(system_prompt: str, user_prompt: str, judges: List[Dic
                     "status": "failed", "eval_points_check": {}, "failure_flags_triggered": [],
                     "deduction_tags": [], "deduction_breakdown": [],
                     "memory_objective_check": memory_check or {},
+                    "error_kind": "parse_failed",
                 }
             print(f"[EVAL JUDGE] model={j.get('model')} score={parsed.get('score')}", flush=True)
         except Exception as e:
@@ -1245,6 +1301,7 @@ def _run_judges_test_case(system_prompt: str, user_prompt: str, judges: List[Dic
                 "eval_points_check": {}, "failure_flags_triggered": [],
                 "deduction_tags": [], "deduction_breakdown": [],
                 "memory_objective_check": memory_check or {},
+                "error_kind": "exception",
             }
             print(f"[EVAL JUDGE] model={j.get('model')} error: {e}", flush=True)
         judges_detail.append({
@@ -1407,7 +1464,7 @@ def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, correctio
             )
         result_text = call_llm_simple(system_prompt, user_prompt, timeout=timeout, model=model, temperature=temperature, max_tokens=max_tokens)
         if not result_text:
-            return {"score": 0, "deduction_reason": "评测LLM无响应", "status": "failed", "deduction_tags": [], "deduction_breakdown": [], "memory_objective_check": memory_check}
+            return {"score": 0, "deduction_reason": "评测LLM无响应", "status": "failed", "deduction_tags": [], "deduction_breakdown": [], "memory_objective_check": memory_check, "error_kind": "no_response"}
 
         print(f"[EVAL LLM RAW] {case_id}: {result_text[:300]}", flush=True)
 
@@ -1439,9 +1496,9 @@ def evaluate_test_case(case_data: Dict, user_facts: List[Dict] = None, correctio
             except json.JSONDecodeError:
                 pass
 
-        return {"score": 0, "deduction_reason": f"无法解析评测结果: {clean_text[:100]}", "status": "failed", "eval_points_check": {}, "failure_flags_triggered": [], "deduction_tags": [], "deduction_breakdown": [], "memory_objective_check": memory_check}
+        return {"score": 0, "deduction_reason": f"无法解析评测结果: {clean_text[:100]}", "status": "failed", "eval_points_check": {}, "failure_flags_triggered": [], "deduction_tags": [], "deduction_breakdown": [], "memory_objective_check": memory_check, "error_kind": "parse_failed"}
     except Exception as e:
-        return {"score": 0, "deduction_reason": f"评测异常: {str(e)}", "status": "failed", "eval_points_check": {}, "failure_flags_triggered": [], "deduction_tags": [], "deduction_breakdown": [], "memory_objective_check": memory_check if 'memory_check' in locals() else {}}
+        return {"score": 0, "deduction_reason": f"评测异常: {str(e)}", "status": "failed", "eval_points_check": {}, "failure_flags_triggered": [], "deduction_tags": [], "deduction_breakdown": [], "memory_objective_check": memory_check if 'memory_check' in locals() else {}, "error_kind": "exception"}
 
 
 # ─── 对话实时评测 ───────────────────────────────────
@@ -1599,7 +1656,7 @@ def evaluate_chat_reply(
         result_text = call_llm_simple(system_prompt, user_prompt, timeout=timeout, model=model, temperature=temperature, max_tokens=max_tokens)
         print(f"[CHAT EVAL] model={model or EXTRACT_LLM_MODEL} result_text len: {len(result_text) if result_text else 0}", flush=True)
         if not result_text:
-            return _default_eval_result("LLM无响应", memory_check=memory_check)
+            return _default_eval_result("LLM无响应", memory_check=memory_check, error_kind="no_response")
         
         # 解析JSON
         match = re.search(r'\{[^{}]*\}', result_text, re.DOTALL)
@@ -1647,10 +1704,10 @@ def evaluate_chat_reply(
 
             return data
 
-        return _default_eval_result(f"无法解析: {result_text[:100]}", memory_check=memory_check)
+        return _default_eval_result(f"无法解析: {result_text[:100]}", memory_check=memory_check, error_kind="parse_failed")
 
     except Exception as e:
-        return _default_eval_result(f"评测异常: {str(e)}", memory_check=memory_check if 'memory_check' in locals() else {})
+        return _default_eval_result(f"评测异常: {str(e)}", memory_check=memory_check if 'memory_check' in locals() else {}, error_kind="exception")
 
 
 def _parse_chat_eval_raw_text(result_text: str, memory_check: Dict = None) -> Dict:
@@ -1721,10 +1778,10 @@ def _run_judges_chat_reply(system_prompt: str, user_prompt: str, judges: List[Di
             )
             parsed = _parse_chat_eval_raw_text(result_text, memory_check)
             if not parsed:
-                parsed = _default_eval_result(f"无法解析: {(result_text or '')[:100]}", memory_check=memory_check)
+                parsed = _default_eval_result(f"无法解析: {(result_text or '')[:100]}", memory_check=memory_check, error_kind="parse_failed")
             print(f"[CHAT EVAL JUDGE] model={j.get('model')} total={parsed.get('total_score')}", flush=True)
         except Exception as e:
-            parsed = _default_eval_result(f"评测异常: {str(e)}", memory_check=memory_check)
+            parsed = _default_eval_result(f"评测异常: {str(e)}", memory_check=memory_check, error_kind="exception")
             print(f"[CHAT EVAL JUDGE] model={j.get('model')} error: {e}", flush=True)
         judges_detail.append({
             "model": j.get("model"),
@@ -1780,8 +1837,10 @@ def _run_judges_chat_reply(system_prompt: str, user_prompt: str, judges: List[Di
     return aggregated
 
 
-def _default_eval_result(error_msg: str, memory_check: Dict = None) -> Dict:
-    """返回默认评测结果"""
+def _default_eval_result(error_msg: str, memory_check: Dict = None, error_kind: str = "exception") -> Dict:
+    """返回默认评测结果（chat 路径 4 维度兜底）。
+    error_kind: typed 失败模式，可选 no_response/parse_failed/exception/timeout。
+    """
     return {
         "memory_score": 5,
         "memory_reason": error_msg,
@@ -1801,6 +1860,7 @@ def _default_eval_result(error_msg: str, memory_check: Dict = None) -> Dict:
         "persona_deduction_breakdown": [],
         "total_score": 5.0,
         "memory_objective_check": memory_check or {},
+        "error_kind": error_kind,
     }
 
 
