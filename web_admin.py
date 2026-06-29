@@ -4402,6 +4402,20 @@ def _evaluate_task_worker(task_id):
             (task_id,), fetch_all=True)
         results = [row_to_dict(r) for r in results]
 
+        # 兜底：统计 task 下有多少条 status='executed' 但 case_id 在 test_cases 中已不存在的 orphan
+        # Why: REGEN 在 task 执行过程中删 case 会导致 test_results.case_id 悬空，
+        # 上面的 INNER JOIN 静默丢弃这些 orphan。如果不显式统计，progress_done 直接 = len(results)，
+        # task 被标 completed 但实际有 orphan 永远停在 'executed' 状态。
+        orphan_row = execute_query(conn,
+            "SELECT COUNT(*) AS cnt FROM test_results r "
+            "WHERE r.task_id = " + ("%s" if USE_MYSQL else "?") +
+            " AND r.status = 'executed' AND NOT EXISTS (SELECT 1 FROM test_cases c WHERE c.id = r.case_id)",
+            (task_id,), fetch_one=True)
+        orphan_count = (row_to_dict(orphan_row)["cnt"] if orphan_row else 0) or 0
+        if orphan_count > 0:
+            print(f"[TASK-EVAL] {task_id} WARNING: {orphan_count} orphan test_results (case_id missing in test_cases), "
+                  f"these will remain 'executed' status", flush=True)
+
         done = 0
         passed = 0
         failed = 0
@@ -4430,11 +4444,18 @@ def _evaluate_task_worker(task_id):
             execute_query(conn, "UPDATE test_tasks SET progress_done = %s WHERE id = %s", (done, task_id))
             conn.commit()
 
-        # 完成
-        execute_query(conn, "UPDATE test_tasks SET status = 'completed', completed_at = NOW() WHERE id = %s", (task_id,))
+        # 完成：如果有 orphan（case 已被 REGEN 删除），标 partial 而不是 completed
+        if orphan_count > 0:
+            final_status = "partial"
+            print(f"[TASK-EVAL] {task_id} partial: evaluated={done}, "
+                  f"passed={passed}, failed={failed}, orphan={orphan_count}", flush=True)
+        else:
+            final_status = "completed"
+            print(f"[TASK-EVAL] {task_id} completed, passed={passed}, failed={failed}", flush=True)
+        execute_query(conn, "UPDATE test_tasks SET status = %s, completed_at = NOW() WHERE id = %s",
+                      (final_status, task_id))
         conn.commit()
         conn.close()
-        print(f"[TASK-EVAL] {task_id} completed, passed={passed}, failed={failed}", flush=True)
 
     except Exception as e:
         import traceback
@@ -7753,6 +7774,13 @@ def _wait_for_quality_review(persona_id, max_wait_seconds=1800, check_interval=1
         if total < prev_total:
             # 用例总数下降，说明有维度正在删除旧用例准备重生成，继续等待
             print(f"[FULL FLOW] Total decreased {prev_total} -> {total}, waiting for regeneration...", flush=True)
+        elif _any_regen_running_for_persona(persona_id):
+            # 即使 DB 显示 0 pending/0 failed，只要 REGEN 线程还在跑就继续等
+            # Why: REGEN 启动后 LLM 生成要数秒，这段时间 DB 仍是旧状态（全 reviewed），
+            # 但 REGEN 完成后会 DELETE 旧 case + INSERT 新 case，新 case 是 pending 状态。
+            # 如果此刻误判 ready 启动 task worker，task worker 会把 110 条 (case_id, input_text)
+            # 缓存到内存，后续 REGEN 删掉其中部分 case，导致 test_results orphan。
+            print(f"[FULL FLOW] REGEN still running for {persona_id}, waiting...", flush=True)
         elif pending == 0 and failed == 0 and (total >= prev_total or prev_total == 0):
             # 全部审核完成且总数稳定（不再减少），返回通过的用例（needs_manual_review 不阻塞，因其不再自动变化）
             if needs_manual > 0:
@@ -7805,6 +7833,29 @@ def _get_regen_lock(key):
             lock = _threading_mod.Lock()
             _regen_locks[key] = lock
         return lock
+
+
+def _any_regen_running_for_persona(persona_id):
+    """检查该 persona 是否有任意维度的 REGEN 正在运行（锁被持有即视为运行中）。
+
+    Why: FULL FLOW 的 _wait_for_quality_review 只看 DB quality_status，看不到
+    REGEN 异步线程的运行状态。REGEN 启动 LLM 生成（耗时数秒）但还没改 DB 时，
+    DB 仍显示 0 pending/0 failed，FULL FLOW 会误判 ready 并启动 task worker，
+    后续 REGEN 删除旧 case 导致 test_results 出现 orphan。
+    """
+    prefix = persona_id + ":"
+    with _regen_locks_guard:
+        keys = [k for k in _regen_locks.keys() if k.startswith(prefix)]
+    for k in keys:
+        lock = _regen_locks[k]
+        # acquire(blocking=False) 返回 True 表示拿到锁（即原本没人持有，REGEN 已结束）
+        # 返回 False 表示锁被持有（REGEN 正在跑）
+        acquired = lock.acquire(blocking=False)
+        if acquired:
+            lock.release()
+        else:
+            return True
+    return False
 
 
 def _get_retry_count(persona_id, dim_code):
