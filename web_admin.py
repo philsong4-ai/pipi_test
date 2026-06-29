@@ -336,6 +336,33 @@ def _ensure_tables():
             except Exception as e:
                 print(f"[STARTUP] Could not create dimension_retry_counts: {e}", flush=True)
 
+        # 跨 worker REGEN 锁表（Gunicorn 多 worker 之间互斥）
+        try:
+            execute_query(conn, "SELECT 1 FROM regen_locks LIMIT 1", fetch_one=True)
+        except:
+            try:
+                if USE_MYSQL:
+                    execute_query(conn, """
+                        CREATE TABLE IF NOT EXISTS regen_locks (
+                            lock_key VARCHAR(100) PRIMARY KEY,
+                            expires_at TIMESTAMP NOT NULL,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            INDEX idx_expires (expires_at)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """)
+                else:
+                    execute_query(conn, """
+                        CREATE TABLE IF NOT EXISTS regen_locks (
+                            lock_key TEXT PRIMARY KEY,
+                            expires_at TIMESTAMP NOT NULL,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+                conn.commit()
+                print("[STARTUP] Created regen_locks table", flush=True)
+            except Exception as e:
+                print(f"[STARTUP] Could not create regen_locks: {e}", flush=True)
+
         # 服务启动时恢复被中断的任务：重新拉起 worker
         conn2 = get_db_connection()
         stalled = execute_query(conn2,
@@ -7979,20 +8006,80 @@ def _any_regen_running_for_persona(persona_id):
     REGEN 异步线程的运行状态。REGEN 启动 LLM 生成（耗时数秒）但还没改 DB 时，
     DB 仍显示 0 pending/0 failed，FULL FLOW 会误判 ready 并启动 task worker，
     后续 REGEN 删除旧 case 导致 test_results 出现 orphan。
+
+    跨 worker 检查：除了进程内 _regen_locks，还查 regen_locks 表
+    （Gunicorn 多 worker 之间不共享进程内存）。
     """
+    # 进程内检查
     prefix = persona_id + ":"
     with _regen_locks_guard:
         keys = [k for k in _regen_locks.keys() if k.startswith(prefix)]
     for k in keys:
         lock = _regen_locks[k]
-        # acquire(blocking=False) 返回 True 表示拿到锁（即原本没人持有，REGEN 已结束）
-        # 返回 False 表示锁被持有（REGEN 正在跑）
         acquired = lock.acquire(blocking=False)
         if acquired:
             lock.release()
         else:
             return True
+
+    # 跨 worker 检查：查 regen_locks 表是否有该 persona 的活跃锁
+    try:
+        conn = get_db_connection()
+        rows = execute_query(conn,
+            "SELECT lock_key FROM regen_locks WHERE lock_key LIKE %s AND expires_at > NOW()" if USE_MYSQL else
+            "SELECT lock_key FROM regen_locks WHERE lock_key LIKE ? AND expires_at > datetime('now')",
+            (prefix + "%",), fetch_all=True)
+        conn.close()
+        if rows:
+            return True
+    except Exception as e:
+        print(f"[REGEN LOCK CHECK] DB query failed, fallback to in-process only: {e}", flush=True)
     return False
+
+
+def _acquire_regen_lock_db(lock_key, ttl_seconds=600):
+    """跨 worker REGEN 锁：INSERT regen_locks 行。成功返回 True，已存在返回 False。
+
+    Why: Gunicorn 8 workers 之间 _regen_locks（进程内 dict）不共享，
+    同一 (persona, dim) 的 REGEN 可能在不同 worker 并发执行，导致
+    _any_regen_running_for_persona 跨 worker 检查失效。
+
+    用 MySQL 表做互斥：INSERT 原子，UNIQUE KEY 保证唯一。
+    expires_at + TTL 防死锁（worker 崩溃没释放也会自动过期）。
+    """
+    try:
+        conn = get_db_connection()
+        try:
+            execute_query(conn,
+                "INSERT INTO regen_locks (lock_key, expires_at) VALUES (%s, DATE_ADD(NOW(), INTERVAL %s SECOND))" if USE_MYSQL else
+                "INSERT INTO regen_locks (lock_key, expires_at) VALUES (?, datetime('now', '+' || ? || ' seconds'))",
+                (lock_key, ttl_seconds), fetch_one=True)
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[REGEN LOCK ACQUIRE] DB failed, fallback to in-process: {e}", flush=True)
+        return True
+
+
+def _release_regen_lock_db(lock_key):
+    """释放跨 worker REGEN 锁：DELETE regen_locks 行。"""
+    try:
+        conn = get_db_connection()
+        try:
+            execute_query(conn,
+                "DELETE FROM regen_locks WHERE lock_key = %s" if USE_MYSQL else
+                "DELETE FROM regen_locks WHERE lock_key = ?",
+                (lock_key,), fetch_one=True)
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[REGEN LOCK RELEASE] DB failed: {e}", flush=True)
 
 
 def _get_retry_count(persona_id, dim_code):
@@ -8257,7 +8344,12 @@ def _regenerate_dimension_with_feedback(persona_id, dimension, toy_persona, pers
         retry_key = f"{persona_id}:{dimension.get('dimension_code', '')}"
         lock = _get_regen_lock(retry_key)
         if not lock.acquire(blocking=False):
-            print(f"[AUTO REGEN] {retry_key} already in progress, skip", flush=True)
+            print(f"[AUTO REGEN] {retry_key} already in progress (in-process), skip", flush=True)
+            return
+        # 跨 worker 锁：INSERT regen_locks，失败说明另一 worker 正在跑
+        if not _acquire_regen_lock_db(retry_key):
+            lock.release()
+            print(f"[AUTO REGEN] {retry_key} already in progress (cross-worker), skip", flush=True)
             return
         try:
             # 调用 LLM 生成（带问题反馈）
@@ -8317,6 +8409,7 @@ def _regenerate_dimension_with_feedback(persona_id, dimension, toy_persona, pers
             import traceback
             traceback.print_exc()
         finally:
+            _release_regen_lock_db(retry_key)
             lock.release()
 
     t = threading.Thread(target=_regen_worker, daemon=True)
