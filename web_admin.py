@@ -1436,7 +1436,7 @@ def eval_stats_tags():
     conn = get_db_connection()
 
     def collect_from_test_results():
-        """从 test_results.eval_detail JSON 抽 deduction_tags"""
+        """从 test_results.eval_detail JSON 抽 deduction_tags（归一化后）"""
         from collections import Counter
         counter = Counter()
         params = []
@@ -1457,13 +1457,13 @@ def eval_stats_tags():
                 if isinstance(tags, list):
                     for t in tags:
                         if isinstance(t, str) and t.strip():
-                            counter[t.strip()] += 1
+                            counter[_normalize_deduction_tag(t)] += 1
             except:
                 continue
         return [{"tag": k, "count": v} for k, v in counter.most_common(20)]
 
     def collect_from_auto_evaluation():
-        """从 auto_evaluation.deduction_tags JSON 抽 4 维度 tags"""
+        """从 auto_evaluation.deduction_tags JSON 抽 4 维度 tags（归一化后）"""
         from collections import Counter
         counter = Counter()
         params = []
@@ -1485,7 +1485,7 @@ def eval_stats_tags():
                     if isinstance(tags, list):
                         for t in tags:
                             if isinstance(t, str) and t.strip():
-                                counter[t.strip()] += 1
+                                counter[_normalize_deduction_tag(t)] += 1
             except:
                 continue
         return [{"tag": k, "count": v} for k, v in counter.most_common(20)]
@@ -4391,6 +4391,37 @@ _EVAL_SEMAPHORE = threading.Semaphore(8)
 # judge 分歧阈值：std ≥ 此值标记 needs_review
 # 经验值：3 个 judge 整数打分，std > 2 通常意味着分歧明显（如 8/4/8 → std=2.31）
 JUDGE_DISAGREEMENT_THRESHOLD = 2.0
+
+# 扣分标签同义词归一化映射：把 LLM 自由生成的近义标签映射到标准标签。
+# Why: deduction_tags 是 LLM 自由生成的短标签（≤6字），同一失败模式会出现多个
+# 近义写法（"缺少追问"/"缺乏追问"/"引导不足"），统计时被当作不同标签，频次表噪声大。
+# 归一化后频次聚合更准确，便于发现高频问题。
+# 维护方式：观察 /api/eval/stats/tags 输出，发现新同义词时追加。
+_DEDUCTION_TAG_ALIASES = {
+    # 追问/互动类
+    "缺少追问": "缺乏追问", "引导不足": "缺乏追问", "互动不足": "缺乏追问", "追问泛化": "缺乏追问",
+    "追问生硬": "缺乏追问",
+    # 事实/记忆类
+    "未结合事实": "忘记事实", "信息遗漏": "忘记事实", "遗忘宠物记忆": "忘记事实",
+    "关联不足": "忘记事实", "未关联记忆": "忘记事实", "脱离记忆": "忘记事实",
+    "记错事实": "记错事实",
+    # 表达/语气类
+    "语气生硬": "表达生硬", "追问生硬": "表达生硬",
+    # 共情/情绪类
+    "共情不足": "情绪冷漠", "情绪平淡": "情绪冷漠",
+    # 内容类
+    "回复平淡": "回复过短", "内容单薄": "回复过短", "内容不全": "回复过短",
+    # 越界类
+    "越权承诺": "越界承诺",
+}
+
+
+def _normalize_deduction_tag(tag):
+    """归一化扣分标签：查映射表，无映射则返回原标签。"""
+    if not isinstance(tag, str):
+        return tag
+    t = tag.strip()
+    return _DEDUCTION_TAG_ALIASES.get(t, t)
 
 
 def _eval_case_core(result_row: Dict, conn, chat_corrections: List[Dict] = None,
