@@ -1581,6 +1581,106 @@ def eval_stats_disagreement():
     })
 
 
+@app.route("/api/eval/stats/judge_bias", methods=["GET"])
+def eval_stats_judge_bias():
+    """Judge 偏差分析：每个 judge 的平均分 / 与 ensemble 均值的偏差 / 按维度切片。
+
+    从 test_results.eval_detail.judges_detail 聚合。judges_detail 每项含
+    {model, score, ...}，3 个 judge 同一用例的 score 取 mean 即 ensemble 均值。
+    bias = judge_score - ensemble_mean，按 judge 聚合即得系统性偏差。
+    """
+    persona_id = request.args.get("persona_id", "").strip()
+    days = int(request.args.get("days", 30))
+    dimension_code = request.args.get("dimension_code", "").strip()
+
+    conn = get_db_connection()
+    params = []
+    where = "WHERE r.eval_detail IS NOT NULL AND r.eval_detail != ''"
+    if persona_id:
+        where += " AND t.persona_id = ?"
+        params.append(persona_id)
+    if days > 0:
+        where += " AND r.executed_at >= DATE_SUB(NOW(), INTERVAL ? DAY)"
+        params.append(days)
+    if dimension_code:
+        where += " AND c.dimension_code = ?"
+        params.append(dimension_code)
+
+    rows = execute_query(conn, f"""
+        SELECT r.eval_detail, c.dimension_code
+        FROM test_results r
+        LEFT JOIN test_cases c ON r.case_id = c.id
+        LEFT JOIN test_tasks t ON r.task_id = t.id
+        {where}
+    """.replace(" {where}", " " + where), tuple(params), fetch_all=True)
+
+    # 按 judge 聚合：score_sum / count / bias_sum（bias = score - mean_of_case）
+    # 同时按维度切片
+    judge_stats = {}  # {model: {count, score_sum, bias_sum, by_dim: {dim: {count, score_sum, bias_sum}}}}
+    for r in rows or []:
+        r = row_to_dict(r)
+        try:
+            d = json.loads(r.get("eval_detail") or "{}")
+            judges = d.get("judges_detail", [])
+            if not isinstance(judges, list) or len(judges) < 1:
+                continue
+            dim = r.get("dimension_code") or "未知"
+            scores = [float(j.get("score") or 0) for j in judges if j.get("score") is not None]
+            if not scores:
+                continue
+            case_mean = sum(scores) / len(scores)
+            for j in judges:
+                model = (j.get("model") or "unknown").split("/")[-1]
+                s = j.get("score")
+                if s is None:
+                    continue
+                s = float(s)
+                bias = s - case_mean
+                if model not in judge_stats:
+                    judge_stats[model] = {"count": 0, "score_sum": 0.0, "bias_sum": 0.0,
+                                         "by_dim": {}}
+                judge_stats[model]["count"] += 1
+                judge_stats[model]["score_sum"] += s
+                judge_stats[model]["bias_sum"] += bias
+                if dim not in judge_stats[model]["by_dim"]:
+                    judge_stats[model]["by_dim"][dim] = {"count": 0, "score_sum": 0.0, "bias_sum": 0.0}
+                judge_stats[model]["by_dim"][dim]["count"] += 1
+                judge_stats[model]["by_dim"][dim]["score_sum"] += s
+                judge_stats[model]["by_dim"][dim]["bias_sum"] += bias
+        except:
+            continue
+
+    conn.close()
+
+    judges_list = []
+    for model, st in judge_stats.items():
+        avg_score = round(st["score_sum"] / st["count"], 2) if st["count"] else 0
+        avg_bias = round(st["bias_sum"] / st["count"], 2) if st["count"] else 0
+        by_dim = []
+        for dim, dst in st["by_dim"].items():
+            by_dim.append({
+                "dimension_code": dim,
+                "count": dst["count"],
+                "avg_score": round(dst["score_sum"] / dst["count"], 2) if dst["count"] else 0,
+                "avg_bias": round(dst["bias_sum"] / dst["count"], 2) if dst["count"] else 0,
+            })
+        by_dim.sort(key=lambda x: x["avg_bias"])
+        judges_list.append({
+            "model": model,
+            "count": st["count"],
+            "avg_score": avg_score,
+            "avg_bias": avg_bias,
+            "by_dim": by_dim,
+        })
+    # 按 avg_bias 降序（偏高在前，偏低在后）
+    judges_list.sort(key=lambda x: x["avg_bias"], reverse=True)
+
+    return jsonify({
+        "total_cases": len(rows or []),
+        "judges": judges_list,
+    })
+
+
 @app.route("/api/eval/stats/by_user", methods=["GET"])
 def eval_stats_by_user():
     """用户评分对比"""

@@ -228,6 +228,25 @@ body{background:#f5f5f7;color:#1d1d1f}
         </table>
       </div>
     </div>
+
+    <div style="margin-top:24px">
+      <h4 style="font-size:14px;margin-bottom:12px;color:#1d1d1f">Judge 偏差分析</h4>
+      <div style="font-size:11px;color:#86868b;margin-bottom:8px">
+        每条用例取 3 judge 均值为基准，bias = judge 打分 - 均值。bias > 0 表示该 judge 系统性偏高，&lt; 0 偏低。点击行展开按维度切片。
+      </div>
+      <div style="background:#fafafa;border-radius:8px;padding:12px">
+        <table id="judge-bias-table" style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead><tr style="border-bottom:2px solid #d2d2d7">
+            <th style="text-align:left;padding:6px">judge</th>
+            <th style="text-align:center;padding:6px">样本数</th>
+            <th style="text-align:center;padding:6px">平均分</th>
+            <th style="text-align:center;padding:6px">偏差</th>
+            <th style="text-align:center;padding:6px">操作</th>
+          </tr></thead>
+          <tbody id="judge-bias-tbody"></tbody>
+        </table>
+      </div>
+    </div>
   </div>
 </div>
 <!-- 用例生成页面 -->
@@ -2267,6 +2286,7 @@ function loadEvalStats() {
   loadStatsUserRank();
   loadStatsTags(personaId);
   loadStatsDisagreement(personaId);
+  loadStatsJudgeBias(personaId);
 }
 
 function loadStatsTrend(personaId) {
@@ -2409,6 +2429,55 @@ function viewDisagreementCase(resultId, caseDbId) {
     _evalResultIndexV2 = 0;
     _showEvalDetailV2(c, result);
   });
+}
+
+function loadStatsJudgeBias(personaId) {
+  var url = '/api/eval/stats/judge_bias?days=30';
+  if (personaId) url += '&persona_id=' + encodeURIComponent(personaId);
+  fetch(url).then(r => r.json()).then(function(data) {
+    var tbody = document.getElementById('judge-bias-tbody');
+    tbody.innerHTML = '';
+    (data.judges || []).forEach(function(j, idx) {
+      var biasColor = j.avg_bias > 0.3 ? '#ff9500' : (j.avg_bias < -0.3 ? '#0071e3' : '#86868b');
+      var biasText = (j.avg_bias > 0 ? '+' : '') + j.avg_bias;
+      var tr = '<tr style="border-bottom:1px solid #eee;cursor:pointer" onclick="toggleJudgeDim(' + idx + ')">' +
+        '<td style="padding:6px;font-family:monospace">' + escapeHtml(j.model) + '</td>' +
+        '<td style="text-align:center;padding:6px">' + j.count + '</td>' +
+        '<td style="text-align:center;padding:6px;font-weight:600">' + j.avg_score + '</td>' +
+        '<td style="text-align:center;padding:6px;color:' + biasColor + ';font-weight:600">' + biasText + '</td>' +
+        '<td style="text-align:center;padding:6px"><span style="font-size:10px;color:#86868b">展开维度</span></td>' +
+        '</tr>';
+      tr += '<tr id="judge-dim-' + idx + '" style="display:none">' +
+        '<td colspan="5" style="padding:8px 12px;background:#fff">';
+      if (j.by_dim && j.by_dim.length) {
+        tr += '<table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr>' +
+          '<th style="text-align:left;padding:4px">维度</th>' +
+          '<th style="text-align:center;padding:4px">样本</th>' +
+          '<th style="text-align:center;padding:4px">平均分</th>' +
+          '<th style="text-align:center;padding:4px">偏差</th>' +
+          '</tr></thead><tbody>';
+        j.by_dim.forEach(function(d) {
+          var dc = d.avg_bias > 0.3 ? '#ff9500' : (d.avg_bias < -0.3 ? '#0071e3' : '#86868b');
+          tr += '<tr style="border-bottom:1px solid #f0f0f0">' +
+            '<td style="padding:4px">' + escapeHtml(d.dimension_code) + '</td>' +
+            '<td style="text-align:center;padding:4px">' + d.count + '</td>' +
+            '<td style="text-align:center;padding:4px">' + d.avg_score + '</td>' +
+            '<td style="text-align:center;padding:4px;color:' + dc + '">' + (d.avg_bias > 0 ? '+' : '') + d.avg_bias + '</td>' +
+            '</tr>';
+        });
+        tr += '</tbody></table>';
+      } else {
+        tr += '<span style="color:#86868b;font-size:11px">无维度数据</span>';
+      }
+      tr += '</td></tr>';
+      tbody.insertAdjacentHTML('beforeend', tr);
+    });
+  });
+}
+
+function toggleJudgeDim(idx) {
+  var row = document.getElementById('judge-dim-' + idx);
+  if (row) row.style.display = row.style.display === 'none' ? '' : 'none';
 }
 
 function renderReasons(containerId, reasons) {
