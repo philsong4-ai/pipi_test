@@ -6157,7 +6157,8 @@ def _redteam_gen_worker(task_id):
         facts = [row_to_dict(r) for r in facts_rows]
 
         llm_config = get_llm_config()
-        created_ids = []
+        count_per_dim = 5
+        task.setdefault("created_case_ids", [])
 
         # 红队只攻 5 个 P0 维度
         import pipi_api
@@ -6169,14 +6170,14 @@ def _redteam_gen_worker(task_id):
             redteam_dims, fetch_all=True)
         dims = [row_to_dict(d) for d in dims]
 
-        task["progress"]["total"] = len(dims)
+        task["progress"]["total"] = len(dims) * count_per_dim
 
         for dim in dims:
             dim_code = dim.get("dimension_code") or dim.get("code", "")
             try:
                 cases = pipi_api.generate_redteam_case(
                     dimension=dim, toy_persona=toy_persona, persona=persona, user_facts=facts,
-                    count=5, **llm_config["redteam_gen"]
+                    count=count_per_dim, **llm_config["redteam_gen"]
                 )
                 for case in cases:
                     base_id = case.get("case_id", f"RT-{dim_code}-?")
@@ -6191,12 +6192,13 @@ def _redteam_gen_worker(task_id):
                         redteam_predicted_failure=case.get("redteam_predicted_failure"),
                     )
                     if rid:
-                        created_ids.append(rid)
+                        task["created_case_ids"].append(rid)
                 task["progress"]["done"] += len(cases)
                 task["progress"]["current"] = dim_code
+                task["cases_created"] = len(task["created_case_ids"])
                 _redteam_tasks[task_id] = task
                 _save_async_task(task_id, "rtgen", task)
-                print(f"[REDTEAM GEN] {task_id} {dim_code} done, +{len(cases)} cases", flush=True)
+                print(f"[REDTEAM GEN] {task_id} {dim_code} done, +{len(cases)} cases (total {len(task['created_case_ids'])})", flush=True)
             except Exception as e:
                 import traceback
                 print(f"[REDTEAM GEN] {dim_code} error: {e}\n{traceback.format_exc()}", flush=True)
@@ -6205,12 +6207,11 @@ def _redteam_gen_worker(task_id):
         conn.commit()
         conn.close()
 
-        task["created_case_ids"] = created_ids
-        task["cases_created"] = len(created_ids)
+        task["cases_created"] = len(task.get("created_case_ids", []))
         task["status"] = "completed"
         _redteam_tasks[task_id] = task
         _save_async_task(task_id, "rtgen", task)
-        print(f"[REDTEAM GEN] {task_id} completed, total {len(created_ids)} cases", flush=True)
+        print(f"[REDTEAM GEN] {task_id} completed, total {task['cases_created']} cases", flush=True)
     except Exception as e:
         import traceback
         print(f"[REDTEAM GEN FATAL] {task_id}: {e}\n{traceback.format_exc()}", flush=True)
@@ -6394,7 +6395,7 @@ def api_redteam_generate():
     _redteam_tasks[task_id] = {
         "status": "running",
         "persona_id": persona_id,
-        "progress": {"done": 0, "total": 5, "current": None},
+        "progress": {"done": 0, "total": 25, "current": None},
         "created_case_ids": [],
         "cases_created": 0,
         "errors": [],
