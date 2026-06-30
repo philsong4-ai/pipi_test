@@ -263,6 +263,21 @@ def _ensure_tables():
                 except Exception as e:
                     print(f"[STARTUP] Could not add {_col} to test_cases: {e}", flush=True)
 
+        # async_tasks.task_type 加红队枚举值（原 enum 只允许 generate/execute/evaluate）
+        try:
+            row = execute_query(conn,
+                "SELECT COLUMN_TYPE FROM information_schema.columns WHERE table_schema = DATABASE() "
+                "AND table_name = 'async_tasks' AND column_name = 'task_type'",
+                fetch_one=True) if USE_MYSQL else None
+            if USE_MYSQL and row and "rtgen" not in (row.get("COLUMN_TYPE") or ""):
+                execute_query(conn,
+                    "ALTER TABLE async_tasks MODIFY COLUMN task_type "
+                    "ENUM('generate','execute','evaluate','rtgen','rtexec','rteval') NOT NULL")
+                conn.commit()
+                print("[STARTUP] Extended async_tasks.task_type enum with rtgen/rtexec/rteval", flush=True)
+        except Exception as e:
+            print(f"[STARTUP] Could not extend async_tasks.task_type enum: {e}", flush=True)
+
         # test_results 加 needs_review 列（judge 分歧超阈值时标记，前端列表 badge 提示）
         try:
             execute_query(conn, "SELECT needs_review FROM test_results LIMIT 1", fetch_one=True)
@@ -6122,7 +6137,7 @@ def _redteam_gen_worker(task_id):
         return
     try:
         task["status"] = "running"
-        _save_async_task(task_id, "redteam_gen", task)
+        _save_async_task(task_id, "rtgen", task)
 
         conn = get_db_connection()
         persona_id = task.get("persona_id", "")
@@ -6180,7 +6195,7 @@ def _redteam_gen_worker(task_id):
                 task["progress"]["done"] += len(cases)
                 task["progress"]["current"] = dim_code
                 _redteam_tasks[task_id] = task
-                _save_async_task(task_id, "redteam_gen", task)
+                _save_async_task(task_id, "rtgen", task)
                 print(f"[REDTEAM GEN] {task_id} {dim_code} done, +{len(cases)} cases", flush=True)
             except Exception as e:
                 import traceback
@@ -6194,7 +6209,7 @@ def _redteam_gen_worker(task_id):
         task["cases_created"] = len(created_ids)
         task["status"] = "completed"
         _redteam_tasks[task_id] = task
-        _save_async_task(task_id, "redteam_gen", task)
+        _save_async_task(task_id, "rtgen", task)
         print(f"[REDTEAM GEN] {task_id} completed, total {len(created_ids)} cases", flush=True)
     except Exception as e:
         import traceback
@@ -6202,7 +6217,7 @@ def _redteam_gen_worker(task_id):
         task["status"] = "failed"
         task["error_message"] = str(e)
         _redteam_tasks[task_id] = task
-        _save_async_task(task_id, "redteam_gen", task)
+        _save_async_task(task_id, "rtgen", task)
 
 
 def _redteam_exec_worker(task_id):
@@ -6212,7 +6227,7 @@ def _redteam_exec_worker(task_id):
         return
     try:
         task["status"] = "running"
-        _save_async_task(task_id, "redteam_exec", task)
+        _save_async_task(task_id, "rtexec", task)
 
         conn = get_db_connection()
         persona_id = task.get("persona_id", "")
@@ -6229,7 +6244,7 @@ def _redteam_exec_worker(task_id):
             task["status"] = "failed"
             task["error_message"] = "没有红队用例，请先生成"
             _redteam_tasks[task_id] = task
-            _save_async_task(task_id, "redteam_exec", task)
+            _save_async_task(task_id, "rtexec", task)
             conn.close()
             return
 
@@ -6254,7 +6269,7 @@ def _redteam_exec_worker(task_id):
         task["test_task_id"] = test_task_id
         task["progress"] = {"done": 0, "total": len(cases)}
         _redteam_tasks[task_id] = task
-        _save_async_task(task_id, "redteam_exec", task)
+        _save_async_task(task_id, "rtexec", task)
         conn.close()
 
         print(f"[REDTEAM EXEC] {task_id} created test_task={test_task_id}, executing {len(cases)} cases", flush=True)
@@ -6270,7 +6285,7 @@ def _redteam_exec_worker(task_id):
         task["progress"] = {"done": t.get("progress_done", 0), "total": t.get("progress_total", 0)}
         task["status"] = "completed" if t.get("status") == "executed" else "failed"
         _redteam_tasks[task_id] = task
-        _save_async_task(task_id, "redteam_exec", task)
+        _save_async_task(task_id, "rtexec", task)
         conn.close()
         print(f"[REDTEAM EXEC] {task_id} completed (status={t.get('status')})", flush=True)
     except Exception as e:
@@ -6279,7 +6294,7 @@ def _redteam_exec_worker(task_id):
         task["status"] = "failed"
         task["error_message"] = str(e)
         _redteam_tasks[task_id] = task
-        _save_async_task(task_id, "redteam_exec", task)
+        _save_async_task(task_id, "rtexec", task)
 
 
 def _redteam_eval_worker(task_id):
@@ -6289,7 +6304,7 @@ def _redteam_eval_worker(task_id):
         return
     try:
         task["status"] = "running"
-        _save_async_task(task_id, "redteam_eval", task)
+        _save_async_task(task_id, "rteval", task)
 
         conn = get_db_connection()
         test_task_id = task.get("test_task_id")
@@ -6348,13 +6363,13 @@ def _redteam_eval_worker(task_id):
             done += 1
             task["progress"] = {"done": done, "total": len(results), "breached": breached_count}
             _redteam_tasks[task_id] = task
-            _save_async_task(task_id, "redteam_eval", task)
+            _save_async_task(task_id, "rteval", task)
 
         task["breached_count"] = breached_count
         task["cases_evaluated"] = done
         task["status"] = "completed"
         _redteam_tasks[task_id] = task
-        _save_async_task(task_id, "redteam_eval", task)
+        _save_async_task(task_id, "rteval", task)
         conn.close()
         print(f"[REDTEAM EVAL] {task_id} completed, {breached_count}/{done} breached", flush=True)
     except Exception as e:
@@ -6363,7 +6378,7 @@ def _redteam_eval_worker(task_id):
         task["status"] = "failed"
         task["error_message"] = str(e)
         _redteam_tasks[task_id] = task
-        _save_async_task(task_id, "redteam_eval", task)
+        _save_async_task(task_id, "rteval", task)
 
 
 @app.route("/api/red_team/generate", methods=["POST"])
@@ -6384,7 +6399,7 @@ def api_redteam_generate():
         "cases_created": 0,
         "errors": [],
     }
-    _save_async_task(task_id, "redteam_gen", _redteam_tasks[task_id])
+    _save_async_task(task_id, "rtgen", _redteam_tasks[task_id])
     threading.Thread(target=_redteam_gen_worker, args=(task_id,), daemon=True).start()
     return jsonify({"task_id": task_id, "status": "running"})
 
@@ -6406,7 +6421,7 @@ def api_redteam_execute():
         "device_id": device_id,
         "progress": {"done": 0, "total": 0},
     }
-    _save_async_task(task_id, "redteam_exec", _redteam_tasks[task_id])
+    _save_async_task(task_id, "rtexec", _redteam_tasks[task_id])
     threading.Thread(target=_redteam_exec_worker, args=(task_id,), daemon=True).start()
     return jsonify({"task_id": task_id, "status": "running"})
 
@@ -6433,7 +6448,7 @@ def api_redteam_evaluate():
         "test_task_id": task["test_task_id"],
         "progress": {"done": 0, "total": 0, "breached": 0},
     }
-    _save_async_task(new_task_id, "redteam_eval", _redteam_tasks[new_task_id])
+    _save_async_task(new_task_id, "rteval", _redteam_tasks[new_task_id])
     threading.Thread(target=_redteam_eval_worker, args=(new_task_id,), daemon=True).start()
     return jsonify({"task_id": new_task_id, "status": "running"})
 
