@@ -117,6 +117,7 @@ body{background:#f5f5f7;color:#1d1d1f}
     <a class="nav-item" data-tab="test-manage">执行与评测</a>
     <a class="nav-item" data-tab="test-report">测试报告</a>
     <a class="nav-item" data-tab="scheduled">预约任务</a>
+    <a class="nav-item" data-tab="red-team" style="color:#ff3b30">红队测试</a>
     <div class="nav-divider"></div>
     <a class="nav-item" data-tab="endpoints">接口配置</a>
     <a class="nav-item" data-tab="about">关于</a>
@@ -477,6 +478,55 @@ body{background:#f5f5f7;color:#1d1d1f}
           </div>
         </div>
       </div>
+    </div>
+  </div>
+</div>
+<!-- 红队测试面板 -->
+<div id="panel-red-team" class="panel">
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <h3 style="font-size:16px;margin:0;color:#ff3b30">红队测试</h3>
+    </div>
+    <p style="color:#86868b;font-size:13px;margin:0 0 16px 0">主动构造陷阱输入，测试玩偶安全边界是否牢固。攻击 5 个 P0 维度（D2 情感边界 / D4 依赖培养 / F1 违规请求 / F2 过度依赖 / F3 未成年保护），每维度 5 条共 25 条陷阱用例。</p>
+
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+      <label style="font-size:13px;color:#86868b">用户:</label>
+      <select id="red-persona-select" style="padding:6px 10px;border:1px solid #d2d2d7;border-radius:6px;font-size:13px;min-width:200px">
+        <option value="">加载中...</option>
+      </select>
+    </div>
+
+    <div style="display:flex;gap:12px;margin:0 0 16px 0">
+      <button class="btn btn-primary" onclick="startRedGen()" id="btn-red-gen" style="background:#ff9500;border-color:#ff9500">① 生成陷阱用例</button>
+      <button class="btn btn-primary" onclick="startRedExec()" id="btn-red-exec" style="background:#ff3b30;border-color:#ff3b30">② 执行（调玩偶）</button>
+      <button class="btn btn-primary" onclick="startRedEval()" id="btn-red-eval" style="background:#af52c4;border-color:#af52c4">③ 红队裁判</button>
+      <button class="btn" onclick="loadRedResults()" style="background:#fafafa">刷新结果</button>
+    </div>
+
+    <div id="red-status" style="font-size:12px;color:#86868b;margin-bottom:16px;padding:8px 12px;background:#fafafa;border-radius:6px;min-height:20px">
+      待命
+    </div>
+
+    <div id="red-results" style="display:none">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:16px">
+        <div style="background:#fafafa;border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:11px;color:#86868b">总陷阱数</div>
+          <div id="red-stat-total" style="font-size:24px;font-weight:600;color:#1d1d1f">-</div>
+        </div>
+        <div style="background:#fafafa;border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:11px;color:#86868b">被攻破</div>
+          <div id="red-stat-breached" style="font-size:24px;font-weight:600;color:#ff3b30">-</div>
+        </div>
+        <div style="background:#fafafa;border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:11px;color:#86868b">攻破率</div>
+          <div id="red-stat-rate" style="font-size:24px;font-weight:600;color:#ff9500">-</div>
+        </div>
+      </div>
+      <div style="height:300px;background:#fafafa;border-radius:8px;padding:12px;margin-bottom:16px">
+        <canvas id="chart-red-dimension"></canvas>
+      </div>
+      <h4 style="font-size:14px;margin:0 0 8px 0">按维度 × 攻击类型分布</h4>
+      <div id="red-breach-table"></div>
     </div>
   </div>
 </div>
@@ -5642,7 +5692,186 @@ document.addEventListener('DOMContentLoaded', function() {
   loadTestTasks();
   loadEvalTaskSelect();
   initExecDimensions();
+  loadRedPersonas();
 });
+
+// ─── 红队测试 ────────────────────────────────────
+var redGenTaskId = null;
+var redExecTaskId = null;
+var redEvalTaskId = null;
+var redPollTimer = null;
+var redDimensionChart = null;
+
+function loadRedPersonas() {
+  fetch('/api/personas').then(r=>r.json()).then(data=>{
+    var sel = document.getElementById('red-persona-select');
+    if (!sel) return;
+    var arr = data.personas || data.items || data || [];
+    if (!Array.isArray(arr)) arr = [];
+    sel.innerHTML = arr.length ? arr.map(p=>'<option value="'+(p.id||p.persona_id)+'">'+(p.name||p.id||p.persona_id)+'</option>').join('') : '<option value="">（无用户）</option>';
+    // 默认选第一个
+    if (arr.length) sel.value = (arr[0].id||arr[0].persona_id);
+  }).catch(e=>{
+    var sel = document.getElementById('red-persona-select');
+    if (sel) sel.innerHTML = '<option value="">加载失败</option>';
+  });
+}
+
+function redSetStatus(msg, color) {
+  var el = document.getElementById('red-status');
+  if (el) el.innerHTML = '<span style="color:'+(color||'#86868b')+'">'+msg+'</span>';
+}
+
+function redBtnDisable(stage, disabled) {
+  var btns = ['btn-red-gen','btn-red-exec','btn-red-eval'];
+  btns.forEach(function(id){
+    var b = document.getElementById(id);
+    if (b) b.disabled = disabled;
+  });
+}
+
+function startRedGen() {
+  var pid = document.getElementById('red-persona-select').value;
+  if (!pid) { alert('请先选择用户'); return; }
+  if (!confirm('生成 25 条红队陷阱用例？（5 维 × 5 条）')) return;
+  redBtnDisable('gen', true);
+  redSetStatus('生成中...', '#ff9500');
+  fetch('/api/red_team/generate', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({persona_id: pid})
+  }).then(r=>r.json()).then(data=>{
+    if (data.error) { redBtnDisable('gen', false); redSetStatus('错误: '+data.error, '#ff3b30'); alert(data.error); return; }
+    redGenTaskId = data.task_id;
+    pollRedStatus(data.task_id, 'gen');
+  }).catch(e=>{
+    redBtnDisable('gen', false);
+    redSetStatus('请求失败: '+e, '#ff3b30');
+  });
+}
+
+function startRedExec() {
+  var pid = document.getElementById('red-persona-select').value;
+  if (!pid) { alert('请先选择用户'); return; }
+  if (!confirm('执行红队用例？将调用玩偶 API 跑全部红队陷阱用例。')) return;
+  redBtnDisable('exec', true);
+  redSetStatus('执行中（调玩偶 API，约需数分钟）...', '#ff3b30');
+  fetch('/api/red_team/execute', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({persona_id: pid, device_id: pid})
+  }).then(r=>r.json()).then(data=>{
+    if (data.error) { redBtnDisable('exec', false); redSetStatus('错误: '+data.error, '#ff3b30'); alert(data.error); return; }
+    redExecTaskId = data.task_id;
+    pollRedStatus(data.task_id, 'exec');
+  }).catch(e=>{
+    redBtnDisable('exec', false);
+    redSetStatus('请求失败: '+e, '#ff3b30');
+  });
+}
+
+function startRedEval() {
+  if (!redExecTaskId) { alert('请先执行②（拿到 exec_task_id）'); return; }
+  if (!confirm('启动红队裁判？对每条执行结果判定是否被攻破。')) return;
+  redBtnDisable('eval', true);
+  redSetStatus('裁判中...', '#af52c4');
+  fetch('/api/red_team/evaluate', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({exec_task_id: redExecTaskId})
+  }).then(r=>r.json()).then(data=>{
+    if (data.error) { redBtnDisable('eval', false); redSetStatus('错误: '+data.error, '#ff3b30'); alert(data.error); return; }
+    redEvalTaskId = data.task_id;
+    pollRedStatus(data.task_id, 'eval');
+  }).catch(e=>{
+    redBtnDisable('eval', false);
+    redSetStatus('请求失败: '+e, '#ff3b30');
+  });
+}
+
+function pollRedStatus(taskId, stage) {
+  fetch('/api/red_team/tasks/'+taskId).then(r=>r.json()).then(data=>{
+    if (data.error) { redBtnDisable(stage, false); redSetStatus('错误: '+data.error, '#ff3b30'); return; }
+    var prog = data.progress || {};
+    var statusText = '['+stage+'] '+data.status;
+    if (prog.done !== undefined) statusText += ' | 进度: '+prog.done+'/'+(prog.total||'-');
+    if (prog.current) statusText += ' | 当前: '+prog.current;
+    if (prog.breached !== undefined) statusText += ' | 已攻破: '+prog.breached;
+    redSetStatus(statusText, data.status==='completed'?'#34c759':(data.status==='failed'?'#ff3b30':'#86868b'));
+
+    if (data.status==='completed' || data.status==='failed') {
+      redBtnDisable(stage, false);
+      if (stage==='eval' && data.status==='completed') loadRedResults();
+      return;
+    }
+    redPollTimer = setTimeout(function(){ pollRedStatus(taskId, stage); }, 2000);
+  }).catch(e=>{
+    redBtnDisable(stage, false);
+    redSetStatus('轮询失败: '+e, '#ff3b30');
+  });
+}
+
+function loadRedResults() {
+  var pid = document.getElementById('red-persona-select').value;
+  if (!pid) { alert('请先选择用户'); return; }
+  fetch('/api/red_team/results?persona_id='+encodeURIComponent(pid)).then(r=>r.json()).then(data=>{
+    var results = data.results || [];
+    if (!results.length) { alert('暂无红队裁判结果，请先跑完①②③'); return; }
+    document.getElementById('red-results').style.display = '';
+
+    var total = data.total || 0;
+    var breached = data.breached || 0;
+    var rate = total>0 ? (breached/total*100).toFixed(1)+'%' : '-';
+    document.getElementById('red-stat-total').textContent = total;
+    document.getElementById('red-stat-breached').textContent = breached;
+    document.getElementById('red-stat-rate').textContent = rate;
+
+    // 按维度聚合
+    var dimMap = {};
+    results.forEach(function(r){
+      var d = r.dimension_code || '?';
+      if (!dimMap[d]) dimMap[d] = {breached:0, total:0};
+      dimMap[d].breached += parseInt(r.breached||0);
+      dimMap[d].total += parseInt(r.total||0);
+    });
+    var labels = Object.keys(dimMap).sort();
+    var breachData = labels.map(function(d){ return dimMap[d].breached; });
+    var okData = labels.map(function(d){ return dimMap[d].total - dimMap[d].breached; });
+
+    var ctx = document.getElementById('chart-red-dimension').getContext('2d');
+    if (redDimensionChart) redDimensionChart.destroy();
+    redDimensionChart = new Chart(ctx, {
+      type:'bar',
+      data:{ labels:labels, datasets:[
+        {label:'被攻破', data:breachData, backgroundColor:'#ff3b30'},
+        {label:'防御成功', data:okData, backgroundColor:'#34c759'}
+      ]},
+      options:{responsive:true, maintainAspectRatio:false,
+        plugins:{legend:{position:'top'}},
+        scales:{x:{stacked:true}, y:{stacked:true, beginAtZero:true}}
+      }
+    });
+
+    // 详情表
+    var html = '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:#fafafa">'+
+      '<th style="padding:8px;text-align:left;border-bottom:1px solid #d2d2d7">维度</th>'+
+      '<th style="padding:8px;text-align:left;border-bottom:1px solid #d2d2d7">攻击类型</th>'+
+      '<th style="padding:8px;text-align:right;border-bottom:1px solid #d2d2d7">总数</th>'+
+      '<th style="padding:8px;text-align:right;border-bottom:1px solid #d2d2d7">被攻破</th>'+
+      '<th style="padding:8px;text-align:right;border-bottom:1px solid #d2d2d7">攻破率</th>'+
+      '</tr></thead><tbody>';
+    results.forEach(function(r){
+      var t = parseInt(r.total||0), b = parseInt(r.breached||0);
+      var rr = t>0 ? (b/t*100).toFixed(0)+'%' : '-';
+      html += '<tr><td style="padding:8px;border-bottom:1px solid #eee">'+(r.dimension_code||'-')+'</td>'+
+        '<td style="padding:8px;border-bottom:1px solid #eee">'+(r.redteam_trap_type||'-')+'</td>'+
+        '<td style="padding:8px;text-align:right;border-bottom:1px solid #eee">'+t+'</td>'+
+        '<td style="padding:8px;text-align:right;border-bottom:1px solid #eee;color:'+(b>0?'#ff3b30':'#1d1d1f')+'">'+b+'</td>'+
+        '<td style="padding:8px;text-align:right;border-bottom:1px solid #eee">'+rr+'</td></tr>';
+    });
+    html += '</tbody></table>';
+    document.getElementById('red-breach-table').innerHTML = html;
+  }).catch(e=>{
+    alert('加载结果失败: '+e);
+  });
+}
 </script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </main>
