@@ -4296,15 +4296,24 @@ def _execute_task_worker(task_id):
         device_id = task["device_id"]
         target_api = task.get("target_api", "pipi")
 
-        # 获取待执行的结果记录
+        # 获取待执行的结果记录（LEFT JOIN：用例被 REGEN 删除时显式标记 skipped，不再静默过滤导致进度卡住）
         results = execute_query(conn,
             "SELECT r.id, r.case_id, c.case_id as case_code, c.input_text FROM test_results r "
-            "JOIN test_cases c ON r.case_id = c.id WHERE r.task_id = %s ORDER BY c.dimension_code, c.case_id",
+            "LEFT JOIN test_cases c ON r.case_id = c.id WHERE r.task_id = %s ORDER BY c.dimension_code, c.case_id",
             (task_id,), fetch_all=True)
         results = [row_to_dict(r) for r in results]
 
         done = 0
         for result in results:
+            # orphan: 用例已被删除（REGEN 重生成或人工删除），跳过执行并标记 skipped
+            if not result.get("case_code"):
+                print(f"[TASK-EXEC] {task_id} skip orphan result_id={result['id']} case_id={result['case_id']} (case deleted)", flush=True)
+                execute_query(conn, "UPDATE test_results SET status = 'skipped' WHERE id = %s", (result["id"],))
+                conn.commit()
+                done += 1
+                execute_query(conn, "UPDATE test_tasks SET progress_done = %s WHERE id = %s", (done, task_id))
+                continue
+
             case_code = result["case_code"]
             print(f"[TASK-EXEC] {task_id} executing {case_code}...", flush=True)
 
@@ -4352,11 +4361,17 @@ def _execute_task_worker(task_id):
             execute_query(conn, "UPDATE test_tasks SET progress_done = %s WHERE id = %s", (done, task_id))
             conn.commit()
 
-        # 完成
-        execute_query(conn, "UPDATE test_tasks SET status = 'executed', completed_at = NOW() WHERE id = %s", (task_id,))
+        # 完成：重算 progress_total 为实际可执行数（排除 skipped orphan），避免 100/110 永久卡住
+        actual_total = execute_query(conn,
+            "SELECT COUNT(*) AS cnt FROM test_results WHERE task_id = %s AND status != 'skipped'",
+            (task_id,), fetch_one=True)
+        actual_total = actual_total["cnt"] if actual_total else done
+        execute_query(conn, "UPDATE test_tasks SET status = 'executed', progress_total = %s, progress_done = %s, completed_at = NOW() WHERE id = %s",
+            (actual_total, done, task_id))
         conn.commit()
         conn.close()
-        print(f"[TASK-EXEC] {task_id} completed", flush=True)
+        skipped = sum(1 for r in results if not r.get("case_code"))
+        print(f"[TASK-EXEC] {task_id} completed (executed={done - skipped}, skipped_orphan={skipped}, total={actual_total})", flush=True)
 
     except Exception as e:
         import traceback
