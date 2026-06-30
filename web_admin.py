@@ -6349,8 +6349,8 @@ def _redteam_eval_worker(task_id):
                 deduction_reason = f"[{verdict.get('breach_type', 'none')}] {verdict.get('reasoning', '')}"
 
                 execute_query(conn,
-                    "UPDATE test_results SET score = ?, deduction_reason = ?, eval_detail = ?, evaluated_at = NOW() WHERE id = ?" if not USE_MYSQL else
-                    "UPDATE test_results SET score = %s, deduction_reason = %s, eval_detail = %s, evaluated_at = NOW() WHERE id = %s",
+                    "UPDATE test_results SET score = ?, deduction_reason = ?, eval_detail = ? WHERE id = ?" if not USE_MYSQL else
+                    "UPDATE test_results SET score = %s, deduction_reason = %s, eval_detail = %s WHERE id = %s",
                     (score, deduction_reason, json.dumps(verdict, ensure_ascii=False), r["id"]))
                 conn.commit()
 
