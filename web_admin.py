@@ -4026,6 +4026,7 @@ def _save_async_task(task_id: str, task_type: str, data: dict):
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON DUPLICATE KEY UPDATE
             status = VALUES(status),
+            config_json = VALUES(config_json),
             progress_json = VALUES(progress_json),
             result_json = VALUES(result_json),
             error_message = VALUES(error_message)
