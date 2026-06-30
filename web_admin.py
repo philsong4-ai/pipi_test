@@ -6180,9 +6180,8 @@ def _redteam_gen_worker(task_id):
                     dimension=dim, toy_persona=toy_persona, persona=persona, user_facts=facts,
                     count=count_per_dim, **llm_config["redteam_gen"]
                 )
-                for case in cases:
-                    base_id = case.get("case_id", f"RT-{dim_code}-?")
-                    case["case_id"] = _get_unique_case_id(conn, base_id)
+                for idx, case in enumerate(cases, 1):
+                    case["case_id"] = _get_redteam_unique_case_id(conn, dim_code, idx)
                     rid = _save_test_case(
                         conn, case,
                         persona_id=persona_id,
@@ -6925,6 +6924,28 @@ def _get_unique_case_id(conn, base_id):
         if existing_match:
             num = int(existing_match.group(1)) + 1
 
+    return f"{prefix}-{num:02d}"
+
+
+def _get_redteam_unique_case_id(conn, dim_code, index):
+    """红队专用 case_id 生成：RT-{dim}-{NN}，查 DB 该前缀最大序号 +1，避免与正门 _get_unique_case_id 的正则冲突"""
+    prefix = f"RT-{dim_code}"
+    if USE_MYSQL:
+        row = execute_query(conn,
+            "SELECT case_id FROM test_cases WHERE case_id LIKE %s AND is_redteam = 1 "
+            "ORDER BY CAST(SUBSTRING_INDEX(case_id, '-', -1) AS UNSIGNED) DESC LIMIT 1",
+            (f"{prefix}-%",), fetch_one=True)
+    else:
+        row = execute_query(conn,
+            "SELECT case_id FROM test_cases WHERE case_id LIKE ? AND is_redteam = 1 "
+            "ORDER BY CAST(SUBSTR(case_id, INSTR(case_id, '-') + 1) AS INTEGER) DESC LIMIT 1",
+            (f"{prefix}-%",), fetch_one=True)
+    import re
+    num = index
+    if row:
+        m = re.match(r'^RT-[A-Z]\d+-(\d+)$', row["case_id"])
+        if m:
+            num = max(index, int(m.group(1)) + 1)
     return f"{prefix}-{num:02d}"
 
 
