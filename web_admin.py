@@ -5956,14 +5956,14 @@ def _save_test_case(conn, case_data, persona_id=None, device_id=None, dimension_
     final_device_id = device_id or case_data.get("device_id", final_persona_id)
     final_dimension_code = dimension_code or case_data.get("dimension_code", "")
 
-    # 规则校验（用例生成时默认 pending，等待 LLM 异步审核）
+    # 规则校验（用例生成时默认 draft，等待 LLM 异步审核；审核中转 pending，审核完覆盖为 passed/warning/failed）
     validation = validate_case_rules(case_data, final_dimension_code)
-    # 如果规则校验有严重问题，直接标记失败；否则设为 pending 等待 LLM 审核
+    # 如果规则校验有严重问题，直接标记失败；否则设为 draft 等待 LLM 审核
     if validation["issues"] and len(validation["issues"]) > 2:
         quality_status = "failed"
         quality_issues = json.dumps(validation["issues"], ensure_ascii=False)
     else:
-        quality_status = "pending"
+        quality_status = "draft"
         quality_issues = None
 
     cursor = execute_query(conn, """
@@ -6161,7 +6161,7 @@ def _generate_cases_worker(task_id):
 
         conn.close()
 
-        # 逐维度生成
+        # 逐维度生成（解耦：生成阶段只写 draft，不触发审核；末尾统一触发一次）
         for dim in dims:
             dim_code = dim["dimension_code"]
             task["progress"]["current"] = dim_code
@@ -6198,7 +6198,7 @@ def _generate_cases_worker(task_id):
 
                 print(f"[CASE GEN] {task_id} {dim_code} has {existing_count}, need {need_count} more", flush=True)
 
-                # 调用 LLM 生成
+                # 调用 LLM 生成（pipi_api 内部已带 2 次指数退避重试）
                 llm_config = get_llm_config()
                 cases = pipi_api.generate_test_cases(
                     dimension=dim,
@@ -6209,141 +6209,44 @@ def _generate_cases_worker(task_id):
                     **llm_config["case_gen"]
                 )
 
-                # 保存到数据库（带重试）
-                if cases:
-                    db_retry_count = 0
-                    db_max_retries = 2
-                    db_success = False
-
-                    while db_retry_count <= db_max_retries and not db_success:
-                        try:
-                            conn3 = get_db_connection()
-                            created_this_round = 0
-                            for case in cases:
-                                # 生成唯一 case_id（检查是否已存在）
-                                base_case_id = case.get("case_id", f"{dim_code}-01")
-                                final_case_id = _get_unique_case_id(conn3, base_case_id)
-                                case["case_id"] = final_case_id
-
-                                # 调用统一的保存函数
-                                new_case_id = _save_test_case(
-                                    conn3, case,
-                                    persona_id=task["persona_id"],
-                                    device_id=task["persona_id"],
-                                    dimension_code=dim_code
-                                )
-
-                                # 记录创建的用例ID
-                                if "created_case_ids" not in task:
-                                    task["created_case_ids"] = []
-                                if "_current_dim_case_ids" not in task:
-                                    task["_current_dim_case_ids"] = []
-                                if new_case_id:
-                                    task["created_case_ids"].append(new_case_id)
-                                    task["_current_dim_case_ids"].append(new_case_id)
-                                if new_case_id:
-                                    created_this_round += 1
-                            conn3.commit()
-                            conn3.close()
-                            task["cases_created"] += created_this_round
-                            db_success = True
-                            print(f"[CASE GEN] {task_id} {dim_code} done, created {created_this_round}/{len(cases)} valid cases", flush=True)
-
-                            # 用例完整性重试：如果保存成功数 < 期望数，删除已保存的并重新生成覆盖
-                            if created_this_round < need_count:
-                                for retry_attempt in range(2):  # 最多重试2次
-                                    print(f"[CASE GEN] {task_id} {dim_code} 完整用例 {created_this_round}/{need_count}，重试 {retry_attempt+1}/2", flush=True)
-                                    # 删除本轮已保存的不完整批次
-                                    conn4 = get_db_connection()
-                                    if task.get("created_case_ids"):
-                                        for cid in task["created_case_ids"]:
-                                            if cid:
-                                                execute_query(conn4, "DELETE FROM test_cases WHERE id = %s" if USE_MYSQL else "DELETE FROM test_cases WHERE id = ?", (cid,))
-                                        task["cases_created"] -= created_this_round
-                                    conn4.commit()
-                                    conn4.close()
-                                    task["created_case_ids"] = []
-                                    # 重新生成整批
-                                    retry_cases = pipi_api.generate_test_cases(
-                                        dimension=dim, toy_persona=toy_persona, persona=persona,
-                                        user_facts=user_facts, count=need_count, **llm_config["case_gen"]
-                                    )
-                                    if not retry_cases:
-                                        continue
-                                    conn5 = get_db_connection()
-                                    created_this_round = 0
-                                    for rc in retry_cases:
-                                        rc["case_id"] = _get_unique_case_id(conn5, rc.get("case_id", f"{dim_code}-01"))
-                                        rid = _save_test_case(conn5, rc, persona_id=task["persona_id"], device_id=task["persona_id"], dimension_code=dim_code)
-                                        if rid:
-                                            task["created_case_ids"].append(rid)
-                                            task["_current_dim_case_ids"].append(rid)
-                                            created_this_round += 1
-                                    conn5.commit()
-                                    conn5.close()
-                                    task["cases_created"] += created_this_round
-                                    print(f"[CASE GEN] {task_id} {dim_code} 重试后 {created_this_round}/{need_count} 条", flush=True)
-                                    if created_this_round >= need_count:
-                                        break
-                        except Exception as db_err:
-                            db_retry_count += 1
-                            print(f"[CASE GEN DB ERROR] {task_id} {dim_code} attempt {db_retry_count}: {db_err}", flush=True)
-                            if db_retry_count <= db_max_retries:
-                                print(f"[CASE GEN] {task_id} {dim_code} retrying LLM generation...", flush=True)
-                                import time
-                                time.sleep(2)
-                                # 重新调用 LLM 生成
-                                cases = pipi_api.generate_test_cases(
-                                    dimension=dim,
-                                    toy_persona=toy_persona,
-                                    persona=persona,
-                                    user_facts=user_facts,
-                                    count=task["count_per_dimension"],
-                                    **llm_config["case_gen"]
-                                )
-                                if not cases:
-                                    print(f"[CASE GEN] {task_id} {dim_code} retry LLM returned empty", flush=True)
-                                    break
-                            else:
-                                raise db_err
-
-                    if not db_success:
-                        task["errors"].append({"dimension": dim_code, "error": f"数据库插入失败（重试{db_max_retries}次）"})
-                else:
-                    # LLM 返回空或解析失败，worker 层面再重试1次
-                    print(f"[CASE GEN] {task_id} {dim_code} LLM returned empty (after 3 attempts), worker retry...", flush=True)
+                # LLM 空兜底：1 次，复用下面的保存逻辑
+                if not cases:
+                    print(f"[CASE GEN] {task_id} {dim_code} LLM returned empty (after 2 attempts), worker retry...", flush=True)
+                    import time
                     time.sleep(5)
                     cases = pipi_api.generate_test_cases(
                         dimension=dim, toy_persona=toy_persona, persona=persona,
                         user_facts=user_facts, count=need_count, **llm_config["case_gen"]
                     )
-                    if cases:
-                        print(f"[CASE GEN] {task_id} {dim_code} worker retry succeeded, got {len(cases)} cases", flush=True)
-                        conn3 = get_db_connection()
-                        created_this_round = 0
-                        for case in cases:
-                            base_case_id = case.get("case_id", f"{dim_code}-01")
-                            final_case_id = _get_unique_case_id(conn3, base_case_id)
-                            case["case_id"] = final_case_id
-                            new_case_id = _save_test_case(
-                                conn3, case, persona_id=task["persona_id"],
-                                device_id=task["persona_id"], dimension_code=dim_code
-                            )
+
+                # 保存到数据库（单次，无 db 重试循环 — _get_unique_case_id 解决 case_id 冲突，_save_test_case 内部校验字段）
+                dim_ids = []  # 局部变量，不进 task dict，避免污染其他维度
+                if cases:
+                    conn3 = get_db_connection()
+                    for case in cases:
+                        base_case_id = case.get("case_id", f"{dim_code}-01")
+                        final_case_id = _get_unique_case_id(conn3, base_case_id)
+                        case["case_id"] = final_case_id
+
+                        new_case_id = _save_test_case(
+                            conn3, case,
+                            persona_id=task["persona_id"],
+                            device_id=task["persona_id"],
+                            dimension_code=dim_code
+                        )
+
+                        if new_case_id:
+                            dim_ids.append(new_case_id)
                             if "created_case_ids" not in task:
                                 task["created_case_ids"] = []
-                            if "_current_dim_case_ids" not in task:
-                                task["_current_dim_case_ids"] = []
-                            if new_case_id:
-                                task["created_case_ids"].append(new_case_id)
-                                task["_current_dim_case_ids"].append(new_case_id)
-                                created_this_round += 1
-                        conn3.commit()
-                        conn3.close()
-                        task["cases_created"] += created_this_round
-                        print(f"[CASE GEN] {task_id} {dim_code} worker retry done, created {created_this_round}/{len(cases)} cases", flush=True)
-                    else:
-                        print(f"[CASE GEN] {task_id} {dim_code} worker retry also empty, giving up", flush=True)
-                        task["errors"].append({"dimension": dim_code, "error": "LLM 返回空或解析失败（已重试）"})
+                            task["created_case_ids"].append(new_case_id)  # 只 append 永不清空
+                    conn3.commit()
+                    conn3.close()
+                    task["cases_created"] += len(dim_ids)
+                    print(f"[CASE GEN] {task_id} {dim_code} done, created {len(dim_ids)}/{len(cases)} valid cases", flush=True)
+                else:
+                    print(f"[CASE GEN] {task_id} {dim_code} worker retry also empty, giving up", flush=True)
+                    task["errors"].append({"dimension": dim_code, "error": "LLM 返回空或解析失败（已重试）"})
 
             except Exception as e:
                 print(f"[CASE GEN ERROR] {task_id} {dim_code}: {e}", flush=True)
@@ -6352,17 +6255,16 @@ def _generate_cases_worker(task_id):
             task["progress"]["done"] += 1
             _update_async_task(task_id, task)
 
-            # 每个维度完成后立即触发异步审核（与后续生成并行）
-            dim_case_ids = task.get("_current_dim_case_ids", [])
-            if dim_case_ids:
-                print(f"[CASE GEN] {task_id} {dim_code} triggering async review for {len(dim_case_ids)} cases", flush=True)
-                async_review_cases(dim_case_ids)
-            task["_current_dim_case_ids"] = []  # 清空当前维度ID列表
-
         task["status"] = "completed"
         task["progress"]["current"] = None
         _update_async_task(task_id, task)
         print(f"[CASE GEN] {task_id} completed, total {task['cases_created']} cases", flush=True)
+
+        # 生成阶段结束，统一触发一次审核（解耦：不再每维度触发）
+        all_case_ids = task.get("created_case_ids", [])
+        if all_case_ids:
+            print(f"[CASE GEN] {task_id} triggering async review for {len(all_case_ids)} cases (unified)", flush=True)
+            async_review_cases(all_case_ids)
 
     except Exception as e:
         import traceback
@@ -7930,47 +7832,56 @@ def _wait_for_quality_review(persona_id, max_wait_seconds=1800, check_interval=1
             "SELECT id, quality_status FROM test_cases WHERE persona_id = %s" if USE_MYSQL else
             "SELECT id, quality_status FROM test_cases WHERE persona_id = ?",
             (persona_id,), fetch_all=True)
-        conn.close()
 
         total = len(rows)
 
-        # 统计各状态数量
-        status_count = {"pending": 0, "passed": 0, "warning": 0, "failed": 0, "needs_manual_review": 0}
+        # 统计各状态数量（draft 是新生成未审核，pending 是审核中）
+        status_count = {"draft": 0, "pending": 0, "passed": 0, "warning": 0, "failed": 0, "needs_manual_review": 0}
         for r in rows:
             status = r["quality_status"] if isinstance(r, dict) else r[1]
-            status = status or "pending"
+            status = status or "draft"
             status_count[status] = status_count.get(status, 0) + 1
 
+        draft = status_count.get("draft", 0)
         pending = status_count.get("pending", 0)
         failed = status_count.get("failed", 0)
         needs_manual = status_count.get("needs_manual_review", 0)
         passed = status_count.get("passed", 0)
         warning = status_count.get("warning", 0)
 
-        print(f"[FULL FLOW] Review status: {passed} passed, {warning} warning, {failed} failed, {pending} pending, {needs_manual} needs_manual, total={total} ({int(elapsed)}s elapsed)", flush=True)
+        print(f"[FULL FLOW] Review status: {passed} passed, {warning} warning, {failed} failed, {pending} pending, {draft} draft, {needs_manual} needs_manual, total={total} ({int(elapsed)}s elapsed)", flush=True)
 
         # 检查是否需要继续等待
         if total < prev_total:
             # 用例总数下降，说明有维度正在删除旧用例准备重生成，继续等待
             print(f"[FULL FLOW] Total decreased {prev_total} -> {total}, waiting for regeneration...", flush=True)
         elif _any_regen_running_for_persona(persona_id):
-            # 即使 DB 显示 0 pending/0 failed，只要 REGEN 线程还在跑就继续等
+            # 即使 DB 显示 0 draft/0 pending/0 failed，只要 REGEN 线程还在跑就继续等
             # Why: REGEN 启动后 LLM 生成要数秒，这段时间 DB 仍是旧状态（全 reviewed），
-            # 但 REGEN 完成后会 DELETE 旧 case + INSERT 新 case，新 case 是 pending 状态。
+            # 但 REGEN 完成后会 DELETE 旧 case + INSERT 新 case（draft 状态）。
             # 如果此刻误判 ready 启动 task worker，task worker 会把 110 条 (case_id, input_text)
             # 缓存到内存，后续 REGEN 删掉其中部分 case，导致 test_results orphan。
             print(f"[FULL FLOW] REGEN still running for {persona_id}, waiting...", flush=True)
-        elif pending == 0 and failed == 0 and (total >= prev_total or prev_total == 0):
-            # 全部审核完成且总数稳定（不再减少），返回通过的用例（needs_manual_review 不阻塞，因其不再自动变化）
-            if needs_manual > 0:
-                print(f"[FULL FLOW] {needs_manual} cases in needs_manual_review, returning passed cases anyway", flush=True)
-            passed_rows = execute_query(conn,
-                "SELECT id FROM test_cases WHERE persona_id = %s AND quality_status IN ('passed', 'warning')" if USE_MYSQL else
-                "SELECT id FROM test_cases WHERE persona_id = ? AND quality_status IN ('passed', 'warning')",
-                (persona_id,), fetch_all=True)
-            conn.close()
+        elif (draft > 0 or pending > 0) or failed > 0:
+            # 还有 draft/pending（未审核完）或 failed（待 REGEN）→ 继续等
+            pass
+        elif (total >= prev_total or prev_total == 0):
+            # 全部审核完成且总数稳定。返回前再查一次 REGEN，防返回与 REGEN 启动竞态
+            if _any_regen_running_for_persona(persona_id):
+                print(f"[FULL FLOW] REGEN started just after review completed, waiting...", flush=True)
+            else:
+                # needs_manual_review 不阻塞，因其不再自动变化
+                if needs_manual > 0:
+                    print(f"[FULL FLOW] {needs_manual} cases in needs_manual_review, returning passed cases anyway", flush=True)
+                passed_rows = execute_query(conn,
+                    "SELECT id FROM test_cases WHERE persona_id = %s AND quality_status IN ('passed', 'warning')" if USE_MYSQL else
+                    "SELECT id FROM test_cases WHERE persona_id = ? AND quality_status IN ('passed', 'warning')",
+                    (persona_id,), fetch_all=True)
+                conn.close()
 
-            return [r["id"] if isinstance(r, dict) else r[0] for r in passed_rows] if passed_rows else []
+                return [r["id"] if isinstance(r, dict) else r[0] for r in passed_rows] if passed_rows else []
+
+        conn.close()
 
         # 更新上一次总数，继续等待
         prev_total = total
@@ -8203,6 +8114,14 @@ def async_review_cases(case_ids, auto_regenerate=True, regen_depth=0):
                 # 获取玩偶人设
                 toy_row = execute_query(conn, "SELECT * FROM toy_persona LIMIT 1", fetch_one=True)
                 toy_persona = row_to_dict(toy_row) if toy_row else None
+
+                # 审核前置 pending：让 _wait_for_quality_review 能区分"已开始审核"vs"草稿未触达"
+                # Why: 否则审核线程刚启动还未逐条处理时，draft>0 会让轮询误判"生成未触发审核"
+                execute_query(conn,
+                    "UPDATE test_cases SET quality_status = 'pending' WHERE id = %s" if USE_MYSQL else
+                    "UPDATE test_cases SET quality_status = 'pending' WHERE id = ?",
+                    (case_id,))
+                conn.commit()
 
                 # LLM 复核
                 llm_config = get_llm_config()

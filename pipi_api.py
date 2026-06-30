@@ -566,7 +566,7 @@ input_text 示例（错误，不要这样写）：
 
 输出纯JSON数组，无其它文字。"""
 
-    max_retries = 3
+    max_retries = 2
     for attempt in range(max_retries):
         try:
             result_text = call_llm_simple(system_prompt, user_prompt, timeout=timeout, model=model, temperature=temperature, max_tokens=max_tokens)
@@ -582,14 +582,14 @@ input_text 示例（错误，不要这样写）：
             # JSON 解析失败
             if attempt < max_retries - 1:
                 print(f"[CASE GEN] generate_test_cases {dim_code} JSON parse failed, retry {attempt+1}/{max_retries-1}", flush=True)
-                time.sleep(3)
+                time.sleep(3 * (attempt + 1))
             else:
                 print(f"[CASE GEN] generate_test_cases {dim_code} JSON parse failed after {max_retries} attempts", flush=True)
                 return []
         except Exception as e:
             if attempt < max_retries - 1:
                 print(f"[CASE GEN] generate_test_cases {dim_code} error: {e}, retry {attempt+1}/{max_retries-1}", flush=True)
-                time.sleep(3)
+                time.sleep(3 * (attempt + 1))
             else:
                 print(f"[CASE GEN] generate_test_cases {dim_code} error after {max_retries} attempts: {e}", flush=True)
                 return []
