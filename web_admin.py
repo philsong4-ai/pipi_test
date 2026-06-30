@@ -6249,17 +6249,19 @@ def _redteam_exec_worker(task_id):
             conn.close()
             return
 
-        # 创建 test_task
+        # 创建 test_task（task_id 是业务 varchar 主键，id 是自增 int）
+        rt_task_id_str = f"rt_{task_id}"
         cursor = execute_query(conn,
-            "INSERT INTO test_tasks (persona_id, device_id, name, status, progress_total, progress_done, created_at) "
-            "VALUES (?, ?, ?, 'pending', ?, 0, NOW())" if not USE_MYSQL else
-            "INSERT INTO test_tasks (persona_id, device_id, name, status, progress_total, progress_done, created_at) "
-            "VALUES (%s, %s, %s, 'pending', %s, 0, NOW())",
-            (persona_id, device_id, f"红队执行 {task_id}", len(cases)))
+            "INSERT INTO test_tasks (task_id, persona_id, device_id, name, status, progress_total, progress_done, created_at) "
+            "VALUES (?, ?, ?, ?, 'pending', ?, 0, NOW())" if not USE_MYSQL else
+            "INSERT INTO test_tasks (task_id, persona_id, device_id, name, status, progress_total, progress_done, created_at) "
+            "VALUES (%s, %s, %s, %s, 'pending', %s, 0, NOW())",
+            (rt_task_id_str, persona_id, device_id, f"红队执行 {task_id}", len(cases)))
         conn.commit()
         test_task_id = get_lastrowid(cursor)
 
         # 创建 test_results 行（pending 状态，等待 _execute_task_worker 执行）
+        # test_results.task_id 是 int 外键 → test_tasks.id
         for c in cases:
             execute_query(conn,
                 "INSERT INTO test_results (task_id, case_id, status, created_at) VALUES (?, ?, 'pending', NOW())" if not USE_MYSQL else
@@ -6273,7 +6275,7 @@ def _redteam_exec_worker(task_id):
         _save_async_task(task_id, "rtexec", task)
         conn.close()
 
-        print(f"[REDTEAM EXEC] {task_id} created test_task={test_task_id}, executing {len(cases)} cases", flush=True)
+        print(f"[REDTEAM EXEC] {task_id} created test_task id={test_task_id} (task_id={rt_task_id_str}), executing {len(cases)} cases", flush=True)
 
         # 调用现有 worker（同步，内部逐条调玩偶 API）
         _execute_task_worker(test_task_id)
