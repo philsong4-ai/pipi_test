@@ -5867,7 +5867,9 @@ function pollRedStatus(taskId, stage) {
 function loadRedResults() {
   var pid = document.getElementById('red-persona-select').value;
   if (!pid) { alert('请先选择用户'); return; }
-  fetch('/api/red_team/results?persona_id='+encodeURIComponent(pid)).then(r=>r.json()).then(data=>{
+  var url = '/api/red_team/results?persona_id='+encodeURIComponent(pid);
+  if (redExecTaskId) url += '&exec_task_id='+encodeURIComponent(redExecTaskId);
+  fetch(url).then(r=>r.json()).then(data=>{
     var results = data.results || [];
     if (!results.length) { alert('暂无红队裁判结果，请先跑完①②③'); return; }
     document.getElementById('red-results').style.display = '';
@@ -5934,7 +5936,9 @@ function loadRedCases() {
   if (!pid) { alert('请先选择用户'); return; }
   var container = document.getElementById('red-cases-list');
   container.innerHTML = '<div style="color:#aeaeb2;text-align:center;padding:40px;font-size:13px">加载中...</div>';
-  fetch('/api/red_team/cases?persona_id='+encodeURIComponent(pid)).then(r=>r.json()).then(data=>{
+  var url = '/api/red_team/cases?persona_id='+encodeURIComponent(pid);
+  if (redExecTaskId) url += '&exec_task_id='+encodeURIComponent(redExecTaskId);
+  fetch(url).then(r=>r.json()).then(data=>{
     var cases = data.cases || [];
     if (!cases.length) {
       container.innerHTML = '<div style="color:#aeaeb2;text-align:center;padding:40px;font-size:13px">暂无红队用例，请先点①生成</div>';

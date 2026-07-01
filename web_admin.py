@@ -6473,19 +6473,20 @@ def api_redteam_last_exec():
     # 只返回 status='completed' 且有 test_task_id 的最近 rtexec 任务
     # Why: 跳过卡在 running 的僵尸任务（worker 被 Gunicorn 重启杀掉），
     # 且确保 test_task_id 指向真实存在的 test_tasks 记录（否则裁判评 0 条）
+    # 排序用 created_at DESC 而非 id DESC —— id 是 8 位字符串 UUID，字符串排序不是时间序
     if USE_MYSQL:
         row = execute_query(conn,
             "SELECT id, status, progress_json, config_json, created_at FROM async_tasks "
             "WHERE persona_id = %s AND task_type = 'rtexec' AND status = 'completed' "
             "AND JSON_EXTRACT(config_json, '$.test_task_id') IS NOT NULL "
-            "ORDER BY id DESC LIMIT 1",
+            "ORDER BY created_at DESC LIMIT 1",
             (persona_id,), fetch_one=True)
     else:
         row = execute_query(conn,
             "SELECT id, status, progress_json, config_json, created_at FROM async_tasks "
             "WHERE persona_id = ? AND task_type = 'rtexec' AND status = 'completed' "
             "AND json_extract(config_json, '$.test_task_id') IS NOT NULL "
-            "ORDER BY id DESC LIMIT 1",
+            "ORDER BY created_at DESC LIMIT 1",
             (persona_id,), fetch_one=True)
     conn.close()
     if not row:
@@ -6519,38 +6520,130 @@ def api_redteam_status(task_id):
 
 @app.route("/api/red_team/results", methods=["GET"])
 def api_redteam_results():
-    """按 dimension + trap_type 聚合攻破结果"""
+    """按 dimension + trap_type 聚合攻破结果
+    可选参数 exec_task_id：只查该执行任务对应 test_task_id 的结果，避免多次执行结果叠加
+    """
     persona_id = request.args.get("persona_id", "")
+    exec_task_id = request.args.get("exec_task_id", "")
+    test_task_id = None
     conn = get_db_connection()
-    rows = execute_query(conn,
-        "SELECT c.dimension_code, c.redteam_trap_type, "
-        "SUM(CASE WHEN r.score = 0 THEN 1 ELSE 0 END) as breached, "
-        "COUNT(*) as total "
-        "FROM test_results r JOIN test_cases c ON r.case_id = c.id "
-        "WHERE c.is_redteam = 1 AND c.persona_id = ? AND r.score IS NOT NULL "
-        "GROUP BY c.dimension_code, c.redteam_trap_type",
-        (persona_id,), fetch_all=True) if not USE_MYSQL else execute_query(conn,
-        "SELECT c.dimension_code, c.redteam_trap_type, "
-        "SUM(CASE WHEN r.score = 0 THEN 1 ELSE 0 END) as breached, "
-        "COUNT(*) as total "
-        "FROM test_results r JOIN test_cases c ON r.case_id = c.id "
-        "WHERE c.is_redteam = 1 AND c.persona_id = %s AND r.score IS NOT NULL "
-        "GROUP BY c.dimension_code, c.redteam_trap_type",
-        (persona_id,), fetch_all=True)
+
+    # 若传了 exec_task_id，先解析出对应的 test_task_id
+    if exec_task_id:
+        trow = execute_query(conn,
+            "SELECT config_json FROM async_tasks WHERE id = %s AND task_type = 'rtexec'" if USE_MYSQL else
+            "SELECT config_json FROM async_tasks WHERE id = ? AND task_type = 'rtexec'",
+            (exec_task_id,), fetch_one=True)
+        if trow:
+            import json as _json
+            try:
+                cfg = _json.loads(row_to_dict(trow).get("config_json") or "{}")
+                test_task_id = cfg.get("test_task_id")
+            except Exception:
+                test_task_id = None
+
+    # 若没拿到 test_task_id，自动取该用户最新完成的红队执行的 test_task_id
+    if not test_task_id:
+        if USE_MYSQL:
+            last = execute_query(conn,
+                "SELECT config_json FROM async_tasks "
+                "WHERE persona_id = %s AND task_type = 'rtexec' AND status = 'completed' "
+                "AND JSON_EXTRACT(config_json, '$.test_task_id') IS NOT NULL "
+                "ORDER BY created_at DESC LIMIT 1",
+                (persona_id,), fetch_one=True)
+        else:
+            last = execute_query(conn,
+                "SELECT config_json FROM async_tasks "
+                "WHERE persona_id = ? AND task_type = 'rtexec' AND status = 'completed' "
+                "AND json_extract(config_json, '$.test_task_id') IS NOT NULL "
+                "ORDER BY created_at DESC LIMIT 1",
+                (persona_id,), fetch_one=True)
+        if last:
+            import json as _json
+            try:
+                cfg = _json.loads(row_to_dict(last).get("config_json") or "{}")
+                test_task_id = cfg.get("test_task_id")
+            except Exception:
+                test_task_id = None
+
+    if not test_task_id:
+        conn.close()
+        return jsonify({"results": [], "total": 0, "breached": 0, "test_task_id": None})
+
+    # 查该 test_task_id 的红队结果（按 dimension + trap_type 聚合）
+    if USE_MYSQL:
+        rows = execute_query(conn,
+            "SELECT c.dimension_code, c.redteam_trap_type, "
+            "SUM(CASE WHEN r.score = 0 THEN 1 ELSE 0 END) as breached, "
+            "COUNT(*) as total "
+            "FROM test_results r JOIN test_cases c ON r.case_id = c.id "
+            "WHERE c.is_redteam = 1 AND c.persona_id = %s AND r.task_id = %s AND r.score IS NOT NULL "
+            "GROUP BY c.dimension_code, c.redteam_trap_type",
+            (persona_id, test_task_id), fetch_all=True)
+    else:
+        rows = execute_query(conn,
+            "SELECT c.dimension_code, c.redteam_trap_type, "
+            "SUM(CASE WHEN r.score = 0 THEN 1 ELSE 0 END) as breached, "
+            "COUNT(*) as total "
+            "FROM test_results r JOIN test_cases c ON r.case_id = c.id "
+            "WHERE c.is_redteam = 1 AND c.persona_id = ? AND r.task_id = ? AND r.score IS NOT NULL "
+            "GROUP BY c.dimension_code, c.redteam_trap_type",
+            (persona_id, test_task_id), fetch_all=True)
     conn.close()
     rows = [row_to_dict(r) for r in rows] if rows else []
     total = sum(r.get("total", 0) for r in rows)
     breached = sum(r.get("breached", 0) for r in rows)
-    return jsonify({"results": rows, "total": total, "breached": breached})
+    return jsonify({"results": rows, "total": total, "breached": breached, "test_task_id": test_task_id})
 
 
 @app.route("/api/red_team/cases", methods=["GET"])
 def api_redteam_cases():
-    """红队用例清单：含执行状态 + 裁判结果"""
+    """红队用例清单：含执行状态 + 裁判结果
+    只展示最新一次红队执行（test_task_id）的结果，避免多次执行结果叠加。
+    """
     persona_id = request.args.get("persona_id", "")
+    exec_task_id = request.args.get("exec_task_id", "")
     if not persona_id:
         return jsonify({"error": "persona_id required"}), 400
     conn = get_db_connection()
+
+    # 解析最新红队执行的 test_task_id（与 /api/red_team/results 同逻辑）
+    test_task_id = None
+    if exec_task_id:
+        trow = execute_query(conn,
+            "SELECT config_json FROM async_tasks WHERE id = %s AND task_type = 'rtexec'" if USE_MYSQL else
+            "SELECT config_json FROM async_tasks WHERE id = ? AND task_type = 'rtexec'",
+            (exec_task_id,), fetch_one=True)
+        if trow:
+            import json as _json
+            try:
+                cfg = _json.loads(row_to_dict(trow).get("config_json") or "{}")
+                test_task_id = cfg.get("test_task_id")
+            except Exception:
+                test_task_id = None
+    if not test_task_id:
+        if USE_MYSQL:
+            last = execute_query(conn,
+                "SELECT config_json FROM async_tasks "
+                "WHERE persona_id = %s AND task_type = 'rtexec' AND status = 'completed' "
+                "AND JSON_EXTRACT(config_json, '$.test_task_id') IS NOT NULL "
+                "ORDER BY created_at DESC LIMIT 1",
+                (persona_id,), fetch_one=True)
+        else:
+            last = execute_query(conn,
+                "SELECT config_json FROM async_tasks "
+                "WHERE persona_id = ? AND task_type = 'rtexec' AND status = 'completed' "
+                "AND json_extract(config_json, '$.test_task_id') IS NOT NULL "
+                "ORDER BY created_at DESC LIMIT 1",
+                (persona_id,), fetch_one=True)
+        if last:
+            import json as _json
+            try:
+                cfg = _json.loads(row_to_dict(last).get("config_json") or "{}")
+                test_task_id = cfg.get("test_task_id")
+            except Exception:
+                test_task_id = None
+
     if USE_MYSQL:
         rows = execute_query(conn,
             "SELECT c.id, c.case_id, c.dimension_code, c.title, c.priority, "
@@ -6559,10 +6652,10 @@ def api_redteam_cases():
             "r.id as result_id, r.status as exec_status, r.actual_output, r.score, "
             "r.deduction_reason, r.eval_detail, r.executed_at "
             "FROM test_cases c "
-            "LEFT JOIN test_results r ON r.case_id = c.id "
+            "LEFT JOIN test_results r ON r.case_id = c.id AND r.task_id = %s "
             "WHERE c.is_redteam = 1 AND c.persona_id = %s "
             "ORDER BY c.dimension_code, c.case_id",
-            (persona_id,), fetch_all=True)
+            (test_task_id, persona_id), fetch_all=True)
     else:
         rows = execute_query(conn,
             "SELECT c.id, c.case_id, c.dimension_code, c.title, c.priority, "
@@ -6571,13 +6664,13 @@ def api_redteam_cases():
             "r.id as result_id, r.status as exec_status, r.actual_output, r.score, "
             "r.deduction_reason, r.eval_detail, r.executed_at "
             "FROM test_cases c "
-            "LEFT JOIN test_results r ON r.case_id = c.id "
+            "LEFT JOIN test_results r ON r.case_id = c.id AND r.task_id = ? "
             "WHERE c.is_redteam = 1 AND c.persona_id = ? "
             "ORDER BY c.dimension_code, c.case_id",
-            (persona_id,), fetch_all=True)
+            (test_task_id, persona_id), fetch_all=True)
     conn.close()
     rows = [row_to_dict(r) for r in rows] if rows else []
-    return jsonify({"cases": rows, "total": len(rows)})
+    return jsonify({"cases": rows, "total": len(rows), "test_task_id": test_task_id})
 
 
 @app.route("/api/test_cases/generate", methods=["POST"])
