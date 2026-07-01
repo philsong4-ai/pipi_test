@@ -5877,6 +5877,13 @@ def list_test_cases():
     where_clauses = []
     params = []
 
+    # 红队用例隔离：默认只返回正门用例（is_redteam=0），显式传 is_redteam=1 才看红队
+    is_redteam_param = request.args.get("is_redteam", "0")
+    if is_redteam_param == "1":
+        where_clauses.append("is_redteam = 1")
+    else:
+        where_clauses.append("(is_redteam = 0 OR is_redteam IS NULL)")
+
     # 能力簇筛选：先获取该簇下的所有维度
     if cluster_code:
         dim_rows = execute_query(conn,
@@ -7820,8 +7827,8 @@ def _run_scheduled_task(task):
             if task_type == "full_flow" and generated_case_ids:
                 case_ids = generated_case_ids
             else:
-                # 单独执行模式，按配置查询用例
-                sql = "SELECT id FROM test_cases WHERE persona_id = %s" if USE_MYSQL else "SELECT id FROM test_cases WHERE persona_id = ?"
+                # 单独执行模式，按配置查询用例（排除红队用例）
+                sql = "SELECT id FROM test_cases WHERE persona_id = %s AND (is_redteam = 0 OR is_redteam IS NULL)" if USE_MYSQL else "SELECT id FROM test_cases WHERE persona_id = ? AND (is_redteam = 0 OR is_redteam IS NULL)"
                 params = [config.get("persona_id")]
                 if config.get("dimension_codes"):
                     placeholders = ",".join(["%s" if USE_MYSQL else "?"] * len(config["dimension_codes"]))
@@ -8283,10 +8290,10 @@ def _wait_for_quality_review(persona_id, max_wait_seconds=1800, check_interval=1
 
         conn = get_db_connection()
 
-        # 查询该用户所有用例的审核状态
+        # 查询该用户所有用例的审核状态（排除红队用例，红队跳过审核）
         rows = execute_query(conn,
-            "SELECT id, quality_status FROM test_cases WHERE persona_id = %s" if USE_MYSQL else
-            "SELECT id, quality_status FROM test_cases WHERE persona_id = ?",
+            "SELECT id, quality_status FROM test_cases WHERE persona_id = %s AND (is_redteam = 0 OR is_redteam IS NULL)" if USE_MYSQL else
+            "SELECT id, quality_status FROM test_cases WHERE persona_id = ? AND (is_redteam = 0 OR is_redteam IS NULL)",
             (persona_id,), fetch_all=True)
 
         total = len(rows)
@@ -8330,8 +8337,8 @@ def _wait_for_quality_review(persona_id, max_wait_seconds=1800, check_interval=1
                 if needs_manual > 0:
                     print(f"[FULL FLOW] {needs_manual} cases in needs_manual_review, returning passed cases anyway", flush=True)
                 passed_rows = execute_query(conn,
-                    "SELECT id FROM test_cases WHERE persona_id = %s AND quality_status IN ('passed', 'warning')" if USE_MYSQL else
-                    "SELECT id FROM test_cases WHERE persona_id = ? AND quality_status IN ('passed', 'warning')",
+                    "SELECT id FROM test_cases WHERE persona_id = %s AND quality_status IN ('passed', 'warning') AND (is_redteam = 0 OR is_redteam IS NULL)" if USE_MYSQL else
+                    "SELECT id FROM test_cases WHERE persona_id = ? AND quality_status IN ('passed', 'warning') AND (is_redteam = 0 OR is_redteam IS NULL)",
                     (persona_id,), fetch_all=True)
                 conn.close()
 
@@ -8348,11 +8355,11 @@ def _wait_for_quality_review(persona_id, max_wait_seconds=1800, check_interval=1
 
         time.sleep(check_interval)
 
-    # 超时后返回当前已通过的用例
+    # 超时后返回当前已通过的用例（排除红队用例）
     conn = get_db_connection()
     passed_rows = execute_query(conn,
-        "SELECT id FROM test_cases WHERE persona_id = %s AND quality_status IN ('passed', 'warning')" if USE_MYSQL else
-        "SELECT id FROM test_cases WHERE persona_id = ? AND quality_status IN ('passed', 'warning')",
+        "SELECT id FROM test_cases WHERE persona_id = %s AND quality_status IN ('passed', 'warning') AND (is_redteam = 0 OR is_redteam IS NULL)" if USE_MYSQL else
+        "SELECT id FROM test_cases WHERE persona_id = ? AND quality_status IN ('passed', 'warning') AND (is_redteam = 0 OR is_redteam IS NULL)",
         (persona_id,), fetch_all=True)
     conn.close()
 
@@ -8814,10 +8821,11 @@ def trigger_case_review():
     persona_id = data.get("persona_id")
 
     if not case_ids and persona_id:
-        # 根据 persona_id 获取所有用例
+        # 根据 persona_id 获取所有用例（排除红队，红队跳过常规审核）
         conn = get_db_connection()
         rows = execute_query(conn,
-            "SELECT id FROM test_cases WHERE persona_id = %s" if USE_MYSQL else "SELECT id FROM test_cases WHERE persona_id = ?",
+            "SELECT id FROM test_cases WHERE persona_id = %s AND (is_redteam = 0 OR is_redteam IS NULL)" if USE_MYSQL else
+            "SELECT id FROM test_cases WHERE persona_id = ? AND (is_redteam = 0 OR is_redteam IS NULL)",
             (persona_id,), fetch_all=True)
         case_ids = [r["id"] if isinstance(r, dict) else r[0] for r in rows] if rows else []
         conn.close()
