@@ -120,6 +120,7 @@ body{background:#f5f5f7;color:#1d1d1f}
     <a class="nav-item" data-tab="red-team" style="color:#ff3b30">红队测试</a>
     <div class="nav-divider"></div>
     <a class="nav-item" data-tab="endpoints">接口配置</a>
+    <a class="nav-item" data-tab="llm">LLM 配置</a>
     <a class="nav-item" data-tab="about">关于</a>
   </nav>
 </aside>
@@ -553,9 +554,11 @@ body{background:#f5f5f7;color:#1d1d1f}
       <div style="color:#aeaeb2;text-align:center;padding:40px">加载中...</div>
     </div>
   </div>
+</div>
 
-  <!-- LLM模型配置 -->
-  <div class="card" style="margin-top:20px">
+<!-- LLM 模型配置面板 -->
+<div id="panel-llm" class="panel">
+  <div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
       <h3 style="font-size:16px;margin:0">LLM 模型配置</h3>
       <button class="btn btn-primary btn-sm" onclick="saveLlmConfig()">保存</button>
@@ -2310,6 +2313,8 @@ document.querySelectorAll('.nav-item').forEach(function(btn) {
     }
     if (btn.dataset.tab === 'endpoints') {
       loadEndpoints();
+    }
+    if (btn.dataset.tab === 'llm') {
       loadLlmConfig();
     }
     if (btn.dataset.tab === 'test-manage') {
