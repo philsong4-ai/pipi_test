@@ -6470,11 +6470,11 @@ def api_redteam_last_exec():
     if not persona_id:
         return jsonify({"error": "persona_id required"}), 400
     conn = get_db_connection()
-    # async_tasks 表按 persona_id + task_type='rtexec' 查最近一条
+    # async_tasks 表按 persona_id + task_type='rtexec' 查最近一条（主键是 id，即任务 ID）
     row = execute_query(conn,
-        "SELECT task_id, status, progress_json, config_json, created_at FROM async_tasks "
+        "SELECT id, status, progress_json, config_json, created_at FROM async_tasks "
         "WHERE persona_id = %s AND task_type = 'rtexec' ORDER BY id DESC LIMIT 1" if USE_MYSQL else
-        "SELECT task_id, status, progress_json, config_json, created_at FROM async_tasks "
+        "SELECT id, status, progress_json, config_json, created_at FROM async_tasks "
         "WHERE persona_id = ? AND task_type = 'rtexec' ORDER BY id DESC LIMIT 1",
         (persona_id,), fetch_one=True)
     conn.close()
@@ -6488,7 +6488,7 @@ def api_redteam_last_exec():
     except Exception:
         config = {}
     return jsonify({
-        "exec_task_id": r.get("task_id", ""),
+        "exec_task_id": r.get("id", ""),
         "status": r.get("status", ""),
         "test_task_id": config.get("test_task_id"),
         "created_at": str(r.get("created_at", "")),
