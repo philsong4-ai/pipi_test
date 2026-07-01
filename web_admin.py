@@ -6463,6 +6463,38 @@ def api_redteam_evaluate():
     return jsonify({"task_id": new_task_id, "status": "running"})
 
 
+@app.route("/api/red_team/last_exec", methods=["GET"])
+def api_redteam_last_exec():
+    """查询某用户最近的红队执行任务（用于页面刷新后恢复 redExecTaskId）"""
+    persona_id = request.args.get("persona_id", "")
+    if not persona_id:
+        return jsonify({"error": "persona_id required"}), 400
+    conn = get_db_connection()
+    # async_tasks 表按 persona_id + task_type='rtexec' 查最近一条
+    row = execute_query(conn,
+        "SELECT task_id, status, progress_json, config_json, created_at FROM async_tasks "
+        "WHERE persona_id = %s AND task_type = 'rtexec' ORDER BY id DESC LIMIT 1" if USE_MYSQL else
+        "SELECT task_id, status, progress_json, config_json, created_at FROM async_tasks "
+        "WHERE persona_id = ? AND task_type = 'rtexec' ORDER BY id DESC LIMIT 1",
+        (persona_id,), fetch_one=True)
+    conn.close()
+    if not row:
+        return jsonify({"error": "no red team exec task for this persona"}), 404
+    r = row_to_dict(row)
+    import json as _json
+    config = {}
+    try:
+        config = _json.loads(r.get("config_json") or "{}")
+    except Exception:
+        config = {}
+    return jsonify({
+        "exec_task_id": r.get("task_id", ""),
+        "status": r.get("status", ""),
+        "test_task_id": config.get("test_task_id"),
+        "created_at": str(r.get("created_at", "")),
+    })
+
+
 @app.route("/api/red_team/tasks/<task_id>", methods=["GET"])
 def api_redteam_status(task_id):
     """查红队任务状态"""

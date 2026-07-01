@@ -5791,21 +5791,53 @@ function startRedExec() {
 }
 
 function startRedEval() {
-  if (!redExecTaskId) { alert('请先执行②（拿到 exec_task_id）'); return; }
-  if (!confirm('启动红队裁判？对每条执行结果判定是否被攻破。')) return;
+  var pid = document.getElementById('red-persona-select').value;
+  if (!pid) { alert('请先选择用户'); return; }
   redBtnDisable('eval', true);
-  redSetStatus('裁判中...', '#af52c4');
-  fetch('/api/red_team/evaluate', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({exec_task_id: redExecTaskId})
-  }).then(r=>r.json()).then(data=>{
-    if (data.error) { redBtnDisable('eval', false); redSetStatus('错误: '+data.error, '#ff3b30'); alert(data.error); return; }
-    redEvalTaskId = data.task_id;
-    pollRedStatus(data.task_id, 'eval');
-  }).catch(e=>{
-    redBtnDisable('eval', false);
-    redSetStatus('请求失败: '+e, '#ff3b30');
-  });
+  redSetStatus('准备裁判...', '#af52c4');
+
+  function doEval(execTaskId) {
+    if (!confirm('启动红队裁判？对每条执行结果判定是否被攻破。')) {
+      redBtnDisable('eval', false);
+      redSetStatus('已取消', '#86868b');
+      return;
+    }
+    redSetStatus('裁判中...', '#af52c4');
+    fetch('/api/red_team/evaluate', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({exec_task_id: execTaskId})
+    }).then(r=>r.json()).then(data=>{
+      if (data.error) { redBtnDisable('eval', false); redSetStatus('错误: '+data.error, '#ff3b30'); alert(data.error); return; }
+      redEvalTaskId = data.task_id;
+      pollRedStatus(data.task_id, 'eval');
+    }).catch(e=>{
+      redBtnDisable('eval', false);
+      redSetStatus('请求失败: '+e, '#ff3b30');
+    });
+  }
+
+  if (redExecTaskId) {
+    doEval(redExecTaskId);
+  } else {
+    // 页面刷新后内存变量丢失，去后端查最近的红队执行任务
+    fetch('/api/red_team/last_exec?persona_id='+encodeURIComponent(pid)).then(r=>{
+      if (r.status === 404) return null;
+      return r.json();
+    }).then(data=>{
+      if (!data || !data.exec_task_id) {
+        redBtnDisable('eval', false);
+        redSetStatus('未找到执行任务，请先点②执行', '#ff3b30');
+        alert('请先点②执行（未找到该用户的红队执行任务）');
+        return;
+      }
+      redExecTaskId = data.exec_task_id;
+      redSetStatus('已恢复 exec_task_id='+data.exec_task_id+'（status='+data.status+'）', '#86868b');
+      doEval(data.exec_task_id);
+    }).catch(e=>{
+      redBtnDisable('eval', false);
+      redSetStatus('查询执行任务失败: '+e, '#ff3b30');
+    });
+  }
 }
 
 function pollRedStatus(taskId, stage) {
