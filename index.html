@@ -529,6 +529,17 @@ body{background:#f5f5f7;color:#1d1d1f}
       <h4 style="font-size:14px;margin:0 0 8px 0">按维度 × 攻击类型分布</h4>
       <div id="red-breach-table"></div>
     </div>
+
+    <div class="card" style="margin-top:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h4 style="font-size:14px;margin:0;color:#ff3b30">红队用例清单</h4>
+        <button class="btn btn-sm" onclick="loadRedCases()" style="background:#fafafa">刷新</button>
+      </div>
+      <div style="font-size:12px;color:#86868b;margin-bottom:8px">展示该用户所有红队用例（含生成、执行、裁判结果）</div>
+      <div id="red-cases-list" style="max-height:600px;overflow-y:auto;border:1px solid #d2d2d7;border-radius:6px">
+        <div style="color:#aeaeb2;text-align:center;padding:40px;font-size:13px">选择用户后加载</div>
+      </div>
+    </div>
   </div>
 </div>
 <!-- 预约任务面板 -->
@@ -5713,11 +5724,15 @@ function loadRedPersonas() {
   fetch('/api/personas').then(r=>r.json()).then(data=>{
     var sel = document.getElementById('red-persona-select');
     if (!sel) return;
+    sel.onchange = function(){ loadRedCases(); };
     var arr = data.personas || data.items || data || [];
     if (!Array.isArray(arr)) arr = [];
     sel.innerHTML = arr.length ? arr.map(p=>'<option value="'+(p.id||p.persona_id)+'">'+(p.name||p.id||p.persona_id)+'</option>').join('') : '<option value="">（无用户）</option>';
-    // 默认选第一个
-    if (arr.length) sel.value = (arr[0].id||arr[0].persona_id);
+    // 默认选第一个，触发加载
+    if (arr.length) {
+      sel.value = (arr[0].id||arr[0].persona_id);
+      loadRedCases();
+    }
   }).catch(e=>{
     var sel = document.getElementById('red-persona-select');
     if (sel) sel.innerHTML = '<option value="">加载失败</option>';
@@ -5805,7 +5820,9 @@ function pollRedStatus(taskId, stage) {
 
     if (data.status==='completed' || data.status==='failed') {
       redBtnDisable(stage, false);
-      if (stage==='eval' && data.status==='completed') loadRedResults();
+      if (stage==='gen' && data.status==='completed') loadRedCases();
+      if (stage==='exec' && data.status==='completed') loadRedCases();
+      if (stage==='eval' && data.status==='completed') { loadRedResults(); loadRedCases(); }
       return;
     }
     redPollTimer = setTimeout(function(){ pollRedStatus(taskId, stage); }, 2000);
@@ -5877,6 +5894,69 @@ function loadRedResults() {
     document.getElementById('red-breach-table').innerHTML = html;
   }).catch(e=>{
     alert('加载结果失败: '+e);
+  });
+}
+
+function loadRedCases() {
+  var pid = document.getElementById('red-persona-select').value;
+  if (!pid) { alert('请先选择用户'); return; }
+  var container = document.getElementById('red-cases-list');
+  container.innerHTML = '<div style="color:#aeaeb2;text-align:center;padding:40px;font-size:13px">加载中...</div>';
+  fetch('/api/red_team/cases?persona_id='+encodeURIComponent(pid)).then(r=>r.json()).then(data=>{
+    var cases = data.cases || [];
+    if (!cases.length) {
+      container.innerHTML = '<div style="color:#aeaeb2;text-align:center;padding:40px;font-size:13px">暂无红队用例，请先点①生成</div>';
+      return;
+    }
+    var html = '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:#fafafa;position:sticky;top:0">'+
+      '<th style="padding:8px;text-align:left;border-bottom:1px solid #d2d2d7">Case ID</th>'+
+      '<th style="padding:8px;text-align:left;border-bottom:1px solid #d2d2d7">维度</th>'+
+      '<th style="padding:8px;text-align:left;border-bottom:1px solid #d2d2d7">攻击类型</th>'+
+      '<th style="padding:8px;text-align:left;border-bottom:1px solid #d2d2d7">陷阱输入</th>'+
+      '<th style="padding:8px;text-align:left;border-bottom:1px solid #d2d2d7">预期失败</th>'+
+      '<th style="padding:8px;text-align:left;border-bottom:1px solid #d2d2d7">实际回复</th>'+
+      '<th style="padding:8px;text-align:center;border-bottom:1px solid #d2d2d7">状态</th>'+
+      '<th style="padding:8px;text-align:center;border-bottom:1px solid #d2d2d7">裁判</th>'+
+      '</tr></thead><tbody>';
+    cases.forEach(function(c){
+      var execStatus = c.exec_status || '未执行';
+      var statusColor = execStatus==='executed' ? '#34c759' : (execStatus==='failed'?'#ff3b30':'#86868b');
+      var scoreLabel = '-';
+      var scoreColor = '#86868b';
+      if (c.score !== null && c.score !== undefined) {
+        if (c.score === 0) { scoreLabel = '攻破'; scoreColor = '#ff3b30'; }
+        else if (c.score === 10) { scoreLabel = '防御'; scoreColor = '#34c759'; }
+        else { scoreLabel = String(c.score); }
+      }
+      var trapType = c.redteam_trap_type || '-';
+      var inputShort = (c.input_text||'').substring(0, 80);
+      if ((c.input_text||'').length > 80) inputShort += '...';
+      var actualShort = (c.actual_output||'').substring(0, 80);
+      if ((c.actual_output||'').length > 80) actualShort += '...';
+      var predictedShort = (c.redteam_predicted_failure||'').substring(0, 60);
+      if ((c.redteam_predicted_failure||'').length > 60) predictedShort += '...';
+      html += '<tr>'+
+        '<td style="padding:8px;border-bottom:1px solid #eee;font-family:monospace;font-size:11px">'+(c.case_id||'-')+'</td>'+
+        '<td style="padding:8px;border-bottom:1px solid #eee">'+(c.dimension_code||'-')+'</td>'+
+        '<td style="padding:8px;border-bottom:1px solid #eee">'+trapType+'</td>'+
+        '<td style="padding:8px;border-bottom:1px solid #eee;max-width:300px;white-space:pre-wrap;word-break:break-word">'+escapeHtml(inputShort)+'</td>'+
+        '<td style="padding:8px;border-bottom:1px solid #eee;max-width:200px;color:#86868b">'+escapeHtml(predictedShort)+'</td>'+
+        '<td style="padding:8px;border-bottom:1px solid #eee;max-width:300px;white-space:pre-wrap;word-break:break-word">'+(actualShort?escapeHtml(actualShort):'<span style="color:#aeaeb2">-</span>')+'</td>'+
+        '<td style="padding:8px;border-bottom:1px solid #eee;text-align:center;color:'+statusColor+';font-size:11px">'+execStatus+'</td>'+
+        '<td style="padding:8px;border-bottom:1px solid #eee;text-align:center;color:'+scoreColor+';font-weight:600">'+scoreLabel+'</td>'+
+        '</tr>';
+    });
+    html += '</tbody></table>';
+    container.innerHTML = html;
+  }).catch(e=>{
+    container.innerHTML = '<div style="color:#ff3b30;text-align:center;padding:40px;font-size:13px">加载失败: '+e+'</div>';
+  });
+}
+
+function escapeHtml(s) {
+  if (!s) return '';
+  return String(s).replace(/[&<>"']/g, function(ch){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch];
   });
 }
 </script>

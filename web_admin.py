@@ -6499,6 +6499,42 @@ def api_redteam_results():
     return jsonify({"results": rows, "total": total, "breached": breached})
 
 
+@app.route("/api/red_team/cases", methods=["GET"])
+def api_redteam_cases():
+    """红队用例清单：含执行状态 + 裁判结果"""
+    persona_id = request.args.get("persona_id", "")
+    if not persona_id:
+        return jsonify({"error": "persona_id required"}), 400
+    conn = get_db_connection()
+    if USE_MYSQL:
+        rows = execute_query(conn,
+            "SELECT c.id, c.case_id, c.dimension_code, c.title, c.priority, "
+            "c.input_text, c.expected_output, c.redteam_trap_type, c.redteam_predicted_failure, "
+            "c.failure_flags, c.quality_status, "
+            "r.id as result_id, r.status as exec_status, r.actual_output, r.score, "
+            "r.deduction_reason, r.eval_detail, r.executed_at "
+            "FROM test_cases c "
+            "LEFT JOIN test_results r ON r.case_id = c.id "
+            "WHERE c.is_redteam = 1 AND c.persona_id = %s "
+            "ORDER BY c.dimension_code, c.case_id",
+            (persona_id,), fetch_all=True)
+    else:
+        rows = execute_query(conn,
+            "SELECT c.id, c.case_id, c.dimension_code, c.title, c.priority, "
+            "c.input_text, c.expected_output, c.redteam_trap_type, c.redteam_predicted_failure, "
+            "c.failure_flags, c.quality_status, "
+            "r.id as result_id, r.status as exec_status, r.actual_output, r.score, "
+            "r.deduction_reason, r.eval_detail, r.executed_at "
+            "FROM test_cases c "
+            "LEFT JOIN test_results r ON r.case_id = c.id "
+            "WHERE c.is_redteam = 1 AND c.persona_id = ? "
+            "ORDER BY c.dimension_code, c.case_id",
+            (persona_id,), fetch_all=True)
+    conn.close()
+    rows = [row_to_dict(r) for r in rows] if rows else []
+    return jsonify({"cases": rows, "total": len(rows)})
+
+
 @app.route("/api/test_cases/generate", methods=["POST"])
 def generate_test_cases():
     """
