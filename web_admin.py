@@ -6470,16 +6470,26 @@ def api_redteam_last_exec():
     if not persona_id:
         return jsonify({"error": "persona_id required"}), 400
     conn = get_db_connection()
-    # async_tasks 表按 persona_id + task_type='rtexec' 查最近一条（主键是 id，即任务 ID）
-    row = execute_query(conn,
-        "SELECT id, status, progress_json, config_json, created_at FROM async_tasks "
-        "WHERE persona_id = %s AND task_type = 'rtexec' ORDER BY id DESC LIMIT 1" if USE_MYSQL else
-        "SELECT id, status, progress_json, config_json, created_at FROM async_tasks "
-        "WHERE persona_id = ? AND task_type = 'rtexec' ORDER BY id DESC LIMIT 1",
-        (persona_id,), fetch_one=True)
+    # 只返回 status='completed' 且有 test_task_id 的最近 rtexec 任务
+    # Why: 跳过卡在 running 的僵尸任务（worker 被 Gunicorn 重启杀掉），
+    # 且确保 test_task_id 指向真实存在的 test_tasks 记录（否则裁判评 0 条）
+    if USE_MYSQL:
+        row = execute_query(conn,
+            "SELECT id, status, progress_json, config_json, created_at FROM async_tasks "
+            "WHERE persona_id = %s AND task_type = 'rtexec' AND status = 'completed' "
+            "AND JSON_EXTRACT(config_json, '$.test_task_id') IS NOT NULL "
+            "ORDER BY id DESC LIMIT 1",
+            (persona_id,), fetch_one=True)
+    else:
+        row = execute_query(conn,
+            "SELECT id, status, progress_json, config_json, created_at FROM async_tasks "
+            "WHERE persona_id = ? AND task_type = 'rtexec' AND status = 'completed' "
+            "AND json_extract(config_json, '$.test_task_id') IS NOT NULL "
+            "ORDER BY id DESC LIMIT 1",
+            (persona_id,), fetch_one=True)
     conn.close()
     if not row:
-        return jsonify({"error": "no red team exec task for this persona"}), 404
+        return jsonify({"error": "no completed red team exec task for this persona"}), 404
     r = row_to_dict(row)
     import json as _json
     config = {}
@@ -6487,10 +6497,13 @@ def api_redteam_last_exec():
         config = _json.loads(r.get("config_json") or "{}")
     except Exception:
         config = {}
+    test_task_id = config.get("test_task_id")
+    if not test_task_id:
+        return jsonify({"error": "last exec task has no test_task_id"}), 404
     return jsonify({
         "exec_task_id": r.get("id", ""),
         "status": r.get("status", ""),
-        "test_task_id": config.get("test_task_id"),
+        "test_task_id": test_task_id,
         "created_at": str(r.get("created_at", "")),
     })
 
