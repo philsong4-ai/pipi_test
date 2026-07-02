@@ -5945,16 +5945,14 @@ function loadRedCases() {
       return;
     }
     var html = '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:#fafafa;position:sticky;top:0">'+
+      '<th style="padding:8px;text-align:left;border-bottom:1px solid #d2d2d7;width:30px"></th>'+
       '<th style="padding:8px;text-align:left;border-bottom:1px solid #d2d2d7">Case ID</th>'+
       '<th style="padding:8px;text-align:left;border-bottom:1px solid #d2d2d7">维度</th>'+
       '<th style="padding:8px;text-align:left;border-bottom:1px solid #d2d2d7">攻击类型</th>'+
-      '<th style="padding:8px;text-align:left;border-bottom:1px solid #d2d2d7">陷阱输入</th>'+
-      '<th style="padding:8px;text-align:left;border-bottom:1px solid #d2d2d7">预期失败</th>'+
-      '<th style="padding:8px;text-align:left;border-bottom:1px solid #d2d2d7">实际回复</th>'+
       '<th style="padding:8px;text-align:center;border-bottom:1px solid #d2d2d7">状态</th>'+
       '<th style="padding:8px;text-align:center;border-bottom:1px solid #d2d2d7">裁判</th>'+
       '</tr></thead><tbody>';
-    cases.forEach(function(c){
+    cases.forEach(function(c, idx){
       var execStatus = c.exec_status || '未执行';
       var statusColor = execStatus==='executed' ? '#34c759' : (execStatus==='failed'?'#ff3b30':'#86868b');
       var scoreLabel = '-';
@@ -5965,28 +5963,88 @@ function loadRedCases() {
         else { scoreLabel = String(c.score); }
       }
       var trapType = c.redteam_trap_type || '-';
-      var inputShort = (c.input_text||'').substring(0, 80);
-      if ((c.input_text||'').length > 80) inputShort += '...';
-      var actualShort = (c.actual_output||'').substring(0, 80);
-      if ((c.actual_output||'').length > 80) actualShort += '...';
-      var predictedShort = (c.redteam_predicted_failure||'').substring(0, 60);
-      if ((c.redteam_predicted_failure||'').length > 60) predictedShort += '...';
-      html += '<tr>'+
+      // 简化行：可点击展开详情
+      html += '<tr style="cursor:pointer;background:'+(idx%2===0?'#fff':'#fafafa')+'" onclick="toggleRedCaseDetail('+idx+')">'+
+        '<td style="padding:8px;border-bottom:1px solid #eee;text-align:center;color:#86868b" id="red-case-arrow-'+idx+'">▶</td>'+
         '<td style="padding:8px;border-bottom:1px solid #eee;font-family:monospace;font-size:11px">'+(c.case_id||'-')+'</td>'+
         '<td style="padding:8px;border-bottom:1px solid #eee">'+(c.dimension_code||'-')+'</td>'+
-        '<td style="padding:8px;border-bottom:1px solid #eee">'+trapType+'</td>'+
-        '<td style="padding:8px;border-bottom:1px solid #eee;max-width:300px;white-space:pre-wrap;word-break:break-word">'+escapeHtml(inputShort)+'</td>'+
-        '<td style="padding:8px;border-bottom:1px solid #eee;max-width:200px;color:#86868b">'+escapeHtml(predictedShort)+'</td>'+
-        '<td style="padding:8px;border-bottom:1px solid #eee;max-width:300px;white-space:pre-wrap;word-break:break-word">'+(actualShort?escapeHtml(actualShort):'<span style="color:#aeaeb2">-</span>')+'</td>'+
+        '<td style="padding:8px;border-bottom:1px solid #eee">'+escapeHtml(trapType)+'</td>'+
         '<td style="padding:8px;border-bottom:1px solid #eee;text-align:center;color:'+statusColor+';font-size:11px">'+execStatus+'</td>'+
         '<td style="padding:8px;border-bottom:1px solid #eee;text-align:center;color:'+scoreColor+';font-weight:600">'+scoreLabel+'</td>'+
         '</tr>';
+      // 详情行：默认隐藏
+      html += '<tr id="red-case-detail-'+idx+'" style="display:none">'+
+        '<td colspan="6" style="padding:12px 16px;border-bottom:1px solid #d2d2d7;background:#f5f5f7">'+
+        renderRedCaseDetail(c)+
+        '</td></tr>';
     });
     html += '</tbody></table>';
     container.innerHTML = html;
+    // 缓存用例数据供详情展开用
+    window._redCasesCache = cases;
   }).catch(e=>{
     container.innerHTML = '<div style="color:#ff3b30;text-align:center;padding:40px;font-size:13px">加载失败: '+e+'</div>';
   });
+}
+
+function toggleRedCaseDetail(idx) {
+  var row = document.getElementById('red-case-detail-'+idx);
+  var arrow = document.getElementById('red-case-arrow-'+idx);
+  if (!row) return;
+  if (row.style.display === 'none') {
+    row.style.display = '';
+    if (arrow) arrow.textContent = '▼';
+  } else {
+    row.style.display = 'none';
+    if (arrow) arrow.textContent = '▶';
+  }
+}
+
+function renderRedCaseDetail(c) {
+  function field(label, val, opts) {
+    opts = opts || {};
+    var color = opts.color || '#1d1d1f';
+    var mono = opts.mono ? 'font-family:monospace;font-size:11px;' : '';
+    var pre = opts.pre ? 'white-space:pre-wrap;word-break:break-word;' : '';
+    var valHtml = val ? escapeHtml(val) : '<span style="color:#aeaeb2">-</span>';
+    return '<div style="margin-bottom:8px">'+
+      '<div style="font-size:11px;color:#86868b;margin-bottom:2px">'+label+'</div>'+
+      '<div style="font-size:12px;color:'+color+';'+mono+pre+';padding:6px 8px;background:#fff;border-radius:4px;border:1px solid #e5e5e7">'+valHtml+'</div>'+
+      '</div>';
+  }
+  var html = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">';
+  // 左列：输入侧
+  html += '<div>'+
+    field('标题', c.title)+
+    field('测试点', c.test_point)+
+    field('陷阱输入 (input_text)', c.input_text, {pre:true, mono:true})+
+    field('理想防御 (expected_output)', c.expected_output, {pre:true, mono:true})+
+    field('预期失败模式 (redteam_predicted_failure)', c.redteam_predicted_failure, {pre:true})+
+    field('失败标志 (failure_flags)', c.failure_flags)+
+    '</div>';
+  // 右列：执行+裁判结果
+  html += '<div>'+
+    field('实际回复 (actual_output)', c.actual_output, {pre:true, mono:true})+
+    field('裁判扣分原因 (deduction_reason)', c.deduction_reason, {pre:true, color:'#ff3b30'})+
+    field('裁判详情 (eval_detail)', c.eval_detail, {pre:true, mono:true, color:'#86868b'});
+  // 解析 eval_detail JSON 展示
+  if (c.eval_detail) {
+    try {
+      var d = JSON.parse(c.eval_detail);
+      html += '<div style="margin-bottom:8px">'+
+        '<div style="font-size:11px;color:#86868b;margin-bottom:4px">裁判结构化字段</div>'+
+        '<div style="font-size:11px;color:#1d1d1f;padding:6px 8px;background:#fff;border-radius:4px;border:1px solid #e5e5e7">';
+      if (d.breached !== undefined) html += '<div>breached: <b style="color:'+(d.breached?'#ff3b30':'#34c759')+'">'+d.breached+'</b></div>';
+      if (d.breach_type) html += '<div>breach_type: '+escapeHtml(d.breach_type)+'</div>';
+      if (d.severity !== undefined) html += '<div>severity: '+d.severity+'</div>';
+      if (d.reasoning) html += '<div style="margin-top:4px;white-space:pre-wrap;word-break:break-word">reasoning: '+escapeHtml(d.reasoning)+'</div>';
+      html += '</div></div>';
+    } catch(e) {}
+  }
+  if (c.executed_at) html += field('执行时间', String(c.executed_at));
+  html += '</div>';
+  html += '</div>';
+  return html;
 }
 
 function escapeHtml(s) {
