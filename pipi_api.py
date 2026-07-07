@@ -2501,12 +2501,28 @@ def review_case_quality(case_data: Dict, dimension_info: Dict = None, user_facts
 - 已知事实中的人际关系描述（如"同事人都挺好的"允许写"同事挺好"）
 只有在已知事实列表中完全找不到任何对应时，才能判定为虚构事实。
 
-【评分规则】
-- 10分：完全符合通用+专属标准，无硬规则违规
-- 7-9分：基本合格，有小瑕疵
-- 4-6分：需修改，有明显问题（expected_output 是行为列表直接 ≤6 分；虚构事实直接 ≤4 分）
+【评分规则 - 必须先列 issues 再算分】
+**评分流程（严格按此顺序）**：
+1. 逐条对照【通用审核标准】+【本维度专属检查】+【本维度硬规则禁区】，列出所有 issues
+2. 按 issues 数量和严重度推导 score，不得先定分再补 issues
+
+**硬触发器（命中任一即按对应上限打分，不得更高）**：
+- score ≤ 6（warning）的硬触发器：
+  - failure_flags 未覆盖本维度专属检查项要求的典型错误（参考【本维度专属检查】列出的错误类型）
+  - evaluation_points 带序号前缀（如"1. xxx""2. xxx"），违反"10字以内、可观测"要求
+  - failure_flags 含与本维度无关的冗余项（如 A1 维度出现「亲昵称呼」「越界承诺」等跨维度硬规则项）
+  - case_id 前缀与 dimension_code 不一致（如 case_id="A1-251" 但 dimension_code="F1"）
+  - issues 数 ≥ 2（任何 2 条及以上问题都不得 pass）
+- score ≤ 3（failed）的硬触发器：
+  - 触发【本维度硬规则禁区】任一条
+  - expected_output 是行为原则列表而非具体回复文本（"1. xxx；2. xxx"格式）
+  - expected_output 虚构用户事实（完全找不到对应）
+
+**评分基准**（仅在未触发上述硬触发器时参考）：
+- 10分：完全符合通用+专属标准，无 issues
+- 7-9分：基本合格，有小瑕疵（issues 数 ≤ 1 且非硬触发器命中项）
+- 4-6分：需修改，有明显问题
 - 1-3分：触发硬规则禁区，或不合格需重新生成
-- **触发任一硬规则禁区直接 ≤3 分**
 
 返回JSON: {{"score": 分数, "issues": ["问题1", "问题2"], "suggestion": "修改建议"}}"""
 
@@ -2546,6 +2562,12 @@ failure_flags:
                 issues = ["LLM 未给出具体问题但打了低分，请人工复核"]
                 score = 5
                 print(f"[COT] review empty issues with low score, fallback to warning", flush=True)
+
+            # 后处理防虚高：issues 非空但 score≥8 → 强制降为 6 分 warning
+            # Why: LLM 常列了真问题但仍给 8-9 分 passed，导致问题积累无法触发重生成
+            if issues and score >= 8:
+                print(f"[COT] review score {score} capped to 6 (issues non-empty: {issues}), downgrade to warning", flush=True)
+                score = 6
 
             if score >= 8:
                 status = "passed"

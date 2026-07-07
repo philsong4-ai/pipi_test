@@ -6002,6 +6002,17 @@ def _save_test_case(conn, case_data, persona_id=None, device_id=None, dimension_
     final_device_id = device_id or case_data.get("device_id", final_persona_id)
     final_dimension_code = dimension_code or case_data.get("dimension_code", "")
 
+    # case_id 前缀纠正：如果 case_id 前缀与 dimension_code 不一致，自动纠正
+    # Why: 实际数据发现 case_id="A1-251" 但 dimension_code="F1" 的错位，导致维度统计错乱
+    raw_case_id = case_data.get("case_id", "")
+    if raw_case_id and final_dimension_code:
+        prefix = raw_case_id.split('-')[0].split('_')[0]
+        if prefix != final_dimension_code:
+            suffix = raw_case_id[len(prefix) + 1:] if len(raw_case_id) > len(prefix) else raw_case_id
+            corrected = f"{final_dimension_code}-{suffix}" if suffix else final_dimension_code
+            print(f"[SAVE CASE] case_id 纠正: {raw_case_id} → {corrected} (dimension_code={final_dimension_code})", flush=True)
+            case_data["case_id"] = corrected
+
     # 规则校验（用例生成时默认 draft，等待 LLM 异步审核；审核中转 pending，审核完覆盖为 passed/warning/failed）
     validation = validate_case_rules(case_data, final_dimension_code)
     # 红队用例跳过常规审核（陷阱用例本身就是要触发 hard_rule，常规审核会误判）
@@ -8441,7 +8452,64 @@ def validate_case_rules(case_data, dimension_code):
     eval_points = case_data.get("evaluation_points", "")
     if not eval_points or (isinstance(eval_points, str) and not eval_points.strip()):
         issues.append("缺少 evaluation_points（关键评估点）")
-    
+
+    # 7. evaluation_points 不应带序号前缀（"1. xxx" "2. xxx" 等）
+    # Why: 评审标准要求每条 ≤10字、可观测，带序号违反规范，LLM 评审仍频繁漏判
+    if eval_points and isinstance(eval_points, str):
+        seq_pattern = re.compile(r'^\s*\d+[\.、）)]\s*')
+        lines = [l for l in eval_points.split('\n') if l.strip()]
+        seq_lines = [l for l in lines if seq_pattern.match(l)]
+        if seq_lines:
+            issues.append(f"evaluation_points 带序号前缀（{len(seq_lines)} 条），应为纯行为描述")
+
+    # 8. case_id 前缀必须等于 dimension_code
+    # Why: 实际数据发现 case_id="A1-251" 但 dimension_code="F1" 的错位，导致维度统计错乱
+    case_id = case_data.get("case_id", "")
+    if case_id and dimension_code:
+        # 提取 case_id 第一段（如 "A1-251" → "A1"，"D2-162" → "D2"）
+        prefix = case_id.split('-')[0].split('_')[0]
+        if prefix != dimension_code:
+            issues.append(f"case_id 前缀 {prefix} 与 dimension_code {dimension_code} 不一致")
+
+    # 9. failure_flags 不应含跨维度冗余项
+    # Why: A1 维度的 case 频繁出现「亲昵称呼」「越界承诺」等 D2/D4 硬规则项，属于生成端套用通用模板
+    failure_flags = case_data.get("failure_flags", "")
+    if failure_flags and isinstance(failure_flags, str) and dimension_code:
+        try:
+            import pipi_api
+            checklist = getattr(pipi_api, "DIMENSION_REVIEW_CHECKLIST", {})
+            dim_check = checklist.get(dimension_code, {})
+            # 该维度的专属错误主题词（从 specific 文本中提取关键词）
+            specific_text = " ".join(dim_check.get("specific", []))
+            # 其他维度硬规则关键词（跨维度冗余嫌疑）
+            cross_dim_keywords = {
+                "D2": ["亲昵称呼", "核心信念", "情感边界"],
+                "D4": ["亲昵称呼", "永久承诺", "身份隐瞒", "暧昧越界"],
+                "F1": ["顺从违规", "说教式拒绝", "生硬拒绝"],
+                "F2": ["鼓励隔离", "培养依赖"],
+                "F3": ["未成年保护", "时长限制", "夜间禁用"],
+            }
+            other_keywords = set()
+            for other_dim, kws in cross_dim_keywords.items():
+                if other_dim != dimension_code:
+                    other_keywords.update(kws)
+
+            # 该维度自身的专属关键词（不应标为冗余）
+            own_keywords = cross_dim_keywords.get(dimension_code, [])
+
+            flags = [f.strip() for f in re.split(r'[，,；;、\n]', failure_flags) if f.strip()]
+            redundant = []
+            for flag in flags:
+                # 命中其他维度的硬规则关键词，且不在本维度专属关键词里
+                for kw in other_keywords:
+                    if kw in flag and kw not in own_keywords:
+                        redundant.append(flag)
+                        break
+            if redundant:
+                issues.append(f"failure_flags 含跨维度冗余项：{redundant}")
+        except Exception as e:
+            print(f"[VALIDATE] failure_flags 冗余项检查异常: {e}", flush=True)
+
     return {
         "passed": len(issues) == 0,
         "issues": issues,
@@ -8800,61 +8868,50 @@ def async_review_cases(case_ids, auto_regenerate=True, regen_depth=0):
 
 
 def _auto_regenerate_failed_cases(reviewed_cases, regen_depth=0):
-    """自动重生成不合格用例（整个维度全部重生成，递归深度+DB计数双保险限制）"""
-    # 筛选不合格用例（failed 或 warning 状态）
+    """自动重生成不合格用例（按 case 单条重生成，递归深度+DB计数双保险限制）
+
+    改动:
+    - warning 也纳入重生成（之前只 failed）
+    - 按 case 单条重生成（之前整维度重生成，浪费 LLM 调用）
+    """
+    # 筛选不合格用例（failed 或 warning 状态都纳入）
+    # Why: 之前只 failed 触发重生成，但 review_case_quality 后处理后大量 issues 非空的 case 被降为 warning
+    #      如果只看 failed，warning 状态的问题 case 永远不会被纠正，问题积累
     failed_cases = [c for c in reviewed_cases if c["status"] in ("failed", "warning")]
     if not failed_cases:
         return
 
-    # 按 (persona_id, dimension_code) 分组
-    from collections import defaultdict
-    grouped = defaultdict(list)
+    # 按 case 单条重生成（之前是按维度整组重生成，浪费 LLM 调用且会删掉同维度其他合格 case）
+    # Why: issues 通常针对单条 case（如 evaluation_points 带序号、failure_flags 冗余），
+    #      整维度重生成会误伤同维度合格 case，且 LLM 调用次数 = count 而非 1
     for c in failed_cases:
-        key = (c["persona_id"], c["dimension_code"])
-        grouped[key].append(c)
+        persona_id = c["persona_id"]
+        dim_code = c["dimension_code"]
+        case_id = c.get("case_id") or c.get("id")
+        retry_key = f"{persona_id}:{dim_code}:{case_id}"
 
-    for (persona_id, dim_code), cases in grouped.items():
-        retry_key = f"{persona_id}:{dim_code}"
-
-        # 双保险：递归深度 + DB 持久化计数
+        # 双保险：递归深度 + DB 持久化计数（按维度计数，避免单维度无限重生成）
         db_retry_count = _get_retry_count(persona_id, dim_code)
         if regen_depth >= 2 or db_retry_count >= 4:
             print(f"[AUTO REGEN] {retry_key} exceeded limit (depth={regen_depth}, db_count={db_retry_count}), marking as needs_manual_review", flush=True)
             conn = get_db_connection()
             execute_query(conn,
-                "UPDATE test_cases SET quality_status = %s WHERE persona_id = %s AND dimension_code = %s" if USE_MYSQL else
-                "UPDATE test_cases SET quality_status = ? WHERE persona_id = ? AND dimension_code = ?",
-                ("needs_manual_review", persona_id, dim_code))
+                "UPDATE test_cases SET quality_status = %s WHERE id = %s" if USE_MYSQL else
+                "UPDATE test_cases SET quality_status = ? WHERE id = ?",
+                ("needs_manual_review", c["id"]))
             conn.commit()
             conn.close()
             continue
 
-        # 收集问题作为反馈（来自本次审核中不合格的用例，完整传递不再截断）
+        # 收集该 case 的问题作为反馈
         issues_feedback = []
-        for c in cases:
-            if c["issues"]:
-                issues_feedback.append(f"- {c['case_id']}: {'; '.join(c['issues'])}")
+        if c["issues"]:
+            issues_feedback.append(f"- {case_id}: {'; '.join(c['issues'])}")
 
-        # 统计该维度现有用例总数（用于重生成的 count 参数）
         conn = get_db_connection()
-        count_row = execute_query(conn,
-            "SELECT COUNT(*) as cnt FROM test_cases WHERE persona_id = %s AND dimension_code = %s" if USE_MYSQL else
-            "SELECT COUNT(*) as cnt FROM test_cases WHERE persona_id = ? AND dimension_code = ?",
-            (persona_id, dim_code), fetch_one=True)
-        total_count = count_row["cnt"] if count_row else 0
 
-        # 并发安全：如果该维度已被其他线程删空（并发场景），跳过
-        if total_count == 0:
-            print(f"[AUTO REGEN] {retry_key} has 0 cases (maybe concurrent delete), skip", flush=True)
-            conn.close()
-            continue
-
-        # 查出要删除的旧用例 ID（先重生后删，P1-5 原子化）
-        old_id_rows = execute_query(conn,
-            "SELECT id FROM test_cases WHERE persona_id = %s AND dimension_code = %s" if USE_MYSQL else
-            "SELECT id FROM test_cases WHERE persona_id = ? AND dimension_code = ?",
-            (persona_id, dim_code), fetch_all=True)
-        old_case_ids = [r["id"] if isinstance(r, dict) else r[0] for r in old_id_rows] if old_id_rows else []
+        # 查出要删除的旧用例 ID（单条）
+        old_case_ids = [c["id"]]
 
         # 获取维度信息
         dim_row = execute_query(conn,
@@ -8891,16 +8948,16 @@ def _auto_regenerate_failed_cases(reviewed_cases, regen_depth=0):
 
         # 递增 DB 计数（在调重生成前递增，避免并发漏计）
         new_db_count = _incr_retry_count(persona_id, dim_code)
-        print(f"[AUTO REGEN] {retry_key} depth={regen_depth} db_count={new_db_count}, regenerating ({total_count} cases, {len(cases)} had issues, {len(issues_feedback)} feedback items)", flush=True)
+        print(f"[AUTO REGEN] {retry_key} depth={regen_depth} db_count={new_db_count}, regenerating 1 case (issues: {len(issues_feedback)})", flush=True)
 
-        # 重新生成整维度用例（P1-5: 先重生后删，P1-4: 进程内锁防并发）
+        # 重新生成单条用例（count=1，先重生后删，P1-5 原子化，P1-4 进程内锁防并发）
         _regenerate_dimension_with_feedback(
             persona_id=persona_id,
             dimension=dim_info,
             toy_persona=toy_persona,
             persona=persona,
             user_facts=user_facts,
-            count=total_count,
+            count=1,
             issues_feedback=issues_feedback,
             old_case_ids=old_case_ids,
             regen_depth=regen_depth
