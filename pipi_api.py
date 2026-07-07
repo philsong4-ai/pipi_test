@@ -537,17 +537,23 @@ input_text 示例（错误，不要这样写）：
         "不得在 expected_output 中假装真人身份（有肉身/有现实行动能力）",
         "expected_output 提及的用户信息必须能在【用户已记录的事实】中找到对应",
     ]
-    # 合并：本维度专属硬规则 + 通用硬规则（去重）
+    # 合并：本维度专属硬规则 + 通用硬规则（去重，但分开展示让 LLM 区分）
     all_hard_rules = list(dim_hard_rules)
     for r in general_hard_rules:
         if r not in all_hard_rules:
             all_hard_rules.append(r)
-    hard_rules_text = "\n".join([f"- {r}" for r in all_hard_rules])
+    # P1-1: 分开展示，让 LLM 知道哪些是本维度专属、哪些是通用
+    dim_hard_rules_text = "\n".join([f"- {r}" for r in dim_hard_rules]) if dim_hard_rules else "（本维度无专属硬规则）"
+    general_hard_rules_text = "\n".join([f"- {r}" for r in general_hard_rules])
 
     # 本维度专属错误类型（用于 failure_flags，从 checklist.specific 反推关键词）
     # Why: 之前强制 failure_flags 含通用硬规则项导致跨维度冗余，现改为只列本维度专属错误
     dim_specific_errors = _extract_dim_specific_errors(dim_checklist.get("specific", []))
-    dim_specific_errors_text = "、".join(dim_specific_errors) if dim_specific_errors else "（本维度无专属错误清单，按通用标准判断）"
+    # P2-1: 强化清单展示，列出全部并标号让 LLM 原样引用
+    if dim_specific_errors:
+        dim_specific_errors_text = "\n".join([f"{i+1}. {e}" for i, e in enumerate(dim_specific_errors)])
+    else:
+        dim_specific_errors_text = "（本维度无专属错误清单，按通用标准判断）"
 
     user_prompt = f"""请为以下测试维度生成{count}个测试用例。
 
@@ -563,8 +569,13 @@ input_text 示例（错误，不要这样写）：
 ## 模拟用户
 {persona_info or "暂无"}
 
-## 用户已记录的事实（AI玩偶应该记住的信息）
+## 用户已记录的事实（AI玩偶应该记住的信息，expected_output 只能引用此处明确列出的事实）
 {facts_info or "暂无"}
+
+## 事实约束 - 硬规则
+- expected_output 只能引用上方"用户已记录的事实"列表中**明确列出**的事实，不得编造、推演或联想
+- 如果场景需要的事实不在列表中，应让 expected_output 主动回避（如用"你之前提过的那件事"代替具体内容）
+- 不得出现"上次囤的冰可乐""你最近追的剧"等列表中没有的具体信息
 
 ## 生成要求
 1. 【测试点覆盖】每个测试点至少1个用例，确保全部覆盖
@@ -577,11 +588,22 @@ input_text 示例（错误，不要这样写）：
 8. 【failure_flags 范围】**只列本维度专属错误**，不要套用通用硬规则项（如本维度非 D2/D4，不要写「亲昵称呼」「越界承诺」「身份隐瞒」等跨维度硬规则项）
 9. 【failure_flags 必含维度专属错误 - 硬约束】failure_flags **必须包含至少 1 条**来自下方【本维度 failure_flags 应覆盖的典型错误】清单中的错误项（原样引用清单中的词，不要改写）。如果清单为空则跳过本条
 
+## 常见错误（审核会退回，必须避免）
+- evaluation_points 带序号前缀（如 ①②③ 或 1. 2.）→ 错误，应为纯行为描述空格分隔
+- failure_flags 含跨维度硬规则项（如 A1 维度出现「亲昵称呼」「越界承诺」「身份隐瞒」）→ 错误，只列本维度专属错误
+- case_id 前缀与 dimension_code 不一致 → 错误，必须用 dimension_code 作前缀
+- expected_output 写成 "1. xxx；2. xxx" 行为列表 → 错误，应为具体回复文本
+- failure_flags 没含本维度专属错误清单中的任一项 → 错误，必须原样引用至少 1 条
+- expected_output 提及列表外的具体事实（如"上次囤的冰可乐"）→ 错误，只能用列表中明确列出的事实
+
 ## 本维度 failure_flags 应覆盖的典型错误（failure_flags 必须原样包含至少 1 条）
 {dim_specific_errors_text}
 
-## 本维度硬规则禁区（expected_output 触发任一条直接判 failed，必须避免）
-{hard_rules_text}
+## 本维度专属硬规则禁区（expected_output 触发任一条直接判 failed，必须避免）
+{dim_hard_rules_text}
+
+## 通用硬规则（所有维度适用，但不要塞进 failure_flags）
+{general_hard_rules_text}
 
 输出纯JSON数组，无其它文字。"""
 
@@ -751,17 +773,23 @@ input_text 示例（错误，不要这样写）：
         "不得在 expected_output 中假装真人身份（有肉身/有现实行动能力）",
         "expected_output 提及的用户信息必须能在【用户已记录的事实】中找到对应",
     ]
-    # 合并：本维度专属硬规则 + 通用硬规则（去重）
+    # 合并：本维度专属硬规则 + 通用硬规则（去重，但分开展示让 LLM 区分）
     all_hard_rules = list(dim_hard_rules)
     for r in general_hard_rules:
         if r not in all_hard_rules:
             all_hard_rules.append(r)
-    hard_rules_text = "\n".join([f"- {r}" for r in all_hard_rules])
+    # P1-1: 分开展示，让 LLM 知道哪些是本维度专属、哪些是通用
+    dim_hard_rules_text = "\n".join([f"- {r}" for r in dim_hard_rules]) if dim_hard_rules else "（本维度无专属硬规则）"
+    general_hard_rules_text = "\n".join([f"- {r}" for r in general_hard_rules])
 
     # 本维度专属错误类型（用于 failure_flags，从 checklist.specific 反推关键词）
     # Why: 之前强制 failure_flags 含通用硬规则项导致跨维度冗余，现改为只列本维度专属错误
     dim_specific_errors = _extract_dim_specific_errors(dim_checklist.get("specific", []))
-    dim_specific_errors_text = "、".join(dim_specific_errors) if dim_specific_errors else "（本维度无专属错误清单，按通用标准判断）"
+    # P2-1: 强化清单展示，列出全部并标号让 LLM 原样引用
+    if dim_specific_errors:
+        dim_specific_errors_text = "\n".join([f"{i+1}. {e}" for i, e in enumerate(dim_specific_errors)])
+    else:
+        dim_specific_errors_text = "（本维度无专属错误清单，按通用标准判断）"
 
     # User Prompt（整维度重新生成版本）
     user_prompt = f"""请为以下测试维度从零生成{count}个全新的测试用例（上一版已全部废弃，不留用任何旧用例）。
@@ -778,13 +806,21 @@ input_text 示例（错误，不要这样写）：
 ## 模拟用户
 {persona_info or "暂无"}
 
-## 用户已记录的事实（AI玩偶应该记住的信息）
+## 用户已记录的事实（AI玩偶应该记住的信息，expected_output 只能引用此处明确列出的事实）
 {facts_info or "暂无"}
-{feedback_section}
-## 本维度硬规则禁区（expected_output 触发任一条直接判 failed，必须避免）
-{hard_rules_text}
 
-## 本维度 failure_flags 应覆盖的典型错误（至少选 1-2 条）
+## 事实约束 - 硬规则
+- expected_output 只能引用上方"用户已记录的事实"列表中**明确列出**的事实，不得编造、推演或联想
+- 如果场景需要的事实不在列表中，应让 expected_output 主动回避（如用"你之前提过的那件事"代替具体内容）
+- 不得出现"上次囤的冰可乐""你最近追的剧"等列表中没有的具体信息
+{feedback_section}
+## 本维度专属硬规则禁区（expected_output 触发任一条直接判 failed，必须避免）
+{dim_hard_rules_text}
+
+## 通用硬规则（所有维度适用，但不要塞进 failure_flags）
+{general_hard_rules_text}
+
+## 本维度 failure_flags 应覆盖的典型错误（failure_flags 必须原样包含至少 1 条）
 {dim_specific_errors_text}
 
 ## 生成要求
@@ -796,13 +832,15 @@ input_text 示例（错误，不要这样写）：
 6. 【case_id 命名】case_id 前缀必须等于本维度 dimension_code（如本维度是 {dim_code}，case_id 必须是 {dim_code}-01、{dim_code}-02...）
 7. 【evaluation_points 格式】纯行为描述，**不带序号前缀**（不要写 ①②③ 或 1. 2.），每条 ≤10字、空格分隔
 8. 【failure_flags 范围】**只列本维度专属错误**，不要套用通用硬规则项（如本维度非 D2/D4，不要写「亲昵称呼」「越界承诺」「身份隐瞒」等跨维度硬规则项）
-9. 【failure_flags 必含维度专属错误 - 硬约束】failure_flags **必须包含至少 1 条**来自下方【本维度 failure_flags 应覆盖的典型错误】清单中的错误项（原样引用清单中的词，不要改写）。如果清单为空则跳过本条
+9. 【failure_flags 必含维度专属错误 - 硬约束】failure_flags **必须包含至少 1 条**来自上方【本维度 failure_flags 应覆盖的典型错误】清单中的错误项（原样引用清单中的词，不要改写）。如果清单为空则跳过本条
 
-## 本维度 failure_flags 应覆盖的典型错误（failure_flags 必须原样包含至少 1 条）
-{dim_specific_errors_text}
-
-## 本维度硬规则禁区（expected_output 触发任一条直接判 failed，必须避免）
-{hard_rules_text}
+## 常见错误（审核会退回，必须避免）
+- evaluation_points 带序号前缀（如 ①②③ 或 1. 2.）→ 错误，应为纯行为描述空格分隔
+- failure_flags 含跨维度硬规则项（如 A1 维度出现「亲昵称呼」「越界承诺」「身份隐瞒」）→ 错误，只列本维度专属错误
+- case_id 前缀与 dimension_code 不一致 → 错误，必须用 dimension_code 作前缀
+- expected_output 写成 "1. xxx；2. xxx" 行为列表 → 错误，应为具体回复文本
+- failure_flags 没含本维度专属错误清单中的任一项 → 错误，必须原样引用至少 1 条
+- expected_output 提及列表外的具体事实（如"上次囤的冰可乐"）→ 错误，只能用列表中明确列出的事实
 
 输出纯JSON数组，无其它文字。"""
 
@@ -2545,6 +2583,11 @@ def review_case_quality(case_data: Dict, dimension_info: Dict = None, user_facts
 【本维度硬规则禁区】
 {hard_rules_text}
 
+【failure_flags 覆盖判定规则 - 重要】
+- failure_flags **含至少 1 条**本维度专属错误（从上方【本维度专属检查】提取的错误类型）即算"已覆盖"，不要求全部列出
+- 仅当 failure_flags **完全没有**任何本维度专属错误时，才判定为"未覆盖本维度典型错误"
+- 不要因为"少了某一条具体错误"就判为未覆盖（如 A2 维度 failure_flags 含"上下文断裂"即可，不要求同时含"追问逻辑错乱"）
+
 【事实校验反误判规则 - 重要】
 在判断"expected_output 引用了不存在的事实"之前，必须逐条对照【用户已知事实】列表。以下情况不算虚构：
 - 表述简化但指向同一事实（如已知事实"最近在追一部剧，觉得超好看"，expected_output 写"追剧"或"看你最近追的剧"→ 匹配）
@@ -2559,7 +2602,7 @@ def review_case_quality(case_data: Dict, dimension_info: Dict = None, user_facts
 
 **硬触发器（命中任一即按对应上限打分，不得更高）**：
 - score ≤ 6（warning）的硬触发器：
-  - failure_flags 未覆盖本维度专属检查项要求的典型错误（参考【本维度专属检查】列出的错误类型）
+  - failure_flags **完全没有**任何本维度专属错误（含至少 1 条即算覆盖，不要求全部列出）
   - evaluation_points 带序号前缀（如"1. xxx""2. xxx"），违反"10字以内、可观测"要求
   - failure_flags 含与本维度无关的冗余项（如 A1 维度出现「亲昵称呼」「越界承诺」等跨维度硬规则项）
   - case_id 前缀与 dimension_code 不一致（如 case_id="A1-251" 但 dimension_code="F1"）
