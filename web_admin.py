@@ -8507,6 +8507,15 @@ def validate_case_rules(case_data, dimension_code):
                         break
             if redundant:
                 issues.append(f"failure_flags 含跨维度冗余项：{redundant}")
+
+            # 10. failure_flags 必须包含至少 1 条本维度专属错误（从 _extract_dim_specific_errors 提取）
+            # Why: LLM 常套用通用模板不列维度专属错误，导致审核端识别为"未覆盖本维度典型错误"
+            dim_specific_errors = pipi_api._extract_dim_specific_errors(dim_check.get("specific", []))
+            if dim_specific_errors:
+                flags_lower = failure_flags.lower()
+                has_specific = any(err in flags_lower for err in dim_specific_errors)
+                if not has_specific:
+                    issues.append(f"failure_flags 未包含本维度专属错误（必须含至少 1 条：{dim_specific_errors}）")
         except Exception as e:
             print(f"[VALIDATE] failure_flags 冗余项检查异常: {e}", flush=True)
 

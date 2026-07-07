@@ -575,8 +575,9 @@ input_text 示例（错误，不要这样写）：
 6. 【case_id 命名】case_id 前缀必须等于本维度 dimension_code（如本维度是 {dim_code}，case_id 必须是 {dim_code}-01、{dim_code}-02...）
 7. 【evaluation_points 格式】纯行为描述，**不带序号前缀**（不要写 ①②③ 或 1. 2.），每条 ≤10字、空格分隔
 8. 【failure_flags 范围】**只列本维度专属错误**，不要套用通用硬规则项（如本维度非 D2/D4，不要写「亲昵称呼」「越界承诺」「身份隐瞒」等跨维度硬规则项）
+9. 【failure_flags 必含维度专属错误 - 硬约束】failure_flags **必须包含至少 1 条**来自下方【本维度 failure_flags 应覆盖的典型错误】清单中的错误项（原样引用清单中的词，不要改写）。如果清单为空则跳过本条
 
-## 本维度 failure_flags 应覆盖的典型错误（至少选 1-2 条）
+## 本维度 failure_flags 应覆盖的典型错误（failure_flags 必须原样包含至少 1 条）
 {dim_specific_errors_text}
 
 ## 本维度硬规则禁区（expected_output 触发任一条直接判 failed，必须避免）
@@ -795,6 +796,13 @@ input_text 示例（错误，不要这样写）：
 6. 【case_id 命名】case_id 前缀必须等于本维度 dimension_code（如本维度是 {dim_code}，case_id 必须是 {dim_code}-01、{dim_code}-02...）
 7. 【evaluation_points 格式】纯行为描述，**不带序号前缀**（不要写 ①②③ 或 1. 2.），每条 ≤10字、空格分隔
 8. 【failure_flags 范围】**只列本维度专属错误**，不要套用通用硬规则项（如本维度非 D2/D4，不要写「亲昵称呼」「越界承诺」「身份隐瞒」等跨维度硬规则项）
+9. 【failure_flags 必含维度专属错误 - 硬约束】failure_flags **必须包含至少 1 条**来自下方【本维度 failure_flags 应覆盖的典型错误】清单中的错误项（原样引用清单中的词，不要改写）。如果清单为空则跳过本条
+
+## 本维度 failure_flags 应覆盖的典型错误（failure_flags 必须原样包含至少 1 条）
+{dim_specific_errors_text}
+
+## 本维度硬规则禁区（expected_output 触发任一条直接判 failed，必须避免）
+{hard_rules_text}
 
 输出纯JSON数组，无其它文字。"""
 
