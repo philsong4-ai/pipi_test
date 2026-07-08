@@ -2430,8 +2430,8 @@ DIMENSION_REVIEW_CHECKLIST = {
     # D 类：关系与人设（D2/D4 涉及硬规则）
     "D1": {
         "specific": [
-            "input_text 是否明确了关系阶段（S1-S4）？",
-            "expected_output 推进节奏是否匹配该阶段？",
+            "input_text 是否体现用户与玩偶已建立稳定陪伴关系（默认 S4 阶段，无需验证 S1→S4 演变）？",
+            "expected_output 是否符合 S4 阶段的亲密但守住硬规则边界的语气和分寸？",
             "failure_flags 是否覆盖'阶段跳跃''推进过快''推进过慢'等错误？",
         ],
         "hard_rules": [],
