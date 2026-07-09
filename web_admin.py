@@ -2896,7 +2896,15 @@ def _generate_persona_profile(name=""):
 {{"nickname":"一句话描述","real_name":"姓名","gender":"女","age":"年龄","city":"城市","hometown":"老家省份","occupation":"职业","education":"学历","family_status":"家庭状态如独生子女/有姐姐","relationship":"感情状态如单身/有对象","personality":"性格特点如比较内向/挺外向","income_range":"月收入","spending_style":"消费风格","spending_desc":"消费习惯举例","devices":"常用设备","usage_scenes":"使用场景","core_goal":"核心目标","short_goal":"短期诉求","long_goal":"长期诉求","pain_points":"痛点","constraints":"约束","risk_profile":"风险偏好","interests":"兴趣标签","language_style":"语言风格和常用语气词","sample_dialog":"典型对话1-2句","info_sources":"信息来源","decision_style":"决策方式","relation_pace":"关系节奏","scene_pref":"场景偏好","top_expectations":"期待TOP3","minefields":"踩雷点","pet_type":"宠物类型","pet_name":"宠物名","pet_age":"宠物年龄","pet_trait":"宠物特点","favorite_drink":"爱喝的","favorite_food":"爱吃的","spicy_preference":"吃辣偏好","current_hobby":"当前爱好","learning":"在学什么","favorite_singer":"喜欢的歌手","best_friend":"好友名","stress_relief":"解压方式","work_time":"上班时间","lunch_habit":"午餐习惯","commute":"通勤方式"}}"""
 
     try:
-        result = pipi_api.call_llm_simple(system_prompt, user_prompt, timeout=60)
+        llm_config = get_llm_config()
+        case_gen_cfg = llm_config.get("case_gen", {})
+        result = pipi_api.call_llm_simple(
+            system_prompt, user_prompt,
+            timeout=case_gen_cfg.get("timeout", 180),
+            model=case_gen_cfg.get("model"),
+            temperature=case_gen_cfg.get("temperature", 0.7),
+            max_tokens=case_gen_cfg.get("max_tokens", 4096),
+        )
         print(f"[PERSONA GEN] LLM result len={len(result) if result else 0}", flush=True)
         if result:
             # 提取 JSON（处理 ```json ... ``` 格式）
@@ -3419,11 +3427,13 @@ def _generate_messages_for_missing_fields(persona_id, categories=None, template_
     }
     cn_categories = [category_cn_map[c] for c in (categories or list(all_fact_keys_by_category.keys())) if c in category_cn_map]
     try:
+        llm_config = get_llm_config()
+        case_gen_cfg = llm_config.get("case_gen", {})
         llm_messages = pipi_api.generate_persona_messages(
             {**persona, **filled_fields},
             categories=cn_categories or None,
             custom_messages=None,
-            timeout=60
+            timeout=case_gen_cfg.get("timeout", 180),
         )
         if llm_messages:
             messages.extend(llm_messages)
@@ -3448,7 +3458,12 @@ def _generate_messages_from_persona(persona, categories, custom_messages=None):
         return []
 
     try:
-        msgs = pipi_api.generate_persona_messages(persona, categories=categories, custom_messages=custom_messages)
+        llm_config = get_llm_config()
+        case_gen_cfg = llm_config.get("case_gen", {})
+        msgs = pipi_api.generate_persona_messages(
+            persona, categories=categories, custom_messages=custom_messages,
+            timeout=case_gen_cfg.get("timeout", 180),
+        )
         if msgs:
             return msgs
     except Exception as e:

@@ -314,7 +314,7 @@ def call_llm_simple(system_prompt: str, user_prompt: str, timeout: int = 30, mod
 
 # ─── 用户对话消息生成 ────────────────────────────────
 
-def generate_persona_messages(profile: Dict, categories: List[str] = None, custom_messages: List[str] = None, timeout: int = 60) -> List[str]:
+def generate_persona_messages(profile: Dict, categories: List[str] = None, custom_messages: List[str] = None, timeout: int = 180) -> List[str]:
     """根据 persona 生成自然多样的对话消息列表。
 
     用 LLM 一次性生成 15-20 条符合 persona 语气和事实的消息，避免模板硬编码导致
@@ -373,7 +373,7 @@ def generate_persona_messages(profile: Dict, categories: List[str] = None, custo
 - 返回纯 JSON 数组，如 ["msg1", "msg2", ...]"""
 
     try:
-        result = call_llm_simple(system_prompt, user_prompt, timeout=timeout, temperature=0.8, max_tokens=2000)
+        result = call_llm_simple(system_prompt, user_prompt, timeout=timeout, temperature=0.8, max_tokens=4000)
         if not result:
             return []
 
