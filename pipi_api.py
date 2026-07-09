@@ -312,6 +312,99 @@ def call_llm_simple(system_prompt: str, user_prompt: str, timeout: int = 30, mod
     return result.get("full_text", "")
 
 
+# ─── 用户对话消息生成 ────────────────────────────────
+
+def generate_persona_messages(profile: Dict, categories: List[str] = None, custom_messages: List[str] = None, timeout: int = 60) -> List[str]:
+    """根据 persona 生成自然多样的对话消息列表。
+
+    用 LLM 一次性生成 15-20 条符合 persona 语气和事实的消息，避免模板硬编码导致
+    所有用户事实同质化。categories 决定要覆盖的信息类别，custom_messages 原样追加。
+
+    参数:
+        profile: persona 字典（含 age/city/occupation/personality/pet_type 等字段）
+        categories: 要覆盖的信息类别（中文名），如 ["基本信息", "宠物", "情感"]
+        custom_messages: 用户自定义消息，直接追加到结果末尾
+        timeout: LLM 调用超时秒数
+
+    返回:
+        List[str] 消息列表，失败时返回空列表（调用方降级处理）
+    """
+    if not profile:
+        return []
+
+    if not categories:
+        categories = ["基本信息", "兴趣爱好", "宠物", "饮食偏好", "情感", "日常", "社交关系"]
+
+    system_prompt = """你是用户对话生成器。为虚拟用户生成自然、口语化的聊天消息，用于和AI陪伴玩偶对话。
+
+核心要求：
+1. 每条消息必须是用户第一人称说的话，像真人聊天，简短自然，10-30字为主
+2. 严格基于 persona 的字段填充内容，不要编造 persona 里没有的事实
+3. 同一类信息换不同说法表达（不要每条都"我今年X岁""我住在X"这种模板腔）
+4. 消息之间独立，不要有连续追问或对话依赖
+5. 覆盖指定 categories，每个 category 生成 3-4 条
+6. 整体保持 persona 的 language_style 和 personality 语气
+
+直接返回 JSON 数组，不要任何解释、不要 markdown 代码块。格式：
+["消息1", "消息2", ...]"""
+
+    profile_lines = []
+    for k in ["name", "nickname", "age", "gender", "city", "hometown", "occupation", "education",
+              "family_status", "relationship", "personality", "language_style", "pet_type", "pet_name",
+              "pet_age", "pet_trait", "favorite_drink", "favorite_food", "spicy_preference",
+              "current_hobby", "learning", "favorite_singer", "best_friend", "stress_relief",
+              "work_time", "lunch_habit", "commute", "income_range", "spending_style",
+              "interests", "core_goal", "short_goal", "pain_points", "minefields"]:
+        v = profile.get(k)
+        if v:
+            profile_lines.append(f"{k}: {v}")
+    profile_text = "\n".join(profile_lines)
+
+    user_prompt = f"""用户画像：
+{profile_text}
+
+要覆盖的信息类别：{", ".join(categories)}
+
+生成 15-20 条该用户会对AI陪伴玩偶说的消息。要求：
+- 每条独立、自然、口语化
+- 严格基于画像字段，不要编造未给出的信息
+- 同一字段值用不同句式表达（例如年龄既可以说"我今年X岁"也可以说"过了X岁生日了"）
+- 覆盖所有指定类别
+- 返回纯 JSON 数组，如 ["msg1", "msg2", ...]"""
+
+    try:
+        result = call_llm_simple(system_prompt, user_prompt, timeout=timeout, temperature=0.8, max_tokens=2000)
+        if not result:
+            return []
+
+        import re
+        clean = re.sub(r'```json\s*', '', result)
+        clean = re.sub(r'```\s*', '', clean)
+        match = re.search(r'\[[\s\S]*\]', clean)
+        if not match:
+            print(f"[PERSONA MSG GEN] no JSON array found: {result[:200]}", flush=True)
+            return []
+
+        msgs = json.loads(match.group())
+        if not isinstance(msgs, list):
+            return []
+
+        cleaned = [m.strip() for m in msgs if isinstance(m, str) and m.strip()]
+        if not cleaned:
+            return []
+
+        if custom_messages:
+            for m in custom_messages:
+                if isinstance(m, str) and m.strip():
+                    cleaned.append(m.strip())
+
+        print(f"[PERSONA MSG GEN] generated {len(cleaned)} messages for {profile.get('name', 'unknown')}", flush=True)
+        return cleaned
+    except Exception as e:
+        print(f"[PERSONA MSG GEN ERROR] {e}", flush=True)
+        return []
+
+
 # ─── 测试用例生成 ────────────────────────────────
 
 def _format_toy_persona(toy_persona: Dict) -> str:

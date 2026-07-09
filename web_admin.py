@@ -3369,7 +3369,8 @@ def _generate_messages_for_missing_fields(persona_id, categories=None, template_
     # 5. 生成对话消息
     messages = []
 
-    # 5.1 补充 personas 字段
+    # 5.1 补充 personas 字段（随机生成值填入字段，让 LLM 有数据可用）
+    filled_fields = {}
     for field in missing_persona_fields:
         if field in PERSONA_FIELD_TEMPLATES:
             templates = PERSONA_FIELD_TEMPLATES[field]
@@ -3381,10 +3382,20 @@ def _generate_messages_for_missing_fields(persona_id, categories=None, template_
                 val = RANDOM_VALUES[field]()
             else:
                 continue
+            filled_fields[field] = val
             msg = random.choice(templates).format(val=val)
             messages.append(msg)
 
-    # 5.2 补充 user_facts 字段
+            # 同步写回 personas 表（保证字段持久化，后续 LLM 生成消息时有完整画像）
+            try:
+                conn2 = get_db_connection()
+                execute_query(conn2, f"UPDATE personas SET {field}=? WHERE id=?", (val, persona_id))
+                conn2.commit()
+                conn2.close()
+            except Exception as e:
+                print(f"[AUTO POPULATE] update personas.{field} failed: {e}", flush=True)
+
+    # 5.2 补充 user_facts 字段：用模板生成 fact 消息（保证 fact 提取有源数据）
     for cat_key in missing_fact_keys:
         if cat_key in FACT_KEY_TEMPLATES:
             templates = FACT_KEY_TEMPLATES[cat_key]
@@ -3399,14 +3410,25 @@ def _generate_messages_for_missing_fields(persona_id, categories=None, template_
             msg = random.choice(templates).format(val=val)
             messages.append(msg)
 
-    # 6. 添加一些情感类消息（不检查缺失，用于丰富对话）
-    emotion_messages = [
-        "今天心情还不错",
-        "最近工作有点忙",
-        "本来想早点下班，结果加班到很晚",
-        "周末终于可以休息了",
-    ]
-    messages.extend(random.sample(emotion_messages, min(2, len(emotion_messages))))
+    # 6. 调 LLM 生成额外自然对话消息（用 persona + 填好的字段）
+    # 把英文类别名映射为中文类别名（LLM 需要中文）
+    category_cn_map = {
+        "food": "饮食偏好", "preference": "偏好", "living": "生活", "family": "家庭",
+        "relationship": "社交关系", "work": "工作", "health": "健康", "hobby": "兴趣爱好",
+        "emotion": "情感", "pet": "宠物",
+    }
+    cn_categories = [category_cn_map[c] for c in (categories or list(all_fact_keys_by_category.keys())) if c in category_cn_map]
+    try:
+        llm_messages = pipi_api.generate_persona_messages(
+            {**persona, **filled_fields},
+            categories=cn_categories or None,
+            custom_messages=None,
+            timeout=60
+        )
+        if llm_messages:
+            messages.extend(llm_messages)
+    except Exception as e:
+        print(f"[AUTO POPULATE] LLM gen failed, using template-only: {e}", flush=True)
 
     # 7. 打乱顺序
     random.shuffle(messages)
@@ -3418,75 +3440,39 @@ def _generate_messages_for_missing_fields(persona_id, categories=None, template_
 
 
 def _generate_messages_from_persona(persona, categories, custom_messages=None):
-    """根据 persona 生成对话消息"""
-    msgs = []
+    """根据 persona 生成对话消息。调用 LLM 生成自然多样的消息，避免模板硬编码。
 
-    templates = {
-        "基本信息": [
-            f"我今年{persona.get('age')}岁",
-            f"我在{persona.get('city')}工作，是做{persona.get('occupation')}的",
-            f"我老家是{persona.get('hometown')}的",
-            f"我是{persona.get('family_status')}",
-            f"我现在{persona.get('relationship')}",
-        ],
-        "兴趣爱好": [
-            f"我平时喜欢{persona.get('current_hobby')}",
-            f"周末一般会宅在家或者约朋友",
-            f"最近在学{persona.get('learning')}，感觉还挺有意思",
-            f"我特别喜欢{persona.get('favorite_singer')}的歌，听了好多年了",
-        ],
-        "宠物": [],
-        "饮食偏好": [
-            f"我最喜欢喝{persona.get('favorite_drink')}，几乎每天都要来一杯",
-            f"我最爱吃{persona.get('favorite_food')}",
-            f"我{persona.get('spicy_preference')}",
-            "早餐一般吃包子或者面包",
-        ],
-        "情感": [
-            "今天心情还不错",
-            "最近工作有点忙，压力挺大的",
-            f"我这个人{persona.get('personality')}",
-            f"压力大的时候我会{persona.get('stress_relief')}",
-            "本来今天想早点下班，结果加班到很晚",
-        ],
-        "日常": [
-            f"我每天{persona.get('work_time')}上班",
-            f"中午一般{persona.get('lunch_habit')}",
-            f"我住的地方离公司{persona.get('commute')}",
-            "最近在追一部剧，超好看",
-        ],
-        "社交关系": [
-            f"我有个好朋友叫{persona.get('best_friend')}，认识好几年了",
-            f"和{persona.get('best_friend')}经常一起吃饭",
-            "我同事人都挺好的",
-            "我朋友不多但都交心",
-        ],
-    }
+    LLM 失败时降级到极简消息（仅 persona 字段直拼，不追加硬编码句子）。
+    """
+    if not persona or not categories:
+        return []
 
-    # 宠物类别特殊处理
-    if persona.get("pet_type"):
-        templates["宠物"] = [
-            f"我养了一只{persona.get('pet_type')}，叫{persona.get('pet_name')}",
-            f"{persona.get('pet_name')}今年{persona.get('pet_age')}了",
-            f"我家{persona.get('pet_name')}{persona.get('pet_trait')}",
-            f"今天{persona.get('pet_name')}一直在睡觉",
-        ]
-    else:
-        templates["宠物"] = [
-            "我没养宠物，不过挺喜欢猫的",
-            "以后有条件想养一只猫",
-        ]
+    try:
+        msgs = pipi_api.generate_persona_messages(persona, categories=categories, custom_messages=custom_messages)
+        if msgs:
+            return msgs
+    except Exception as e:
+        print(f"[PERSONA MSG] LLM gen failed, falling back: {e}", flush=True)
 
-    for cat in categories:
-        if cat in templates:
-            msgs.extend(templates[cat])
+    # 降级：从 persona 字段拼极简消息（不追加硬编码句子）
+    fallback_msgs = []
+    if persona.get("age"):
+        fallback_msgs.append(f"我今年{persona['age']}岁")
+    if persona.get("city"):
+        fallback_msgs.append(f"我在{persona['city']}工作")
+    if persona.get("occupation"):
+        fallback_msgs.append(f"我是做{persona['occupation']}的")
+    if persona.get("pet_type") and persona.get("pet_name"):
+        fallback_msgs.append(f"我养了一只{persona['pet_type']}，叫{persona['pet_name']}")
+    if persona.get("current_hobby"):
+        fallback_msgs.append(f"我平时喜欢{persona['current_hobby']}")
 
     if custom_messages:
-        for msg in custom_messages:
-            if isinstance(msg, str) and msg.strip():
-                msgs.append(msg.strip())
+        for m in custom_messages:
+            if isinstance(m, str) and m.strip():
+                fallback_msgs.append(m.strip())
 
-    return msgs
+    return fallback_msgs
 
 
 @app.route("/api/growth/tasks", methods=["GET"])
