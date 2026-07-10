@@ -1184,6 +1184,7 @@ DEFAULT_LLM_CONFIG = {
                                   {"model": "deepseek-v4-pro", "temperature": 0},
                                   {"model": "doubao-seed-2-0-pro", "temperature": 0}]},
     "case_review":    {"model": "deepseek-v4-pro","temperature": 0.3, "max_tokens": 8192, "timeout": 120},
+    "persona_gen":    {"model": "qwen3.6-plus",  "temperature": 0.7, "max_tokens": 4096, "timeout": 180},
     "redteam_gen":    {"model": "qwen3.6-plus",   "temperature": 0.7, "max_tokens": 8192, "timeout": 180},
     "redteam_judge":  {"model": "deepseek-v4-pro", "temperature": 0,   "max_tokens": 8192, "timeout": 60},
 }
@@ -2897,13 +2898,13 @@ def _generate_persona_profile(name=""):
 
     try:
         llm_config = get_llm_config()
-        case_gen_cfg = llm_config.get("case_gen", {})
+        persona_cfg = llm_config.get("persona_gen", {})
         result = pipi_api.call_llm_simple(
             system_prompt, user_prompt,
-            timeout=case_gen_cfg.get("timeout", 180),
-            model=case_gen_cfg.get("model"),
-            temperature=case_gen_cfg.get("temperature", 0.7),
-            max_tokens=case_gen_cfg.get("max_tokens", 4096),
+            timeout=persona_cfg.get("timeout", 180),
+            model=persona_cfg.get("model"),
+            temperature=persona_cfg.get("temperature", 0.7),
+            max_tokens=persona_cfg.get("max_tokens", 4096),
         )
         if not result:
             # 重试一次
@@ -2912,10 +2913,10 @@ def _generate_persona_profile(name=""):
             print(f"[PERSONA GEN] first call empty, retrying...", flush=True)
             result = pipi_api.call_llm_simple(
                 system_prompt, user_prompt,
-                timeout=case_gen_cfg.get("timeout", 180),
-                model=case_gen_cfg.get("model"),
-                temperature=case_gen_cfg.get("temperature", 0.7),
-                max_tokens=case_gen_cfg.get("max_tokens", 4096),
+                timeout=persona_cfg.get("timeout", 180),
+                model=persona_cfg.get("model"),
+                temperature=persona_cfg.get("temperature", 0.7),
+                max_tokens=persona_cfg.get("max_tokens", 4096),
             )
         print(f"[PERSONA GEN] LLM result len={len(result) if result else 0}", flush=True)
         if result:
@@ -3440,12 +3441,12 @@ def _generate_messages_for_missing_fields(persona_id, categories=None, template_
     cn_categories = [category_cn_map[c] for c in (categories or list(all_fact_keys_by_category.keys())) if c in category_cn_map]
     try:
         llm_config = get_llm_config()
-        case_gen_cfg = llm_config.get("case_gen", {})
+        persona_cfg = llm_config.get("persona_gen", {})
         llm_messages = pipi_api.generate_persona_messages(
             {**persona, **filled_fields},
             categories=cn_categories or None,
             custom_messages=None,
-            timeout=case_gen_cfg.get("timeout", 180),
+            timeout=persona_cfg.get("timeout", 180),
         )
         if llm_messages:
             messages.extend(llm_messages)
@@ -3471,10 +3472,10 @@ def _generate_messages_from_persona(persona, categories, custom_messages=None):
 
     try:
         llm_config = get_llm_config()
-        case_gen_cfg = llm_config.get("case_gen", {})
+        persona_cfg = llm_config.get("persona_gen", {})
         msgs = pipi_api.generate_persona_messages(
             persona, categories=categories, custom_messages=custom_messages,
-            timeout=case_gen_cfg.get("timeout", 180),
+            timeout=persona_cfg.get("timeout", 180),
         )
         if msgs:
             return msgs
