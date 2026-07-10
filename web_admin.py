@@ -2905,6 +2905,18 @@ def _generate_persona_profile(name=""):
             temperature=case_gen_cfg.get("temperature", 0.7),
             max_tokens=case_gen_cfg.get("max_tokens", 4096),
         )
+        if not result:
+            # 重试一次
+            import time as _t
+            _t.sleep(5)
+            print(f"[PERSONA GEN] first call empty, retrying...", flush=True)
+            result = pipi_api.call_llm_simple(
+                system_prompt, user_prompt,
+                timeout=case_gen_cfg.get("timeout", 180),
+                model=case_gen_cfg.get("model"),
+                temperature=case_gen_cfg.get("temperature", 0.7),
+                max_tokens=case_gen_cfg.get("max_tokens", 4096),
+            )
         print(f"[PERSONA GEN] LLM result len={len(result) if result else 0}", flush=True)
         if result:
             # 提取 JSON（处理 ```json ... ``` 格式）

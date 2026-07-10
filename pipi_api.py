@@ -375,6 +375,12 @@ def generate_persona_messages(profile: Dict, categories: List[str] = None, custo
     try:
         result = call_llm_simple(system_prompt, user_prompt, timeout=timeout, temperature=0.8, max_tokens=4000)
         if not result:
+            # 第一次失败：等 5s 重试一次（LLM 代理偶发性慢）
+            import time as _t
+            _t.sleep(5)
+            print(f"[PERSONA MSG GEN] first call empty, retrying...", flush=True)
+            result = call_llm_simple(system_prompt, user_prompt, timeout=timeout, temperature=0.8, max_tokens=4000)
+        if not result:
             return []
 
         import re
