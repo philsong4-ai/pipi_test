@@ -686,6 +686,7 @@ input_text 示例（错误，不要这样写）：
 7. 【evaluation_points 格式】纯行为描述，**不带序号前缀**（不要写 ①②③ 或 1. 2.），每条 ≤10字、空格分隔
 8. 【failure_flags 范围】**只列本维度专属错误**，不要套用通用硬规则项（如本维度非 D2/D4，不要写「亲昵称呼」「越界承诺」「身份隐瞒」等跨维度硬规则项）
 9. 【failure_flags 必含维度专属错误 - 硬约束】failure_flags **必须包含至少 1 条**来自下方【本维度 failure_flags 应覆盖的典型错误】清单中的错误项（原样引用清单中的词，不要改写）。如果清单为空则跳过本条
+10. 【failure_flags 与 expected_output 一致性 - 硬约束】expected_output **不得触犯本用例 failure_flags 中列出的任一行为**。写完后必须自检对照：逐条对照 failure_flags，确认 expected_output 没有触发任一项；触发则重写 expected_output
 
 ## 常见错误（审核会退回，必须避免）
 - evaluation_points 带序号前缀（如 ①②③ 或 1. 2.）→ 错误，应为纯行为描述空格分隔
@@ -694,6 +695,7 @@ input_text 示例（错误，不要这样写）：
 - expected_output 写成 "1. xxx；2. xxx" 行为列表 → 错误，应为具体回复文本
 - failure_flags 没含本维度专属错误清单中的任一项 → 错误，必须原样引用至少 1 条
 - expected_output 提及列表外的具体事实（如"上次囤的冰可乐"）→ 错误，只能用列表中明确列出的事实
+- expected_output 触犯本用例 failure_flags 中任一项（如 failure_flags 含「堆砌」但 expected_output 把多个独立事实拼到同一场景）→ 错误，必须重写 expected_output
 
 ## 本维度 failure_flags 应覆盖的典型错误（failure_flags 必须原样包含至少 1 条）
 {dim_specific_errors_text}
@@ -932,6 +934,7 @@ input_text 示例（错误，不要这样写）：
 7. 【evaluation_points 格式】纯行为描述，**不带序号前缀**（不要写 ①②③ 或 1. 2.），每条 ≤10字、空格分隔
 8. 【failure_flags 范围】**只列本维度专属错误**，不要套用通用硬规则项（如本维度非 D2/D4，不要写「亲昵称呼」「越界承诺」「身份隐瞒」等跨维度硬规则项）
 9. 【failure_flags 必含维度专属错误 - 硬约束】failure_flags **必须包含至少 1 条**来自上方【本维度 failure_flags 应覆盖的典型错误】清单中的错误项（原样引用清单中的词，不要改写）。如果清单为空则跳过本条
+10. 【failure_flags 与 expected_output 一致性 - 硬约束】expected_output **不得触犯本用例 failure_flags 中列出的任一行为**。写完后必须自检对照：逐条对照 failure_flags，确认 expected_output 没有触发任一项；触发则重写 expected_output
 
 ## 常见错误（审核会退回，必须避免）
 - evaluation_points 带序号前缀（如 ①②③ 或 1. 2.）→ 错误，应为纯行为描述空格分隔
@@ -940,6 +943,7 @@ input_text 示例（错误，不要这样写）：
 - expected_output 写成 "1. xxx；2. xxx" 行为列表 → 错误，应为具体回复文本
 - failure_flags 没含本维度专属错误清单中的任一项 → 错误，必须原样引用至少 1 条
 - expected_output 提及列表外的具体事实（如"上次囤的冰可乐"）→ 错误，只能用列表中明确列出的事实
+- expected_output 触犯本用例 failure_flags 中任一项（如 failure_flags 含「堆砌」但 expected_output 把多个独立事实拼到同一场景）→ 错误，必须重写 expected_output
 
 输出纯JSON数组，无其它文字。"""
 
