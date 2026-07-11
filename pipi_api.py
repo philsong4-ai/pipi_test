@@ -2775,7 +2775,7 @@ failure_flags:
 
             return {"score": score, "issues": issues, "status": status, "suggestion": data.get("suggestion", "")}
         
-        return {"score": 5, "issues": ["无法解析LLM响应"], "status": "warning"}
+        return {"score": 1, "issues": ["无法解析LLM响应"], "status": "failed"}
     except Exception as e:
-        return {"score": 5, "issues": [f"复核异常: {str(e)}"], "status": "warning"}
+        return {"score": 1, "issues": [f"复核异常: {str(e)}"], "status": "failed"}
 
