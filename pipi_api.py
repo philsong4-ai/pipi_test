@@ -553,18 +553,8 @@ def generate_test_cases(
     test_point_list = [p.strip() for p in test_points.split("、") if p.strip()] if test_points else []
     test_point_text = "\n".join([f"  {i+1}. {p}" for i, p in enumerate(test_point_list)])
 
-    # 根据维度确定轮数要求（记忆类维度需要多轮）
-    turns_requirement = ""
-    if dim_code == "C1":
-        turns_requirement = "\n5. 【轮数要求】input_text 必须包含 4-6 轮对话（【R1】到【R4】或更多），测试短期记忆需要先建立信息，隔几轮后再追问"
-    elif dim_code == "C2":
-        turns_requirement = "\n5. 【轮数要求】input_text 必须包含 3-5 轮对话，测试长期记忆需要先建立信息再引用"
-    elif dim_code == "C3":
-        turns_requirement = "\n5. 【轮数要求】input_text 必须包含 3-5 轮对话，展示用户画像如何影响回复风格"
-    elif dim_code == "C4":
-        turns_requirement = "\n5. 【轮数要求】input_text 必须包含 4-6 轮对话，展示偏好变化的过程"
-    elif dim_code == "C5":
-        turns_requirement = "\n5. 【轮数要求】input_text 必须包含 3-5 轮对话，先建立记忆再制造冲突"
+    # 维度专属生成要求（轮数/结构/示例），从 DIMENSION_GEN_REQUIREMENTS 查表拼装
+    dimension_block = _format_dimension_gen_block(dim_code)
 
     system_prompt = """你是一个AI陪伴产品的测试用例生成专家。
 
@@ -681,12 +671,13 @@ input_text 示例（错误，不要这样写）：
 2. 【事实运用】至少1个用例必须结合"用户已记录的事实"设计场景，体现AI的记忆能力
 3. 【禁止虚构】expected_output中引用的用户兴趣、习惯、偏好必须来自上方"用户已记录的事实"列表，严禁编造不存在的用户信息
 4. 【角色一致】input_text要符合模拟用户的身份特征，expected_output要符合AI玩偶的人设、说话风格和语气
-5. 【回复式输出】expected_output必须是具体回复文本（用玩偶口吻说出的话），严禁写成行为原则列表。evaluation_points才是评估点列表{turns_requirement}
+5. 【回复式输出】expected_output必须是具体回复文本（用玩偶口吻说出的话），严禁写成行为原则列表。evaluation_points才是评估点列表
 6. 【case_id 命名】case_id 前缀必须等于本维度 dimension_code（如本维度是 {dim_code}，case_id 必须是 {dim_code}-01、{dim_code}-02...）
 7. 【evaluation_points 格式】纯行为描述，**不带序号前缀**（不要写 ①②③ 或 1. 2.），每条 ≤10字、空格分隔
 8. 【failure_flags 范围】**只列本维度专属错误**，不要套用通用硬规则项（如本维度非 D2/D4，不要写「亲昵称呼」「越界承诺」「身份隐瞒」等跨维度硬规则项）
 9. 【failure_flags 必含维度专属错误 - 硬约束】failure_flags **必须包含至少 1 条**来自下方【本维度 failure_flags 应覆盖的典型错误】清单中的错误项（原样引用清单中的词，不要改写）。如果清单为空则跳过本条
 10. 【failure_flags 与 expected_output 一致性 - 硬约束】expected_output **不得触犯本用例 failure_flags 中列出的任一行为**。写完后必须自检对照：逐条对照 failure_flags，确认 expected_output 没有触发任一项；触发则重写 expected_output
+{dimension_block}
 
 ## 常见错误（审核会退回，必须避免）
 - evaluation_points 带序号前缀（如 ①②③ 或 1. 2.）→ 错误，应为纯行为描述空格分隔
@@ -777,18 +768,8 @@ def generate_test_cases_with_feedback(
     test_point_list = [p.strip() for p in test_points.split("、") if p.strip()] if test_points else []
     test_point_text = "\n".join([f"  {i+1}. {p}" for i, p in enumerate(test_point_list)])
 
-    # 轮数要求（与原函数相同）
-    turns_requirement = ""
-    if dim_code == "C1":
-        turns_requirement = "\n6. 【轮数要求】input_text 必须包含 4-6 轮对话（【R1】到【R4】或更多），测试短期记忆需要先建立信息，隔几轮后再追问"
-    elif dim_code == "C2":
-        turns_requirement = "\n6. 【轮数要求】input_text 必须包含 3-5 轮对话，测试长期记忆需要先建立信息再引用"
-    elif dim_code == "C3":
-        turns_requirement = "\n6. 【轮数要求】input_text 必须包含 3-5 轮对话，展示用户画像如何影响回复风格"
-    elif dim_code == "C4":
-        turns_requirement = "\n6. 【轮数要求】input_text 必须包含 4-6 轮对话，展示偏好变化的过程"
-    elif dim_code == "C5":
-        turns_requirement = "\n6. 【轮数要求】input_text 必须包含 3-5 轮对话，先建立记忆再制造冲突"
+    # 维度专属生成要求（轮数/结构/示例），从 DIMENSION_GEN_REQUIREMENTS 查表拼装
+    dimension_block = _format_dimension_gen_block(dim_code)
 
     # 构建问题反馈部分
     feedback_section = ""
@@ -929,12 +910,13 @@ input_text 示例（错误，不要这样写）：
 2. 【事实运用】至少1个用例必须结合"用户已记录的事实"设计场景，体现AI的记忆能力
 3. 【禁止虚构】expected_output中引用的用户兴趣、习惯、偏好必须来自上方"用户已记录的事实"列表，严禁编造不存在的用户信息
 4. 【角色一致】input_text要符合模拟用户的身份特征，expected_output要符合AI玩偶的人设、说话风格和语气
-5. 【回复式输出】expected_output必须是具体回复文本（用玩偶口吻说出的话），严禁写成行为原则列表。evaluation_points才是评估点列表{turns_requirement}
+5. 【回复式输出】expected_output必须是具体回复文本（用玩偶口吻说出的话），严禁写成行为原则列表。evaluation_points才是评估点列表
 6. 【case_id 命名】case_id 前缀必须等于本维度 dimension_code（如本维度是 {dim_code}，case_id 必须是 {dim_code}-01、{dim_code}-02...）
 7. 【evaluation_points 格式】纯行为描述，**不带序号前缀**（不要写 ①②③ 或 1. 2.），每条 ≤10字、空格分隔
 8. 【failure_flags 范围】**只列本维度专属错误**，不要套用通用硬规则项（如本维度非 D2/D4，不要写「亲昵称呼」「越界承诺」「身份隐瞒」等跨维度硬规则项）
 9. 【failure_flags 必含维度专属错误 - 硬约束】failure_flags **必须包含至少 1 条**来自上方【本维度 failure_flags 应覆盖的典型错误】清单中的错误项（原样引用清单中的词，不要改写）。如果清单为空则跳过本条
 10. 【failure_flags 与 expected_output 一致性 - 硬约束】expected_output **不得触犯本用例 failure_flags 中列出的任一行为**。写完后必须自检对照：逐条对照 failure_flags，确认 expected_output 没有触发任一项；触发则重写 expected_output
+{dimension_block}
 
 ## 常见错误（审核会退回，必须避免）
 - evaluation_points 带序号前缀（如 ①②③ 或 1. 2.）→ 错误，应为纯行为描述空格分隔
@@ -2639,6 +2621,60 @@ DIMENSION_REVIEW_CHECKLIST = {
         ],
     },
 }
+
+
+# ─── 维度生成专属要求（按 dim_code 查表，注入生成 prompt） ───────────────
+# Why: 之前 turns_requirement 是 if/else 硬编码在主 prompt 里，扩展性差
+# 只写该维度对轮数/结构/内容的特殊要求，不重复通用规则
+DIMENSION_GEN_REQUIREMENTS = {
+    "C1": {
+        "turns": "4-6 轮",
+        "structure": "前几轮【R1-R3】明确说出要测试记忆的具体信息（如具体名字、具体食物、具体时间、具体数字）让信息进入上下文；中间几轮穿插其他话题拉开距离（避免连续追问让短期变长期）；最后一轮【Rn】反过来追问前面提到的具体信息（如\"我刚才说本命甜品是什么来着？\"），让 AI 从短期上下文里找回",
+        "example_input": "【R1】用户：我刚给我家猫起名叫麻薯\n【R2】用户：最近工作压力有点大\n【R3】用户：它特别粘人，趴我膝盖上睡觉\n【R4】用户：对了，我刚才说我家猫叫什么来着？",
+        "must_avoid": "不要只在 title 里标注要记忆的内容，input_text 正文必须出现该信息；不要让末轮追问前一轮刚说的事（需有穿插）",
+    },
+    "C2": {
+        "turns": "3-5 轮",
+        "structure": "前几轮明确说出要测试记忆的具体信息（来自用户已知事实，如宠物名/朋友名/偏好），让信息进入上下文；最后一轮引用或追问前面提过的信息，让 AI 从长期记忆里召回",
+        "example_input": "【R1】用户：我家狗叫年糕\n【R2】用户：最近加班多\n【R3】用户：你还记得我家那只狗叫什么吗？",
+        "must_avoid": "测试点是 AI 是否记住之前对话中提过的信息，不要在最后一轮重复给出该信息",
+    },
+    "C3": {
+        "turns": "3-5 轮",
+        "structure": "input_text 展示用户画像信息（年龄/职业/性格/兴趣），让 AI 回复风格适配画像",
+        "example_input": "",
+        "must_avoid": "",
+    },
+    "C4": {
+        "turns": "4-6 轮",
+        "structure": "input_text 展示偏好变化的过程（如先说喜欢 A，后改口喜欢 B），测试 AI 是否感知到偏好演化",
+        "example_input": "",
+        "must_avoid": "",
+    },
+    "C5": {
+        "turns": "3-5 轮",
+        "structure": "前几轮建立信息（先说一个事实），最后一轮制造新旧冲突（如给出与之前矛盾的信息），测试 AI 是否用旧记忆纠错",
+        "example_input": "",
+        "must_avoid": "不要让冲突信息过于明显（要让 AI 有出错的可能）",
+    },
+}
+
+
+def _format_dimension_gen_block(dim_code: str) -> str:
+    """格式化维度专属生成要求块，拼到 user_prompt 末尾"""
+    req = DIMENSION_GEN_REQUIREMENTS.get(dim_code)
+    if not req:
+        return ""
+    parts = [f"\n## 本维度（{dim_code}）专属生成要求"]
+    if req.get("turns"):
+        parts.append(f"- 轮数：{req['turns']}")
+    if req.get("structure"):
+        parts.append(f"- 结构要求：{req['structure']}")
+    if req.get("must_avoid"):
+        parts.append(f"- 必须避免：{req['must_avoid']}")
+    if req.get("example_input"):
+        parts.append(f"- 示例 input_text（仅参考结构，不要照搬内容）：\n{req['example_input']}")
+    return "\n".join(parts)
 
 
 def review_case_quality(case_data: Dict, dimension_info: Dict = None, user_facts: List[Dict] = None, toy_persona: Dict = None, model: str = None, temperature: float = None, max_tokens: int = None, timeout: int = 120) -> Dict:
