@@ -4917,6 +4917,7 @@ def get_test_results():
              FROM test_results r
              JOIN test_cases c ON r.case_id = c.id
              WHERE r.task_id = """ + ph
+    # is_corrected 由 human_score 是否非空推导
     params = [task_id]
 
     if cluster_code:
@@ -4963,6 +4964,7 @@ def get_test_results():
             "human_score": row.get("human_score"),
             "human_note": row.get("human_note"),
             "needs_review": bool(row.get("needs_review")),
+            "is_corrected": row.get("human_score") is not None,
         })
 
     return jsonify(results)
@@ -5005,6 +5007,7 @@ def get_single_test_result(result_id):
         "eval_detail": _parse_eval_detail(row.get("eval_detail")),
         "human_score": row.get("human_score"),
         "human_note": row.get("human_note"),
+        "is_corrected": row.get("human_score") is not None,
     })
 
 
@@ -5036,9 +5039,12 @@ def correct_test_result(result_id):
 
     row = row_to_dict(row)
 
+    # 人工纠正后按纠正分数重算 status（与自动评测同阈值：>=6 passed，<6 failed）
+    new_status = "passed" if human_score >= 6 else "failed"
+
     execute_query(conn,
-        f"UPDATE test_results SET human_score = {ph}, human_note = {ph} WHERE id = {ph}",
-        (human_score, human_note, result_id))
+        f"UPDATE test_results SET human_score = {ph}, human_note = {ph}, status = {ph} WHERE id = {ph}",
+        (human_score, human_note, new_status, result_id))
 
     _save_correction(conn, eval_type="test_case", ref_id=str(result_id),
                      dimension_code=row.get("dimension_code", ""),
@@ -5050,7 +5056,8 @@ def correct_test_result(result_id):
     conn.commit()
     conn.close()
     return jsonify({"success": True, "result_id": result_id,
-                    "human_score": human_score, "human_note": human_note})
+                    "human_score": human_score, "human_note": human_note,
+                    "status": new_status})
 
 
 def _generate_report_summary(clusters, failed_cases, pass_rate, avg_score):
