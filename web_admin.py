@@ -289,6 +289,16 @@ def _ensure_tables():
             except Exception as e:
                 print(f"[STARTUP] Could not add needs_review to test_results: {e}", flush=True)
 
+        # eval_detail 升级为 MEDIUMTEXT：judges_detail 含 3 个 judge 完整回复，长回复易超 TEXT 64KB 上限
+        try:
+            col = execute_query(conn, "SHOW COLUMNS FROM test_results LIKE 'eval_detail'", fetch_one=True)
+            if col and "mediumtext" not in str(col.get("Type", "")).lower():
+                execute_query(conn, "ALTER TABLE test_results MODIFY COLUMN eval_detail MEDIUMTEXT")
+                conn.commit()
+                print("[STARTUP] Upgraded test_results.eval_detail to MEDIUMTEXT", flush=True)
+        except Exception as e:
+            print(f"[STARTUP] Could not upgrade eval_detail column: {e}", flush=True)
+
         # 创建 eval_corrections 表（few-shot 纠正案例）
         try:
             execute_query(conn, "SELECT 1 FROM eval_corrections LIMIT 1", fetch_one=True)
