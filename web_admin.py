@@ -3658,125 +3658,146 @@ def multi_create_growth():
     timestamp = int(time_module.time())
     results = []
 
+    errors = []
     for i, cfg in enumerate(configs):
-        name = cfg.get("name", f"用户{i+1}")
-        speed = cfg.get("speed", "normal")
-        categories = cfg.get("categories", [])
-        custom_messages = cfg.get("custom_messages", [])
-        target_api = cfg.get("target_api", "pipi")
-        # 兼容旧的 messages 参数
-        old_messages = cfg.get("messages", [])
+        try:
+            name = cfg.get("name", f"用户{i+1}")
+            speed = cfg.get("speed", "normal")
+            categories = cfg.get("categories", [])
+            custom_messages = cfg.get("custom_messages", [])
+            target_api = cfg.get("target_api", "pipi")
+            # 兼容旧的 messages 参数
+            old_messages = cfg.get("messages", [])
 
-        # 生成唯一 ID
-        persona_id = f"auto_{timestamp}_{i+1}"
-        device_id = f"TEST_DEV_HUARONG_{timestamp}_{i+1}_{random.randint(1000,9999)}"
+            # 生成唯一 ID
+            persona_id = f"auto_{timestamp}_{i+1}"
+            device_id = f"TEST_DEV_HUARONG_{timestamp}_{i+1}_{random.randint(1000,9999)}"
 
-        # 调用 LLM 生成完整的用户画像
-        profile = _generate_persona_profile(name)
+            # 调用 LLM 生成完整的用户画像
+            profile = _generate_persona_profile(name)
 
-        # 根据 persona 生成消息
-        if categories:
-            messages = _generate_messages_from_persona({**profile, "name": name}, categories, custom_messages)
-        elif old_messages:
-            # 兼容旧接口
-            messages = old_messages
-        else:
-            continue
+            # 根据 persona 生成消息
+            if categories:
+                messages = _generate_messages_from_persona({**profile, "name": name}, categories, custom_messages)
+            elif old_messages:
+                # 兼容旧接口
+                messages = old_messages
+            else:
+                errors.append({"name": name, "error": "未选择信息类别"})
+                continue
 
-        if not messages:
-            continue
+            if not messages:
+                errors.append({"name": name, "error": "消息列表为空"})
+                continue
 
-        conn = get_db_connection()
+            conn = get_db_connection()
 
-        # 创建完整的用户画像（按 personas 表字段）
-        fields = [
-            "id", "name", "device_id", "nickname", "real_name", "gender", "age",
-            "city", "occupation", "education", "family_status", "income_range",
-            "spending_style", "spending_desc", "devices", "usage_scenes",
-            "core_goal", "short_goal", "long_goal", "pain_points", "constraints",
-            "risk_profile", "interests", "language_style", "sample_dialog",
-            "info_sources", "decision_style", "relation_pace", "scene_pref",
-            "top_expectations", "minefields", "target_api"
-        ]
-        values = [
-            persona_id, name, device_id,
-            profile.get("nickname", ""),
-            profile.get("real_name", ""),
-            profile.get("gender", "女"),
-            profile.get("age", ""),
-            profile.get("city", ""),
-            profile.get("occupation", ""),
-            profile.get("education", ""),
-            profile.get("family_status", ""),
-            profile.get("income_range", ""),
-            profile.get("spending_style", ""),
-            profile.get("spending_desc", ""),
-            profile.get("devices", ""),
-            profile.get("usage_scenes", ""),
-            profile.get("core_goal", ""),
-            profile.get("short_goal", ""),
-            profile.get("long_goal", ""),
-            profile.get("pain_points", ""),
-            profile.get("constraints", ""),
-            profile.get("risk_profile", ""),
-            profile.get("interests", ""),
-            profile.get("language_style", ""),
-            profile.get("sample_dialog", ""),
-            profile.get("info_sources", ""),
-            profile.get("decision_style", ""),
-            profile.get("relation_pace", ""),
-            profile.get("scene_pref", ""),
-            profile.get("top_expectations", ""),
-            profile.get("minefields", ""),
-            target_api,
-        ]
+            # 创建完整的用户画像（按 personas 表字段）
+            fields = [
+                "id", "name", "device_id", "nickname", "real_name", "gender", "age",
+                "city", "occupation", "education", "family_status", "income_range",
+                "spending_style", "spending_desc", "devices", "usage_scenes",
+                "core_goal", "short_goal", "long_goal", "pain_points", "constraints",
+                "risk_profile", "interests", "language_style", "sample_dialog",
+                "info_sources", "decision_style", "relation_pace", "scene_pref",
+                "top_expectations", "minefields", "target_api"
+            ]
+            values = [
+                persona_id, name, device_id,
+                profile.get("nickname", ""),
+                profile.get("real_name", ""),
+                profile.get("gender", "女"),
+                profile.get("age", ""),
+                profile.get("city", ""),
+                profile.get("occupation", ""),
+                profile.get("education", ""),
+                profile.get("family_status", ""),
+                profile.get("income_range", ""),
+                profile.get("spending_style", ""),
+                profile.get("spending_desc", ""),
+                profile.get("devices", ""),
+                profile.get("usage_scenes", ""),
+                profile.get("core_goal", ""),
+                profile.get("short_goal", ""),
+                profile.get("long_goal", ""),
+                profile.get("pain_points", ""),
+                profile.get("constraints", ""),
+                profile.get("risk_profile", ""),
+                profile.get("interests", ""),
+                profile.get("language_style", ""),
+                profile.get("sample_dialog", ""),
+                profile.get("info_sources", ""),
+                profile.get("decision_style", ""),
+                profile.get("relation_pace", ""),
+                profile.get("scene_pref", ""),
+                profile.get("top_expectations", ""),
+                profile.get("minefields", ""),
+                target_api,
+            ]
 
-        if USE_MYSQL:
-            # 检查是否有非标量值
-            for i, (f, v) in enumerate(zip(fields, values)):
-                if isinstance(v, (list, tuple, dict)):
-                    print(f"[PERSONA CREATE ERROR] field '{f}' has non-scalar value: {type(v)} = {v}", flush=True)
-                    values[i] = str(v) if v else ""
-            ph = ", ".join(["%s"] * len(fields))
-            sql = f"INSERT INTO personas ({', '.join(fields)}) VALUES ({ph})"
-            execute_query(conn, sql, tuple(values))
-        else:
-            ph = ", ".join(["?"] * len(fields))
-            execute_query(conn, f"INSERT INTO personas ({', '.join(fields)}) VALUES ({ph})", tuple(values))
+            if USE_MYSQL:
+                # 检查是否有非标量值（list/dict/tuple 一律 join 成字符串）
+                for j, (f, v) in enumerate(zip(fields, values)):
+                    if isinstance(v, (list, tuple, dict)):
+                        if isinstance(v, (list, tuple)):
+                            joined = ", ".join(str(x) for x in v)
+                        else:
+                            joined = str(v)
+                        print(f"[PERSONA CREATE] field '{f}' has non-scalar value, auto-joined: {type(v).__name__}", flush=True)
+                        values[j] = joined
+                ph = ", ".join(["%s"] * len(fields))
+                sql = f"INSERT INTO personas ({', '.join(fields)}) VALUES ({ph})"
+                execute_query(conn, sql, tuple(values))
+            else:
+                ph = ", ".join(["?"] * len(fields))
+                execute_query(conn, f"INSERT INTO personas ({', '.join(fields)}) VALUES ({ph})", tuple(values))
 
-        # 创建成长任务
-        cur = execute_query(conn,
-            "INSERT INTO growth_tasks (persona_id, speed, status, total_messages) VALUES (?,?,?,?)",
-            (persona_id, speed, "pending", len(messages)))
-        task_id = get_lastrowid(cur)
+            # 创建成长任务
+            cur = execute_query(conn,
+                "INSERT INTO growth_tasks (persona_id, speed, status, total_messages) VALUES (?,?,?,?)",
+                (persona_id, speed, "pending", len(messages)))
+            task_id = get_lastrowid(cur)
 
-        # 创建进度记录
-        for idx, msg in enumerate(messages):
-            if isinstance(msg, str) and msg.strip():
-                execute_query(conn,
-                    "INSERT INTO growth_progress (task_id, message_index, user_message, status) VALUES (?,?,?,?)",
-                    (task_id, idx, msg.strip(), "pending"))
+            # 创建进度记录
+            for idx, msg in enumerate(messages):
+                if isinstance(msg, str) and msg.strip():
+                    execute_query(conn,
+                        "INSERT INTO growth_progress (task_id, message_index, user_message, status) VALUES (?,?,?,?)",
+                        (task_id, idx, msg.strip(), "pending"))
 
-        conn.commit()
-        conn.close()
+            conn.commit()
+            conn.close()
 
-        results.append({
-            "persona_id": persona_id,
-            "task_id": task_id,
-            "name": name,
-            "device_id": device_id,
-            "speed": speed,
-            "message_count": len(messages),
-            "persona": {k: v for k, v in profile.items() if not k.startswith("_")}
-        })
+            results.append({
+                "persona_id": persona_id,
+                "task_id": task_id,
+                "name": name,
+                "device_id": device_id,
+                "speed": speed,
+                "message_count": len(messages),
+                "persona": {k: v for k, v in profile.items() if not k.startswith("_")}
+            })
 
-        # 启动后台线程
-        t = threading.Thread(target=_growth_worker, args=(task_id,), daemon=True)
-        t.start()
+            # 启动后台线程
+            t = threading.Thread(target=_growth_worker, args=(task_id,), daemon=True)
+            t.start()
+
+        except Exception as e:
+            import traceback
+            err_msg = f"{name}: {e}"
+            print(f"[MULTI CREATE ERROR] {err_msg}\n{traceback.format_exc()}", flush=True)
+            errors.append({"name": name, "error": str(e)})
+            try:
+                if conn:
+                    conn.rollback()
+                    conn.close()
+            except Exception:
+                pass
 
     return jsonify({
         "created_count": len(results),
-        "tasks": results
+        "tasks": results,
+        "errors": errors
     })
 
 

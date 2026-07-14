@@ -1890,7 +1890,12 @@ function startMultiGrowth() {
     body: JSON.stringify({configs: configs})
   }).then(r => r.json()).then(function(data) {
     if (data.error) { alert('创建失败: ' + data.error); return; }
-    alert('创建任务已启动，共创建 ' + data.created_count + ' 个用户');
+    var msg = '创建任务已启动，共创建 ' + data.created_count + ' 个用户';
+    if (data.errors && data.errors.length > 0) {
+      msg += '\n\n以下用户创建失败：';
+      data.errors.forEach(function(e) { msg += '\n- ' + e.name + ': ' + e.error; });
+    }
+    alert(msg);
     refreshGrowthTasks();
     startGrowthPolling();
     loadPersonas();
