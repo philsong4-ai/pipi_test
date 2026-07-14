@@ -6034,8 +6034,9 @@ def _save_test_case(conn, case_data, persona_id=None, device_id=None, dimension_
 
     # case_id 前缀纠正：如果 case_id 前缀与 dimension_code 不一致，自动纠正
     # Why: 实际数据发现 case_id="A1-251" 但 dimension_code="F1" 的错位，导致维度统计错乱
+    # 红队用例 case_id 格式为 RT-{dim}-{NN}，跳过此纠正，否则会被改成 {dim}-{dim}-{NN}
     raw_case_id = case_data.get("case_id", "")
-    if raw_case_id and final_dimension_code:
+    if raw_case_id and final_dimension_code and not is_redteam:
         prefix = raw_case_id.split('-')[0].split('_')[0]
         if prefix != final_dimension_code:
             suffix = raw_case_id[len(prefix) + 1:] if len(raw_case_id) > len(prefix) else raw_case_id
@@ -6228,8 +6229,9 @@ def _redteam_gen_worker(task_id):
                     dimension=dim, toy_persona=toy_persona, persona=persona, user_facts=facts,
                     count=count_per_dim, **llm_config["redteam_gen"]
                 )
+                start_seq = _get_redteam_max_seq(conn, dim_code)
                 for idx, case in enumerate(cases, 1):
-                    case["case_id"] = _get_redteam_unique_case_id(conn, dim_code, idx)
+                    case["case_id"] = _get_redteam_unique_case_id(conn, dim_code, idx, start_from=start_seq)
                     rid = _save_test_case(
                         conn, case,
                         persona_id=persona_id,
@@ -7448,8 +7450,18 @@ def _get_unique_case_id(conn, base_id):
     return f"{prefix}-{num:02d}"
 
 
-def _get_redteam_unique_case_id(conn, dim_code, index):
-    """红队专用 case_id 生成：RT-{dim}-{NN}，查 DB 该前缀最大序号 +1，避免与正门 _get_unique_case_id 的正则冲突"""
+def _get_redteam_unique_case_id(conn, dim_code, index, start_from=0):
+    """红队专用 case_id 生成：RT-{dim}-{NN}
+    start_from 由 worker 预先查 DB 得到该维度当前最大序号，本批从 start_from+1 开始连续递增。
+    避免每次调用都查 DB（同事务内查不到刚 INSERT 的行，会导致 5 条全生成同一序号）。
+    """
+    prefix = f"RT-{dim_code}"
+    num = start_from + index
+    return f"{prefix}-{num:02d}"
+
+
+def _get_redteam_max_seq(conn, dim_code):
+    """查该维度红队用例当前最大序号，用于本批生成起始序号"""
     prefix = f"RT-{dim_code}"
     if USE_MYSQL:
         row = execute_query(conn,
@@ -7461,13 +7473,12 @@ def _get_redteam_unique_case_id(conn, dim_code, index):
             "SELECT case_id FROM test_cases WHERE case_id LIKE ? AND is_redteam = 1 "
             "ORDER BY CAST(SUBSTR(case_id, INSTR(case_id, '-') + 1) AS INTEGER) DESC LIMIT 1",
             (f"{prefix}-%",), fetch_one=True)
-    import re
-    num = index
     if row:
+        import re
         m = re.match(r'^RT-[A-Z]\d+-(\d+)$', row["case_id"])
         if m:
-            num = max(index, int(m.group(1)) + 1)
-    return f"{prefix}-{num:02d}"
+            return int(m.group(1))
+    return 0
 
 
 # ─── 测试用例评测 ─────────────────────────────────────
