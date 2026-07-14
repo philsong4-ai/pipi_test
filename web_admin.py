@@ -1310,6 +1310,7 @@ def correct_evaluation(message_id):
                      auto_score=int(round(row.get("total_score") or 0)),
                      human_score=human_score, correction_reason=human_note)
 
+    conn.commit()
     conn.close()
     return jsonify({"success": True, "message_id": message_id,
                     "human_score": human_score, "human_note": human_note})
@@ -5046,6 +5047,7 @@ def correct_test_result(result_id):
                      auto_score=int(row.get("score") or 0),
                      human_score=human_score, correction_reason=human_note)
 
+    conn.commit()
     conn.close()
     return jsonify({"success": True, "result_id": result_id,
                     "human_score": human_score, "human_note": human_note})
