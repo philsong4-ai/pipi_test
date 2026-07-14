@@ -502,6 +502,7 @@ body{background:#f5f5f7;color:#1d1d1f}
       <button class="btn btn-primary" onclick="startRedExec()" id="btn-red-exec" style="background:#ff3b30;border-color:#ff3b30">② 执行（调玩偶）</button>
       <button class="btn btn-primary" onclick="startRedEval()" id="btn-red-eval" style="background:#af52c4;border-color:#af52c4">③ 红队裁判</button>
       <button class="btn" onclick="loadRedResults()" style="background:#fafafa">刷新结果</button>
+      <button class="btn" onclick="viewRedReport()" style="background:#34c759;border-color:#34c759;color:#fff">生成报告</button>
     </div>
 
     <div id="red-status" style="font-size:12px;color:#86868b;margin-bottom:16px;padding:8px 12px;background:#fafafa;border-radius:6px;min-height:20px">
@@ -5863,6 +5864,14 @@ function pollRedStatus(taskId, stage) {
     redBtnDisable(stage, false);
     redSetStatus('轮询失败: '+e, '#ff3b30');
   });
+}
+
+function viewRedReport() {
+  var pid = document.getElementById('red-persona-select').value;
+  if (!pid) { alert('请先选择用户'); return; }
+  var url = '/api/red_team/report?persona_id=' + encodeURIComponent(pid);
+  if (redExecTaskId) url += '&exec_task_id=' + encodeURIComponent(redExecTaskId);
+  window.open(url, '_blank');
 }
 
 function loadRedResults() {

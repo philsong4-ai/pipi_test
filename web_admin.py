@@ -6637,6 +6637,305 @@ def api_redteam_results():
     return jsonify({"results": rows, "total": total, "breached": breached, "test_task_id": test_task_id})
 
 
+@app.route("/api/red_team/report", methods=["GET"])
+def api_redteam_report():
+    """红队测试报告
+    参数:
+        persona_id: 必填
+        exec_task_id: 可选，指定某次红队执行；不传则取该用户最近一次完成的红队执行
+        format: html(默认) 或 json
+    """
+    persona_id = request.args.get("persona_id", "")
+    exec_task_id = request.args.get("exec_task_id", "")
+    output_format = request.args.get("format", "html")
+    if not persona_id:
+        return jsonify({"error": "persona_id required"}), 400
+
+    conn = get_db_connection()
+    ph = "%s" if USE_MYSQL else "?"
+
+    # 解析 test_task_id（逻辑与 /api/red_team/results 一致）
+    test_task_id = None
+    if exec_task_id:
+        trow = execute_query(conn,
+            f"SELECT config_json FROM async_tasks WHERE id = {ph} AND task_type = 'rtexec'",
+            (exec_task_id,), fetch_one=True)
+        if trow:
+            try:
+                cfg = json.loads(row_to_dict(trow).get("config_json") or "{}")
+                test_task_id = cfg.get("test_task_id")
+            except Exception:
+                test_task_id = None
+    if not test_task_id:
+        last = execute_query(conn,
+            f"SELECT config_json FROM async_tasks "
+            f"WHERE persona_id = {ph} AND task_type = 'rtexec' AND status = 'completed' "
+            + ("AND JSON_EXTRACT(config_json, '$.test_task_id') IS NOT NULL " if USE_MYSQL else "AND json_extract(config_json, '$.test_task_id') IS NOT NULL ")
+            + f"ORDER BY created_at DESC LIMIT 1",
+            (persona_id,), fetch_one=True)
+        if last:
+            try:
+                cfg = json.loads(row_to_dict(last).get("config_json") or "{}")
+                test_task_id = cfg.get("test_task_id")
+            except Exception:
+                test_task_id = None
+
+    if not test_task_id:
+        conn.close()
+        return jsonify({"error": "no completed red team exec task for this persona"}), 404
+
+    # 拉所有红队用例 + 裁判结果
+    rows = execute_query(conn,
+        f"""SELECT c.id, c.case_id, c.dimension_code, c.title, c.priority,
+                  c.input_text, c.expected_output, c.redteam_trap_type, c.redteam_predicted_failure,
+                  c.failure_flags,
+                  r.id as result_id, r.status as exec_status, r.actual_output,
+                  r.score, r.deduction_reason, r.eval_detail, r.executed_at
+           FROM test_cases c
+           LEFT JOIN test_results r ON r.case_id = c.id AND r.task_id = {ph}
+           WHERE c.is_redteam = 1 AND c.persona_id = {ph}
+           ORDER BY c.dimension_code, c.case_id""",
+        (test_task_id, persona_id), fetch_all=True)
+    rows = [row_to_dict(r) for r in rows] if rows else []
+
+    # 维度信息
+    dim_rows = execute_query(conn, "SELECT dimension_code, dimension_name, cluster_code, cluster_name FROM test_dimensions", fetch_all=True)
+    dim_map = {row_to_dict(d)["dimension_code"]: row_to_dict(d) for d in dim_rows} if dim_rows else {}
+
+    # 执行任务信息
+    task = execute_query(conn, "SELECT * FROM test_tasks WHERE id = " + ph, (test_task_id,), fetch_one=True)
+    task = row_to_dict(task) if task else {}
+    conn.close()
+
+    # 统计
+    total = len(rows)
+    judged = [r for r in rows if r.get("score") is not None]
+    breached_cases = [r for r in judged if r.get("score") == 0]
+    defended_cases = [r for r in judged if r.get("score") == 10]
+    not_judged = [r for r in rows if r.get("score") is None]
+    breach_rate = round(len(breached_cases) / len(judged) * 100, 1) if judged else 0
+
+    # 按维度聚合
+    by_dim = {}
+    for r in judged:
+        dim = r.get("dimension_code", "X")
+        if dim not in by_dim:
+            by_dim[dim] = {"total": 0, "breached": 0, "defended": 0}
+        by_dim[dim]["total"] += 1
+        if r.get("score") == 0:
+            by_dim[dim]["breached"] += 1
+        else:
+            by_dim[dim]["defended"] += 1
+
+    # 按 trap_type 聚合
+    by_trap = {}
+    for r in judged:
+        trap = r.get("redteam_trap_type") or "未分类"
+        if trap not in by_trap:
+            by_trap[trap] = {"total": 0, "breached": 0, "dims": set()}
+        by_trap[trap]["total"] += 1
+        if r.get("score") == 0:
+            by_trap[trap]["breached"] += 1
+        by_trap[trap]["dims"].add(r.get("dimension_code", ""))
+    for trap in by_trap:
+        by_trap[trap]["dims"] = sorted(by_trap[trap]["dims"])
+
+    if output_format == "json":
+        return jsonify({
+            "task": {
+                "id": task.get("id"),
+                "task_id": task.get("task_id", ""),
+                "name": task.get("name", ""),
+                "persona_id": persona_id,
+                "status": task.get("status", ""),
+                "created_at": str(task.get("created_at", "")),
+            },
+            "summary": {
+                "total": total,
+                "judged": len(judged),
+                "breached": len(breached_cases),
+                "defended": len(defended_cases),
+                "not_judged": len(not_judged),
+                "breach_rate": breach_rate,
+            },
+            "by_dimension": {
+                dim: {
+                    "dimension_name": dim_map.get(dim, {}).get("dimension_name", dim),
+                    "cluster_name": dim_map.get(dim, {}).get("cluster_name", ""),
+                    "total": s["total"], "breached": s["breached"], "defended": s["defended"],
+                    "breach_rate": round(s["breached"] / s["total"] * 100, 1) if s["total"] else 0,
+                } for dim, s in sorted(by_dim.items())
+            },
+            "by_trap_type": {
+                trap: {
+                    "total": s["total"], "breached": s["breached"],
+                    "breach_rate": round(s["breached"] / s["total"] * 100, 1) if s["total"] else 0,
+                    "dimensions": s["dims"],
+                } for trap, s in sorted(by_trap.items())
+            },
+            "breached_cases": breached_cases,
+        })
+
+    # HTML 报告
+    import datetime as _dt
+    report_time = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    task_created = task.get("created_at", "")
+    if hasattr(task_created, "strftime"):
+        task_created = task_created.strftime("%Y-%m-%d %H:%M:%S")
+
+    def _esc(s):
+        if s is None: return ""
+        return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+    # 维度块 HTML
+    dim_rows_html = ""
+    for dim, s in sorted(by_dim.items()):
+        dim_name = dim_map.get(dim, {}).get("dimension_name", dim)
+        cluster = dim_map.get(dim, {}).get("cluster_name", "")
+        rate = round(s["breached"] / s["total"] * 100, 1) if s["total"] else 0
+        bar_color = "#ff3b30" if rate >= 50 else "#ff9500" if rate >= 20 else "#34c759"
+        dim_rows_html += f"""
+            <tr>
+              <td style="padding:8px;border-bottom:1px solid #e8e8ed"><b>{_esc(dim)}</b></td>
+              <td style="padding:8px;border-bottom:1px solid #e8e8ed">{_esc(dim_name)}</td>
+              <td style="padding:8px;border-bottom:1px solid #e8e8ed">{_esc(cluster)}</td>
+              <td style="padding:8px;border-bottom:1px solid #e8e8ed;text-align:center">{s['total']}</td>
+              <td style="padding:8px;border-bottom:1px solid #e8e8ed;text-align:center;color:#ff3b30;font-weight:600">{s['breached']}</td>
+              <td style="padding:8px;border-bottom:1px solid #e8e8ed;text-align:center;color:#34c759">{s['defended']}</td>
+              <td style="padding:8px;border-bottom:1px solid #e8e8ed;text-align:center">
+                <span style="display:inline-block;padding:2px 8px;border-radius:4px;background:{bar_color};color:#fff;font-weight:600">{rate}%</span>
+              </td>
+            </tr>
+        """
+
+    # 攻击类型块 HTML
+    trap_rows_html = ""
+    for trap, s in sorted(by_trap.items(), key=lambda x: -x[1]["breached"]):
+        rate = round(s["breached"] / s["total"] * 100, 1) if s["total"] else 0
+        dims_str = " / ".join(s["dims"])
+        trap_rows_html += f"""
+            <tr>
+              <td style="padding:8px;border-bottom:1px solid #e8e8ed">{_esc(trap)}</td>
+              <td style="padding:8px;border-bottom:1px solid #e8e8ed;font-size:11px;color:#86868b">{_esc(dims_str)}</td>
+              <td style="padding:8px;border-bottom:1px solid #e8e8ed;text-align:center">{s['total']}</td>
+              <td style="padding:8px;border-bottom:1px solid #e8e8ed;text-align:center;color:#ff3b30;font-weight:600">{s['breached']}</td>
+              <td style="padding:8px;border-bottom:1px solid #e8e8ed;text-align:center">{rate}%</td>
+            </tr>
+        """
+
+    # 被攻破用例详情 HTML
+    breached_details_html = ""
+    for c in breached_cases:
+        verdict = {}
+        try:
+            verdict = json.loads(c.get("eval_detail") or "{}")
+        except Exception:
+            verdict = {}
+        reasoning = verdict.get("reasoning", "")
+        breach_type = verdict.get("breach_type", "")
+        breached_details_html += f"""
+            <div style="margin-bottom:16px;border:1px solid #ff3b30;border-radius:8px;overflow:hidden">
+              <div style="padding:8px 12px;background:#ff3b30;color:#fff;font-weight:600">
+                {_esc(c.get('case_id', ''))} | {_esc(c.get('dimension_code', ''))} | 攻击类型: {_esc(c.get('redteam_trap_type', ''))}
+              </div>
+              <div style="padding:12px">
+                <p style="margin:0 0 6px 0"><b>预期失败模式:</b> <span style="color:#ff3b30">{_esc(c.get('redteam_predicted_failure', ''))}</span></p>
+                <p style="margin:0 0 6px 0"><b>攻破类型:</b> {_esc(breach_type)}</p>
+                <p style="margin:0 0 6px 0"><b>用户输入:</b></p>
+                <pre style="background:#f5f5f7;padding:8px;border-radius:4px;white-space:pre-wrap;font-size:12px;margin:0 0 8px 0">{_esc(c.get('input_text', ''))}</pre>
+                <p style="margin:0 0 6px 0"><b>玩偶回复:</b></p>
+                <pre style="background:#fff0f0;padding:8px;border-radius:4px;white-space:pre-wrap;font-size:12px;margin:0 0 8px 0">{_esc(c.get('actual_output', ''))}</pre>
+                <p style="margin:0 0 6px 0"><b>裁判推理:</b></p>
+                <pre style="background:#fafafa;padding:8px;border-radius:4px;white-space:pre-wrap;font-size:12px;margin:0">{_esc(reasoning)}</pre>
+              </div>
+            </div>
+        """
+
+    overall_color = "#ff3b30" if breach_rate >= 50 else "#ff9500" if breach_rate >= 20 else "#34c759"
+
+    html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>红队测试报告 - {_esc(persona_id)}</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; background:#f5f5f7; margin:0; padding:20px; color:#1d1d1f; }}
+    .container {{ max-width:1100px; margin:0 auto; }}
+    .report-header {{ background:linear-gradient(135deg, #ff3b30, #af52c4); color:#fff; padding:24px; border-radius:12px; margin-bottom:20px; }}
+    .report-title {{ font-size:22px; font-weight:600; margin:0 0 4px 0; }}
+    .report-subtitle {{ font-size:13px; opacity:0.9; }}
+    .overview {{ display:grid; grid-template-columns:repeat(4, 1fr); gap:12px; margin-bottom:20px; }}
+    .card {{ background:#fff; padding:16px; border-radius:10px; box-shadow:0 1px 3px rgba(0,0,0,0.06); }}
+    .card .label {{ font-size:12px; color:#86868b; margin-bottom:4px; }}
+    .card .value {{ font-size:24px; font-weight:600; }}
+    .section {{ background:#fff; padding:16px; border-radius:10px; box-shadow:0 1px 3px rgba(0,0,0,0.06); margin-bottom:20px; }}
+    .section h2 {{ font-size:16px; margin:0 0 12px 0; color:#1d1d1f; }}
+    table {{ width:100%; border-collapse:collapse; font-size:13px; }}
+    th {{ padding:8px; text-align:left; background:#f5f5f7; border-bottom:2px solid #e8e8ed; font-weight:600; }}
+    @media (max-width: 768px) {{ .overview {{ grid-template-columns:repeat(2, 1fr); }} }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="report-header">
+      <h1 class="report-title">🔴 红队测试报告</h1>
+      <div class="report-subtitle">角色: {_esc(persona_id)} | 任务: {_esc(task.get('task_id', ''))} | 任务创建: {_esc(task_created)} | 报告生成: {_esc(report_time)}</div>
+    </div>
+
+    <div class="overview">
+      <div class="card">
+        <div class="label">总用例数</div>
+        <div class="value">{total}</div>
+      </div>
+      <div class="card">
+        <div class="label">已裁判</div>
+        <div class="value">{len(judged)}</div>
+      </div>
+      <div class="card">
+        <div class="label">被攻破</div>
+        <div class="value" style="color:#ff3b30">{len(breached_cases)}</div>
+      </div>
+      <div class="card">
+        <div class="label">攻破率</div>
+        <div class="value" style="color:{overall_color}">{breach_rate}%</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>按维度统计</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>维度</th><th>维度名</th><th>能力簇</th><th>总数</th><th>被攻破</th><th>防御成功</th><th>攻破率</th>
+          </tr>
+        </thead>
+        <tbody>{dim_rows_html}</tbody>
+      </table>
+    </div>
+
+    <div class="section">
+      <h2>按攻击类型统计</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>攻击类型</th><th>涉及维度</th><th>总数</th><th>被攻破</th><th>攻破率</th>
+          </tr>
+        </thead>
+        <tbody>{trap_rows_html}</tbody>
+      </table>
+    </div>
+
+    <div class="section">
+      <h2>被攻破用例详情（{len(breached_cases)} 条）</h2>
+      {breached_details_html if breached_details_html else '<p style="color:#86868b;text-align:center;padding:24px">无被攻破用例</p>'}
+    </div>
+  </div>
+</body>
+</html>"""
+    return html
+
+
 @app.route("/api/red_team/cases", methods=["GET"])
 def api_redteam_cases():
     """红队用例清单：含执行状态 + 裁判结果
