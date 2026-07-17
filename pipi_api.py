@@ -373,13 +373,23 @@ def generate_persona_messages(profile: Dict, categories: List[str] = None, custo
 - 返回纯 JSON 数组，如 ["msg1", "msg2", ...]"""
 
     try:
-        result = call_llm_simple(system_prompt, user_prompt, timeout=timeout, temperature=0.8, max_tokens=4000)
-        if not result:
-            # 第一次失败：等 5s 重试一次（LLM 代理偶发性慢）
-            import time as _t
-            _t.sleep(5)
-            print(f"[PERSONA MSG GEN] first call empty, retrying...", flush=True)
-            result = call_llm_simple(system_prompt, user_prompt, timeout=timeout, temperature=0.8, max_tokens=4000)
+        result = None
+        # 504 / 超时 / 网络抖动类错误重试 3 次，间隔递增（5s/10s/15s）
+        import time as _t
+        for attempt in range(3):
+            try:
+                result = call_llm_simple(system_prompt, user_prompt, timeout=timeout, temperature=0.8, max_tokens=4000)
+                if result:
+                    break
+                if attempt < 2:
+                    _t.sleep(5)
+                    print(f"[PERSONA MSG GEN] attempt {attempt+1} empty, retrying...", flush=True)
+            except Exception as e:
+                print(f"[PERSONA MSG GEN ERROR] attempt {attempt+1}: {e}", flush=True)
+                if attempt < 2:
+                    _t.sleep(5 + attempt * 5)
+                else:
+                    raise
         if not result:
             return []
 

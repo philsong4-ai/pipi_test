@@ -2910,25 +2910,29 @@ def _generate_persona_profile(name=""):
     try:
         llm_config = get_llm_config()
         persona_cfg = llm_config.get("persona_gen", {})
-        result = pipi_api.call_llm_simple(
-            system_prompt, user_prompt,
-            timeout=persona_cfg.get("timeout", 180),
-            model=persona_cfg.get("model"),
-            temperature=persona_cfg.get("temperature", 0.7),
-            max_tokens=persona_cfg.get("max_tokens", 4096),
-        )
-        if not result:
-            # 重试一次
-            import time as _t
-            _t.sleep(5)
-            print(f"[PERSONA GEN] first call empty, retrying...", flush=True)
-            result = pipi_api.call_llm_simple(
-                system_prompt, user_prompt,
-                timeout=persona_cfg.get("timeout", 180),
-                model=persona_cfg.get("model"),
-                temperature=persona_cfg.get("temperature", 0.7),
-                max_tokens=persona_cfg.get("max_tokens", 4096),
-            )
+        result = None
+        # 504 / 超时 / 网络抖动类错误重试 3 次，间隔递增
+        import time as _t
+        for attempt in range(3):
+            try:
+                result = pipi_api.call_llm_simple(
+                    system_prompt, user_prompt,
+                    timeout=persona_cfg.get("timeout", 180),
+                    model=persona_cfg.get("model"),
+                    temperature=persona_cfg.get("temperature", 0.7),
+                    max_tokens=persona_cfg.get("max_tokens", 4096),
+                )
+                if result:
+                    break
+                if attempt < 2:
+                    _t.sleep(5)
+                    print(f"[PERSONA GEN] attempt {attempt+1} empty, retrying...", flush=True)
+            except Exception as e:
+                print(f"[PERSONA GEN ERROR] attempt {attempt+1}: {e}", flush=True)
+                if attempt < 2:
+                    _t.sleep(5 + attempt * 5)
+                else:
+                    raise
         print(f"[PERSONA GEN] LLM result len={len(result) if result else 0}", flush=True)
         if result:
             # 提取 JSON（处理 ```json ... ``` 格式）
