@@ -6675,6 +6675,7 @@ def api_redteam_generate():
     _redteam_tasks[task_id] = {
         "status": "running",
         "persona_id": persona_id,
+        "target_api": (body.get("target_api") or "").strip(),
         "progress": {"done": 0, "total": 25, "current": None},
         "created_case_ids": [],
         "cases_created": 0,
@@ -6700,6 +6701,7 @@ def api_redteam_execute():
         "status": "running",
         "persona_id": persona_id,
         "device_id": device_id,
+        "target_api": (body.get("target_api") or "").strip(),
         "progress": {"done": 0, "total": 0},
     }
     _save_async_task(task_id, "rtexec", _redteam_tasks[task_id])
@@ -7259,6 +7261,7 @@ def generate_test_cases():
     dimension_codes = data.get("dimension_codes")  # null 表示全部
     count_per_dim = int(data.get("count_per_dimension", 5))
     clear_existing = data.get("clear_existing", False)
+    target_api = (data.get("target_api") or "").strip()
 
     if not persona_id:
         return jsonify({"error": "persona_id is required"}), 400
@@ -7274,6 +7277,7 @@ def generate_test_cases():
         "dimension_codes": dimension_codes,
         "count_per_dimension": count_per_dim,
         "clear_existing": clear_existing,
+        "target_api": target_api,
         "progress": {"total": 0, "done": 0, "current": None},
         "cases_created": 0,
         "errors": [],
@@ -8545,6 +8549,7 @@ def _run_scheduled_task(task):
                 "dimension_codes": config.get("dimension_codes"),
                 "count_per_dimension": config.get("count_per_dimension", 5),
                 "clear_existing": config.get("clear_existing", False),
+                "target_api": config.get("target_api", ""),
                 "progress": {"total": 0, "done": 0, "current": None},
                 "cases_created": 0,
                 "errors": [],
