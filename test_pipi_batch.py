@@ -25,9 +25,21 @@ from pipi_api import call_pipi_stream, build_system_prompt
 _ROUND_PATTERN = re.compile(r"【R(\d+)】(.*?)(?=\n【R\d+】|$)", re.DOTALL)
 
 
+def _resolve_api(target_api: str = "pipi"):
+    """从 web_admin 的 api_endpoints 表查询 url/key/headers，CLI 脚本兜底走 env。"""
+    api_url, api_key, extra_headers = None, None, None
+    try:
+        from web_admin import get_api_config_by_code
+        api_url, api_key, extra_headers = get_api_config_by_code(target_api)
+    except Exception as e:
+        print(f"[WARN] 无法从 api_endpoints 查到 target_api={target_api}: {e}（走 env 兜底）")
+    return api_url, api_key, extra_headers
+
+
 def execute_multi_round_session(
     case_input: str,
-    device_id: str = "TEST_DEV_001"
+    device_id: str = "TEST_DEV_001",
+    target_api: str = "pipi"
 ) -> Dict:
     """
     执行一个测试用例（多轮对话），每轮依次发送，累积 messages。
@@ -36,6 +48,7 @@ def execute_multi_round_session(
     """
     matches = _ROUND_PATTERN.findall(case_input)
 
+    api_url, api_key, extra_headers = _resolve_api(target_api)
     system_prompt = build_system_prompt(device_id=device_id)
     messages = [{"role": "system", "content": system_prompt}]
 
@@ -50,7 +63,10 @@ def execute_multi_round_session(
         messages.append({"role": "user", "content": content})
         full_history.append({"round": f"R{round_num}", "role": "user", "content": content})
 
-        result = call_pipi_stream(messages.copy(), device_id=device_id)
+        result = call_pipi_stream(
+            messages.copy(), device_id=device_id,
+            api_url=api_url, api_key=api_key, extra_headers=extra_headers
+        )
 
         if result.get("full_text"):
             messages.append({"role": "assistant", "content": result["full_text"]})
@@ -90,9 +106,10 @@ class CrossSessionTest:
         tester.export_results("cross_session.json")
     """
 
-    def __init__(self, device_id: str, persona_name: str = ""):
+    def __init__(self, device_id: str, persona_name: str = "", target_api: str = "pipi"):
         self.device_id = device_id
         self.persona_name = persona_name
+        self.target_api = target_api
         self.sessions = []
 
     def add_session(self, session_id: str, messages: List[Dict],
@@ -101,6 +118,7 @@ class CrossSessionTest:
         if timestamp is None:
             timestamp = datetime.now().isoformat()
 
+        api_url, api_key, extra_headers = _resolve_api(self.target_api)
         system_prompt = build_system_prompt(device_id=self.device_id)
         current_messages = [{"role": "system", "content": system_prompt}]
 
@@ -108,7 +126,10 @@ class CrossSessionTest:
         for msg in messages:
             current_messages.append(msg)
             if msg["role"] == "user":
-                result = call_pipi_stream(current_messages.copy(), device_id=self.device_id)
+                result = call_pipi_stream(
+                    current_messages.copy(), device_id=self.device_id,
+                    api_url=api_url, api_key=api_key, extra_headers=extra_headers
+                )
                 if result.get("full_text"):
                     current_messages.append({
                         "role": "assistant",
@@ -228,8 +249,9 @@ def batch_test_from_xlsx(
 
 # ─── 单用例测试（快速调试用）────────────────────
 
-def quick_test(messages_text: str, device_id: str = "TEST_DEV_001"):
+def quick_test(messages_text: str, device_id: str = "TEST_DEV_001", target_api: str = "pipi"):
     """快速测试单条对话。"""
+    api_url, api_key, extra_headers = _resolve_api(target_api)
     system_prompt = build_system_prompt(device_id=device_id)
 
     if messages_text.startswith("【R"):
@@ -248,10 +270,13 @@ def quick_test(messages_text: str, device_id: str = "TEST_DEV_001"):
         {"role": "user", "content": user_content}
     ]
 
-    print(f"\n>>> [请求] device={device_id}")
+    print(f"\n>>> [请求] device={device_id} target_api={target_api}")
     print(f">>> 用户: {user_content[:100]}")
 
-    result = call_pipi_stream(single_messages, device_id=device_id)
+    result = call_pipi_stream(
+        single_messages, device_id=device_id,
+        api_url=api_url, api_key=api_key, extra_headers=extra_headers
+    )
 
     print(f"<<< 皮皮: {result.get('full_text', '')}")
     print(f"<<< 耗时: {result.get('response_time_ms', 0)}ms")
@@ -266,7 +291,12 @@ if __name__ == "__main__":
         batch_test_from_xlsx(xlsx_path)
     elif len(sys.argv) > 1 and sys.argv[1] == "--quick":
         msg = sys.argv[2] if len(sys.argv) > 2 else "你好呀"
-        quick_test(msg)
+        target_api = "pipi"
+        if "--target-api" in sys.argv:
+            idx = sys.argv.index("--target-api")
+            if idx + 1 < len(sys.argv):
+                target_api = sys.argv[idx + 1]
+        quick_test(msg, target_api=target_api)
     else:
         print("=" * 50)
         print("AI陪伴玩偶测试脚本")

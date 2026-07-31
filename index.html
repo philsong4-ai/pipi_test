@@ -120,6 +120,7 @@ body{background:#f5f5f7;color:#1d1d1f}
     <a class="nav-item" data-tab="red-team" style="color:#ff3b30">红队测试</a>
     <div class="nav-divider"></div>
     <a class="nav-item" data-tab="endpoints">接口配置</a>
+    <a class="nav-item" data-tab="toy-persona">玩偶人设</a>
     <a class="nav-item" data-tab="llm">LLM 配置</a>
     <a class="nav-item" data-tab="about">关于</a>
   </nav>
@@ -563,6 +564,20 @@ body{background:#f5f5f7;color:#1d1d1f}
       <button class="btn btn-primary" onclick="showEndpointModal()">+ 新增接口</button>
     </div>
     <div id="endpoints-list">
+      <div style="color:#aeaeb2;text-align:center;padding:40px">加载中...</div>
+    </div>
+  </div>
+</div>
+
+<!-- 玩偶人设面板 -->
+<div id="panel-toy-persona" class="panel">
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h3 style="font-size:16px;margin:0">玩偶人设</h3>
+      <button class="btn btn-primary" onclick="showToyPersonaModal()">+ 新增玩偶人设</button>
+    </div>
+    <div style="font-size:12px;color:#86868b;margin-bottom:12px">1 个人设绑 1 接口 code（UNIQUE），不同玩偶 API 走不同人设</div>
+    <div id="toy-persona-list">
       <div style="color:#aeaeb2;text-align:center;padding:40px">加载中...</div>
     </div>
   </div>
@@ -2331,6 +2346,9 @@ document.querySelectorAll('.nav-item').forEach(function(btn) {
     if (btn.dataset.tab === 'endpoints') {
       loadEndpoints();
     }
+    if (btn.dataset.tab === 'toy-persona') {
+      loadToyPersonas();
+    }
     if (btn.dataset.tab === 'llm') {
       loadLlmConfig();
     }
@@ -3833,6 +3851,131 @@ function testEndpoint(id, btn) {
       btn.innerText = '失败';
       setTimeout(function() { btn.innerText = originalText; btn.style.background = '#34c759'; }, 2000);
       alert('请求失败: ' + err);
+    });
+}
+
+// ─── 玩偶人设 ───
+
+var TOY_PERSONA_JSON_FIELDS = [
+  ['personality_traits', '性格特征'],
+  ['behavior_principles', '行为原则'],
+  ['speaking_style', '说话风格'],
+  ['emotion_boundaries', '情感边界'],
+  ['forbidden_expressions', '禁止表达'],
+  ['relationship_stages', '关系阶段']
+];
+
+function loadToyPersonas() {
+  fetch('/api/toy_persona/list')
+    .then(function(r) { return r.json(); })
+    .then(function(list) {
+      var box = document.getElementById('toy-persona-list');
+      if (!list || list.length === 0) {
+        box.innerHTML = '<div style="color:#aeaeb2;text-align:center;padding:40px">暂无玩偶人设，点击右上角新增</div>';
+        return;
+      }
+      var html = '<table style="width:100%;border-collapse:collapse;font-size:13px">';
+      html += '<tr style="background:#f5f5f7"><th style="padding:10px;text-align:left">名称</th><th style="padding:10px">target_api</th><th style="padding:10px;text-align:left">身份</th><th style="padding:10px;text-align:left">核心信念</th><th style="padding:10px;width:160px">操作</th></tr>';
+      list.forEach(function(tp) {
+        html += '<tr style="border-bottom:1px solid #e8e8ed">';
+        html += '<td style="padding:10px;font-weight:500">' + (tp.name || '') + '</td>';
+        html += '<td style="padding:10px;text-align:center;font-family:monospace">' + (tp.target_api || '') + '</td>';
+        html += '<td style="padding:10px;font-size:12px;color:#666;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + (tp.identity || '') + '">' + (tp.identity || '') + '</td>';
+        html += '<td style="padding:10px;font-size:12px;color:#666;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + (tp.core_belief || '') + '">' + (tp.core_belief || '') + '</td>';
+        html += '<td style="padding:10px;text-align:center">';
+        html += '<button class="btn btn-sm btn-secondary" onclick="editToyPersona(' + tp.id + ')" style="margin-right:4px">编辑</button>';
+        html += '<button class="btn btn-sm btn-danger" onclick="deleteToyPersona(' + tp.id + ',\'' + (tp.name || '') + '\')" style="padding:4px 8px">删除</button>';
+        html += '</td>';
+        html += '</tr>';
+      });
+      html += '</table>';
+      box.innerHTML = html;
+    });
+}
+
+function showToyPersonaModal(tp) {
+  var isEdit = !!tp;
+  // 拉 endpoints 填 target_api 下拉
+  fetch('/api/endpoints').then(function(r) { return r.json(); }).then(function(eps) {
+    var opts = '<option value="pipi">pipi（默认）</option>';
+    (eps || []).forEach(function(e) {
+      opts += '<option value="' + e.code + '"' + (tp && tp.target_api === e.code ? ' selected' : '') + '>' + e.code + ' (' + e.name + ')</option>';
+    });
+    var selectedTarget = tp && tp.target_api ? tp.target_api : 'pipi';
+
+    var h = '<div style="max-width:640px">';
+    h += '<div class="form-group" style="margin-bottom:12px"><label>名称</label>';
+    h += '<input type="text" id="tp-name" value="' + (tp ? (tp.name || '') : '') + '" placeholder="如：秋秋" style="width:100%;padding:8px;border:1px solid #d2d2d7;border-radius:4px"></div>';
+    h += '<div class="form-group" style="margin-bottom:12px"><label>绑定接口 (target_api，1 人设绑 1 API)</label>';
+    h += '<select id="tp-target-api" style="width:100%;padding:8px;border:1px solid #d2d2d7;border-radius:4px">' + opts + '</select>';
+    h += '</div>';
+    h += '<div class="form-group" style="margin-bottom:12px"><label>身份 (identity)</label>';
+    h += '<textarea id="tp-identity" rows="2" placeholder="如：虚拟朋友" style="width:100%;padding:8px;border:1px solid #d2d2d7;border-radius:4px">' + (tp ? (tp.identity || '') : '') + '</textarea></div>';
+    h += '<div class="form-group" style="margin-bottom:12px"><label>核心信念 (core_belief)</label>';
+    h += '<textarea id="tp-core-belief" rows="2" style="width:100%;padding:8px;border:1px solid #d2d2d7;border-radius:4px">' + (tp ? (tp.core_belief || '') : '') + '</textarea></div>';
+    TOY_PERSONA_JSON_FIELDS.forEach(function(pair) {
+      var key = pair[0], label = pair[1];
+      var val = tp && tp[key] ? (typeof tp[key] === 'string' ? tp[key] : JSON.stringify(tp[key], null, 2)) : '';
+      h += '<div class="form-group" style="margin-bottom:12px"><label>' + label + ' (' + key + ', JSON)</label>';
+      h += '<textarea id="tp-' + key + '" rows="3" placeholder="[]" style="width:100%;padding:8px;border:1px solid #d2d2d7;border-radius:4px;font-family:monospace;font-size:12px">' + val + '</textarea></div>';
+    });
+    h += '<div style="margin-top:16px;display:flex;gap:8px">';
+    h += '<button class="btn btn-primary" onclick="saveToyPersona(' + (tp ? tp.id : 'null') + ')">' + (isEdit ? '保存' : '创建') + '</button>';
+    h += '<button class="btn btn-secondary" onclick="closeModal()">取消</button>';
+    h += '</div></div>';
+
+    document.getElementById('modal-title').textContent = isEdit ? '编辑玩偶人设' : '新增玩偶人设';
+    document.getElementById('edit-form').innerHTML = h;
+    if (tp && tp.target_api) {
+      var sel = document.getElementById('tp-target-api');
+      if (sel) sel.value = tp.target_api;
+    }
+    document.getElementById('modal-bg').style.display = 'flex';
+  });
+}
+
+function editToyPersona(id) {
+  fetch('/api/toy_persona/list').then(function(r) { return r.json(); }).then(function(list) {
+    var tp = (list || []).find(function(x) { return x.id === id; });
+    showToyPersonaModal(tp);
+  });
+}
+
+function saveToyPersona(id) {
+  var data = {
+    name: document.getElementById('tp-name').value.trim(),
+    target_api: document.getElementById('tp-target-api').value,
+    identity: document.getElementById('tp-identity').value,
+    core_belief: document.getElementById('tp-core-belief').value
+  };
+  if (!data.name) { alert('请填写名称'); return; }
+  TOY_PERSONA_JSON_FIELDS.forEach(function(pair) {
+    var key = pair[0];
+    var txt = document.getElementById('tp-' + key).value.trim();
+    if (txt) {
+      try { data[key] = JSON.parse(txt); }
+      catch(e) { alert(key + ' JSON 格式错误: ' + e.message); return; }
+    } else {
+      data[key] = null;
+    }
+  });
+  var url = id ? '/api/toy_persona/' + id : '/api/toy_persona';
+  var method = id ? 'PUT' : 'POST';
+  fetch(url, { method: method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data) })
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      if (res.error) { alert('保存失败: ' + res.error); }
+      else { closeModal(); loadToyPersonas(); }
+    });
+}
+
+function deleteToyPersona(id, name) {
+  if (!confirm('确定删除玩偶人设「' + name + '」？')) return;
+  fetch('/api/toy_persona/' + id, { method: 'DELETE' })
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+      if (res.error) { alert('删除失败: ' + res.error); }
+      else { loadToyPersonas(); }
     });
 }
 

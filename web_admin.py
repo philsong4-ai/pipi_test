@@ -167,6 +167,37 @@ def get_api_config_by_code(api_code: str):
     return None, None, {}
 
 
+def _get_toy_persona_by_target(target_api: str = "pipi"):
+    """根据 target_api 查询对应的玩偶人设。1 人设绑 1 api_endpoints.code。
+    查不到回退 LIMIT 1（兼容老数据，应通过 UNIQUE 约束避免）。
+    返回 dict 或 None。
+    """
+    if not target_api:
+        target_api = "pipi"
+    conn = get_db_connection()
+    ph = "%s" if USE_MYSQL else "?"
+    row = execute_query(conn,
+        f"SELECT * FROM toy_persona WHERE target_api = {ph} LIMIT 1",
+        (target_api,), fetch_one=True)
+    if not row:
+        # 回退：老数据无 target_api 或绑错，取任意一行（兼容）
+        row = execute_query(conn, "SELECT * FROM toy_persona LIMIT 1", fetch_one=True)
+    conn.close()
+    if not row:
+        return None
+    return row_to_dict(row) if not isinstance(row, dict) else row
+
+
+def _get_toy_persona_name(target_api: str = "pipi", default: str = "皮皮") -> str:
+    """查询玩偶人设 name 字段，用于 save_chat_msg 的 sender_name。
+    target_api 不存在时回退 default。
+    """
+    tp = _get_toy_persona_by_target(target_api)
+    if tp and tp.get("name"):
+        return tp["name"]
+    return default
+
+
 # ─── 数据库初始化 ─────────────────────────────────
 _initialized = False
 
@@ -298,6 +329,38 @@ def _ensure_tables():
                 print("[STARTUP] Upgraded test_results.eval_detail to MEDIUMTEXT", flush=True)
         except Exception as e:
             print(f"[STARTUP] Could not upgrade eval_detail column: {e}", flush=True)
+
+        # toy_persona 加 target_api 字段（多玩偶 API 接口绑定）
+        try:
+            execute_query(conn, "SELECT target_api FROM toy_persona LIMIT 1", fetch_one=True)
+        except:
+            try:
+                if USE_MYSQL:
+                    execute_query(conn, "ALTER TABLE toy_persona ADD COLUMN target_api VARCHAR(64) NOT NULL DEFAULT 'pipi'")
+                    execute_query(conn, "ALTER TABLE toy_persona ADD UNIQUE KEY uk_toy_persona_target_api (target_api)")
+                else:
+                    execute_query(conn, "ALTER TABLE toy_persona ADD COLUMN target_api VARCHAR(64) NOT NULL DEFAULT 'pipi'")
+                    execute_query(conn, "CREATE UNIQUE INDEX uk_toy_persona_target_api ON toy_persona(target_api)")
+                conn.commit()
+                print("[STARTUP] Added toy_persona.target_api column with UNIQUE KEY", flush=True)
+            except Exception as e:
+                print(f"[STARTUP] Could not add toy_persona.target_api: {e}", flush=True)
+
+        # test_results 加 target_api 字段（结果层区分用哪个玩偶 API）
+        try:
+            execute_query(conn, "SELECT target_api FROM test_results LIMIT 1", fetch_one=True)
+        except:
+            try:
+                if USE_MYSQL:
+                    execute_query(conn, "ALTER TABLE test_results ADD COLUMN target_api VARCHAR(64) DEFAULT NULL")
+                    execute_query(conn, "ALTER TABLE test_results ADD INDEX idx_target_api (target_api)")
+                else:
+                    execute_query(conn, "ALTER TABLE test_results ADD COLUMN target_api VARCHAR(64) DEFAULT NULL")
+                    execute_query(conn, "CREATE INDEX idx_test_results_target_api ON test_results(target_api)")
+                conn.commit()
+                print("[STARTUP] Added test_results.target_api column with INDEX", flush=True)
+            except Exception as e:
+                print(f"[STARTUP] Could not add test_results.target_api: {e}", flush=True)
 
         # 创建 eval_corrections 表（few-shot 纠正案例）
         try:
@@ -839,7 +902,7 @@ def test_chat():
     facts_extracted = []
 
     if reply_text:
-        reply_id = save_chat_msg(persona_id, "pipi", "秋秋", reply_text)
+        reply_id = save_chat_msg(persona_id, "pipi", _get_toy_persona_name(target_api), reply_text)
 
         # 事实提取
         if extract_facts:
@@ -1829,10 +1892,8 @@ def eval_score():
         return jsonify({"error": "user_message is required"}), 400
 
     # 获取玩偶人设
-    conn = get_db_connection()
-    toy_row = execute_query(conn, "SELECT * FROM toy_persona LIMIT 1", fetch_one=True)
-    conn.close()
-    toy_persona = row_to_dict(toy_row) if toy_row else None
+    target_api = (persona_data or {}).get("target_api") or data.get("target_api") or "pipi"
+    toy_persona = _get_toy_persona_by_target(target_api)
 
     llm_config = get_llm_config()
     with _EVAL_SEMAPHORE:
@@ -1929,7 +1990,7 @@ def simulate_chat():
         eval_result = None
 
         if reply_text:
-            reply_id = save_chat_msg(persona_id, "pipi", "秋秋", reply_text)
+            reply_id = save_chat_msg(persona_id, "pipi", _get_toy_persona_name(target_api), reply_text)
 
             # 先提取事实（同步），确保评测时有最新事实
             try:
@@ -2142,9 +2203,9 @@ def _build_eval_context(conn, persona_id, current_msg_id):
     persona = execute_query(conn, "SELECT * FROM personas WHERE id = ?", (persona_id,), fetch_one=True)
     persona_data = row_to_dict(persona) if persona else None
 
-    # 获取玩偶人设
-    toy_row = execute_query(conn, "SELECT * FROM toy_persona LIMIT 1", fetch_one=True)
-    toy_persona = row_to_dict(toy_row) if toy_row else None
+    # 获取玩偶人设（按用户绑定的 target_api 查）
+    target_api = (persona_data or {}).get("target_api") or "pipi"
+    toy_persona = _get_toy_persona_by_target(target_api)
 
     return {
         "chat_history": chat_history,
@@ -2535,7 +2596,7 @@ def call_api(persona_id, message):
     print(f"[CALL API] persona_id={persona_id} device_id={device_id} msg={message[:50]}", flush=True)
     result = pipi_api.call_pipi_stream(messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers)
     if result.get("full_text"):
-        msg_id = save_chat_msg(persona_id or "guest", "pipi", "秋秋", result["full_text"])
+        msg_id = save_chat_msg(persona_id or "guest", "pipi", _get_toy_persona_name(target_api) if persona_id and persona_id != "__guest__" else "皮皮", result["full_text"])
         result["message_id"] = msg_id
 
         # 实时评测（如果开关开启）
@@ -3987,7 +4048,7 @@ def _growth_worker(task_id):
 
                 # 3. 保存玩偶回复
                 if reply_text:
-                    save_chat_msg(persona_id, "pipi", "秋秋", reply_text)
+                    save_chat_msg(persona_id, "pipi", _get_toy_persona_name(target_api), reply_text)
 
                 # 4. 同步提取事实（准确度优先）
                 extracted_facts = []
@@ -4273,8 +4334,9 @@ def create_test_task():
     # 创建 test_results 记录（pending 状态）
     for case_id in case_ids:
         execute_query(conn,
-            "INSERT INTO test_results (task_id, case_id, status) VALUES (%s, %s, 'pending')",
-            (task_db_id, case_id))
+            "INSERT INTO test_results (task_id, case_id, status, target_api) VALUES (%s, %s, 'pending', %s)" if USE_MYSQL else
+            "INSERT INTO test_results (task_id, case_id, status, target_api) VALUES (?, ?, 'pending', ?)",
+            (task_db_id, case_id, target_api))
     conn.commit()
     conn.close()
 
@@ -5915,13 +5977,13 @@ def get_test_dimensions():
 
 @app.route("/api/toy_persona", methods=["GET"])
 def get_toy_persona():
-    """获取玩偶人设"""
-    conn = get_db_connection()
-    row = execute_query(conn, "SELECT * FROM toy_persona LIMIT 1", fetch_one=True)
-    conn.close()
-    if not row:
+    """获取玩偶人设。支持 query 参数 target_api（默认 pipi）。
+    不传 target_api 时取 LIMIT 1（兼容旧前端）。
+    """
+    target_api = request.args.get("target_api", "")
+    data = _get_toy_persona_by_target(target_api or "pipi")
+    if not data:
         return jsonify({"error": "toy_persona not found"}), 404
-    data = row_to_dict(row)
     # 解析 JSON 字段
     for key in ["behavior_principles", "personality_traits", "speaking_style", "forbidden_expressions", "emotion_boundaries", "relationship_stages"]:
         if key in data and isinstance(data[key], str):
@@ -5930,6 +5992,113 @@ def get_toy_persona():
             except:
                 pass
     return jsonify(data)
+
+
+# 玩偶人设 JSON 字段列表（用于序列化/反序列化）
+_ToyPersona = ("behavior_principles", "personality_traits", "speaking_style",
+               "forbidden_expressions", "emotion_boundaries", "relationship_stages")
+
+
+def _serialize_toy_persona(row_dict):
+    """把 toy_persona 行的 JSON 字段从字符串解析成对象。"""
+    if not row_dict:
+        return row_dict
+    for key in _ToyPersona:
+        v = row_dict.get(key)
+        if isinstance(v, str) and v:
+            try:
+                row_dict[key] = json.loads(v)
+            except:
+                pass
+    return row_dict
+
+
+@app.route("/api/toy_persona/list", methods=["GET"])
+def list_toy_persona():
+    """列出所有玩偶人设。"""
+    conn = get_db_connection()
+    rows = execute_query(conn, "SELECT * FROM toy_persona ORDER BY id", fetch_all=True)
+    conn.close()
+    return jsonify([_serialize_toy_persona(row_to_dict(r)) for r in rows])
+
+
+@app.route("/api/toy_persona", methods=["POST"])
+def create_toy_persona():
+    """创建玩偶人设。1 人设绑 1 target_api（UNIQUE）。"""
+    data = request.get_json() or {}
+    name = (data.get("name") or "").strip()
+    target_api = (data.get("target_api") or "pipi").strip()
+    if not name:
+        return jsonify({"error": "name is required"}), 400
+    if not target_api:
+        return jsonify({"error": "target_api is required"}), 400
+
+    conn = get_db_connection()
+    ph = "%s" if USE_MYSQL else "?"
+    try:
+        fields = ["name", "target_api"]
+        values = [name, target_api]
+        for key in ["identity", "core_belief"]:
+            if key in data:
+                fields.append(key)
+                values.append(data[key])
+        for key in _ToyPersona:
+            if key in data:
+                v = data[key]
+                fields.append(key)
+                values.append(json.dumps(v, ensure_ascii=False) if v else None)
+
+        placeholders = ", ".join([ph] * len(fields))
+        execute_query(conn,
+            f"INSERT INTO toy_persona ({', '.join(fields)}) VALUES ({placeholders})",
+            tuple(values))
+        conn.commit()
+        new_id = conn.cursor().lastrowid if USE_MYSQL else conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    except Exception as e:
+        conn.close()
+        return jsonify({"error": str(e)}), 400
+    conn.close()
+    return jsonify({"ok": True, "id": new_id})
+
+
+@app.route("/api/toy_persona/<int:pid>", methods=["PUT"])
+def update_toy_persona(pid):
+    """更新玩偶人设。"""
+    data = request.get_json() or {}
+    conn = get_db_connection()
+    ph = "%s" if USE_MYSQL else "?"
+    updates = []
+    params = []
+    for field in ["name", "target_api", "identity", "core_belief"]:
+        if field in data:
+            updates.append(f"{field} = {ph}")
+            params.append(data[field])
+    for key in _ToyPersona:
+        if key in data:
+            v = data[key]
+            updates.append(f"{key} = {ph}")
+            params.append(json.dumps(v, ensure_ascii=False) if v else None)
+
+    if not updates:
+        conn.close()
+        return jsonify({"error": "no fields to update"}), 400
+
+    params.append(pid)
+    execute_query(conn, f"UPDATE toy_persona SET {', '.join(updates)} WHERE id = {ph}", params)
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/toy_persona/<int:pid>", methods=["DELETE"])
+def delete_toy_persona(pid):
+    """删除玩偶人设。"""
+    conn = get_db_connection()
+    ph = "%s" if USE_MYSQL else "?"
+    execute_query(conn, f"DELETE FROM toy_persona WHERE id = {ph}", (pid,))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/test_cases", methods=["GET"])
@@ -6241,13 +6410,13 @@ def _redteam_gen_worker(task_id):
         conn = get_db_connection()
         persona_id = task.get("persona_id", "")
 
-        # 玩偶人设
-        toy_row = execute_query(conn, "SELECT * FROM toy_persona LIMIT 1", fetch_one=True)
-        toy_persona = row_to_dict(toy_row) if toy_row else {}
-
         # 用户角色
         persona_row = execute_query(conn, "SELECT * FROM personas WHERE id = ?", (persona_id,), fetch_one=True)
         persona = row_to_dict(persona_row) if persona_row else {}
+
+        # 玩偶人设（按用户绑定的 target_api 查）
+        target_api = persona.get("target_api") or task.get("target_api") or "pipi"
+        toy_persona = _get_toy_persona_by_target(target_api)
 
         # 用户事实
         facts_rows = execute_query(conn,
@@ -6333,6 +6502,16 @@ def _redteam_exec_worker(task_id):
         persona_id = task.get("persona_id", "")
         device_id = task.get("device_id", persona_id)
 
+        # 取用户绑定的 target_api（红队也走多玩偶）
+        target_api = task.get("target_api") or "pipi"
+        if not task.get("target_api"):
+            prow = execute_query(conn,
+                "SELECT target_api FROM personas WHERE id = ?",
+                (persona_id,), fetch_one=True)
+            if prow:
+                target_api = row_to_dict(prow).get("target_api") or "pipi"
+            task["target_api"] = target_api
+
         # 加载该用户所有红队用例
         cases = execute_query(conn,
             "SELECT id, case_id, dimension_code FROM test_cases "
@@ -6351,21 +6530,21 @@ def _redteam_exec_worker(task_id):
         # 创建 test_task（task_id 是业务 varchar 主键，id 是自增 int）
         rt_task_id_str = f"rt_{task_id}"
         cursor = execute_query(conn,
-            "INSERT INTO test_tasks (task_id, persona_id, device_id, name, status, progress_total, progress_done, created_at) "
-            "VALUES (?, ?, ?, ?, 'pending', ?, 0, NOW())" if not USE_MYSQL else
-            "INSERT INTO test_tasks (task_id, persona_id, device_id, name, status, progress_total, progress_done, created_at) "
-            "VALUES (%s, %s, %s, %s, 'pending', %s, 0, NOW())",
-            (rt_task_id_str, persona_id, device_id, f"红队执行 {task_id}", len(cases)))
+            "INSERT INTO test_tasks (task_id, persona_id, device_id, name, status, progress_total, progress_done, target_api, created_at) "
+            "VALUES (?, ?, ?, ?, 'pending', ?, 0, ?, NOW())" if not USE_MYSQL else
+            "INSERT INTO test_tasks (task_id, persona_id, device_id, name, status, progress_total, progress_done, target_api, created_at) "
+            "VALUES (%s, %s, %s, %s, 'pending', %s, 0, %s, NOW())",
+            (rt_task_id_str, persona_id, device_id, f"红队执行 {task_id}", len(cases), target_api))
         conn.commit()
         test_task_id = get_lastrowid(cursor)
 
         # 创建 test_results 行（pending 状态，等待 _execute_task_worker 执行）
-        # test_results.task_id 是 int 外键 → test_tasks.id
+        # test_results.task_id 是 int 外键 → test_tasks.id，记录 target_api 以便结果层区分
         for c in cases:
             execute_query(conn,
-                "INSERT INTO test_results (task_id, case_id, status, created_at) VALUES (?, ?, 'pending', NOW())" if not USE_MYSQL else
-                "INSERT INTO test_results (task_id, case_id, status, created_at) VALUES (%s, %s, 'pending', NOW())",
-                (test_task_id, c["id"]))
+                "INSERT INTO test_results (task_id, case_id, status, target_api, created_at) VALUES (?, ?, 'pending', ?, NOW())" if not USE_MYSQL else
+                "INSERT INTO test_results (task_id, case_id, status, target_api, created_at) VALUES (%s, %s, 'pending', %s, NOW())",
+                (test_task_id, c["id"], target_api))
         conn.commit()
 
         task["test_task_id"] = test_task_id
@@ -7151,13 +7330,13 @@ def _generate_cases_worker(task_id):
 
         task["progress"]["total"] = len(dims)
 
-        # 获取玩偶人设
-        toy_row = execute_query(conn, "SELECT * FROM toy_persona LIMIT 1", fetch_one=True)
-        toy_persona = row_to_dict(toy_row) if toy_row else {}
-
         # 获取用户角色
         persona_row = execute_query(conn, "SELECT * FROM personas WHERE id = ?", (task["persona_id"],), fetch_one=True)
         persona = row_to_dict(persona_row) if persona_row else {}
+
+        # 获取玩偶人设（按用户绑定的 target_api 查）
+        target_api = persona.get("target_api") or task.get("target_api") or "pipi"
+        toy_persona = _get_toy_persona_by_target(target_api)
 
         # 获取用户已知事实
         facts_rows = execute_query(conn,
@@ -8433,9 +8612,9 @@ def _run_scheduled_task(task):
                 # 创建 test_results 记录
                 for case_id in case_ids:
                     execute_query(conn,
-                        "INSERT INTO test_results (task_id, case_id, status) VALUES (%s, %s, 'pending')" if USE_MYSQL else
-                        "INSERT INTO test_results (task_id, case_id, status) VALUES (?, ?, 'pending')",
-                        (test_task_id, case_id))
+                        "INSERT INTO test_results (task_id, case_id, status, target_api) VALUES (%s, %s, 'pending', %s)" if USE_MYSQL else
+                        "INSERT INTO test_results (task_id, case_id, status, target_api) VALUES (?, ?, 'pending', ?)",
+                        (test_task_id, case_id, target_api))
                 conn.commit()
                 conn.close()
 
@@ -9206,6 +9385,7 @@ def async_review_cases(case_ids, auto_regenerate=True, regen_depth=0):
                 # 获取用户事实
                 persona_id = case.get("persona_id") or case.get("device_id")
                 user_facts = []
+                persona_target_api = "pipi"
                 if persona_id:
                     fact_rows = execute_query(conn,
                         "SELECT category, fact_key, fact_value FROM user_facts WHERE persona_id = %s AND is_active = 1 ORDER BY id DESC" if USE_MYSQL else
@@ -9213,10 +9393,16 @@ def async_review_cases(case_ids, auto_regenerate=True, regen_depth=0):
                         (persona_id,), fetch_all=True)
                     if fact_rows:
                         user_facts = [row_to_dict(r) for r in fact_rows]
+                    # 取 persona 的 target_api 以查对应玩偶人设
+                    prow = execute_query(conn,
+                        "SELECT target_api FROM personas WHERE id = %s" if USE_MYSQL else
+                        "SELECT target_api FROM personas WHERE id = ?",
+                        (persona_id,), fetch_one=True)
+                    if prow:
+                        persona_target_api = row_to_dict(prow).get("target_api") or "pipi"
 
-                # 获取玩偶人设
-                toy_row = execute_query(conn, "SELECT * FROM toy_persona LIMIT 1", fetch_one=True)
-                toy_persona = row_to_dict(toy_row) if toy_row else None
+                # 获取玩偶人设（按用户绑定的 target_api 查）
+                toy_persona = _get_toy_persona_by_target(persona_target_api)
 
                 # 审核前置 pending：让 _wait_for_quality_review 能区分"已开始审核"vs"草稿未触达"
                 # Why: 否则审核线程刚启动还未逐条处理时，draft>0 会让轮询误判"生成未触发审核"
@@ -9326,14 +9512,6 @@ def _auto_regenerate_failed_cases(reviewed_cases, regen_depth=0):
         if fact_rows:
             user_facts = [row_to_dict(r) for r in fact_rows]
 
-        # 获取玩偶人设（从 toy_persona 表）
-        toy_persona = None
-        toy_row = execute_query(conn,
-            "SELECT * FROM toy_persona LIMIT 1",  # 当前只有一个玩偶
-            fetch_one=True)
-        if toy_row:
-            toy_persona = row_to_dict(toy_row)
-
         # 获取用户角色信息（从 personas 表）
         persona = None
         persona_row = execute_query(conn,
@@ -9341,6 +9519,10 @@ def _auto_regenerate_failed_cases(reviewed_cases, regen_depth=0):
             (persona_id,), fetch_one=True)
         if persona_row:
             persona = row_to_dict(persona_row)
+
+        # 获取玩偶人设（按用户绑定的 target_api 查）
+        target_api = (persona or {}).get("target_api") or "pipi"
+        toy_persona = _get_toy_persona_by_target(target_api)
 
         conn.close()
 

@@ -13,13 +13,16 @@ from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Optional, Any
 
 # ─── 配置 ─────────────────────────────────────────
-API_URL = "https://<DOLL_API_DOMAIN>/toy/v1/chat/completions"
-API_KEY = os.environ.get("PIPIDE_API_KEY", "test-key")
+# 多玩偶 API 接口改造：URL/Key 不再硬编码兜底，优先走 api_endpoints 表（web 端调用必传 api_url/api_key）
+# 这里保留 env 兜底仅用于 CLI 脚本（test_pipi_batch.py），web 端未传参时若 env 未设则抛错
+API_URL = os.environ.get("PIPIDE_API_URL", "")
+API_KEY = os.environ.get("PIPIDE_API_KEY", "")
 
 HEADERS = {
     "Content-Type": "application/json",
-    "Authorization": f"Bearer {API_KEY}"
 }
+if API_KEY:
+    HEADERS["Authorization"] = f"Bearer {API_KEY}"
 
 # ─── LLM 配置（LiteLLM 代理）─────────────
 EXTRACT_LLM_URL = os.environ.get("EXTRACT_LLM_URL", "https://<LLM_PROXY_DOMAIN>/v1/chat/completions")
@@ -125,17 +128,22 @@ def call_pipi_stream(
         "stream": True
     }
 
+    # URL 解析：优先传参 → env 兜底 → 抛错（强制走 api_endpoints）
     url = api_url or API_URL
+    if not url:
+        raise ValueError("api_url required: target_api 未在 api_endpoints 配置，且 PIPIDE_API_URL 环境变量未设")
+    # Key 解析：优先传参 → env 兜底（CLI 脚本）
+    effective_key = api_key or API_KEY
+
     start_time = time.time()
     first_token_time = None  # TTFB
     full_text = ""
     sse_buffer = ""
 
     # 构建请求头，支持自定义 api_key 和额外请求头
-    req_headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}" if api_key else HEADERS["Authorization"]
-    }
+    req_headers = {"Content-Type": "application/json"}
+    if effective_key:
+        req_headers["Authorization"] = f"Bearer {effective_key}"
     if extra_headers:
         req_headers.update(extra_headers)
 
