@@ -690,19 +690,22 @@ def auth_callback():
 
 @app.route("/api/auth/logout", methods=["POST", "GET"])
 def auth_logout():
-    """清 session cookie，返回静态登出页（SSO IdP 无 end_session，需用户主动点击重新登录）。"""
-    html = """<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="UTF-8"><title>已登出</title>
-<style>body{font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f5f7;color:#1d1d1f}
-.card{text-align:center;padding:40px;background:#fff;border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,0.08)}
-button{margin-top:20px;padding:8px 24px;background:#007aff;color:#fff;border:none;border-radius:6px;font-size:14px;cursor:pointer}
-button:hover{background:#0066d6}
-</style></head>
-<body><div class="card"><h2>已登出</h2><p>您已退出登录</p>
-<button onclick="window.location.href='/api/auth/login'">重新登录</button>
-</div></body></html>"""
-    resp = make_response(html)
+    """清 session cookie 后跳 SSO 授权页（带 prompt=login 强制重新认证）。"""
+    import secrets
+    from urllib.parse import urlencode
+    state = secrets.token_urlsafe(16)
+    params = {
+        "client_id": SSO_CLIENT_ID,
+        "redirect_uri": SSO_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "openid profile email",
+        "state": state,
+        "prompt": "login",
+    }
+    login_url = f"{SSO_AUTHORIZE_URL}?{urlencode(params)}"
+    resp = redirect(login_url)
     resp.delete_cookie("pipi_session", path="/", secure=True, samesite="Lax")
+    resp.set_cookie("pipi_oauth_state", state, max_age=120, httponly=True, secure=True, samesite="Lax")
     return resp
 
 
