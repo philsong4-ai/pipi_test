@@ -362,6 +362,40 @@ def _ensure_tables():
             except Exception as e:
                 print(f"[STARTUP] Could not add test_results.target_api: {e}", flush=True)
 
+        # 创建 sso_users 表（OIDC 登录用户，首次登录自动建行）
+        try:
+            execute_query(conn, "SELECT 1 FROM sso_users LIMIT 1", fetch_one=True)
+        except:
+            try:
+                if USE_MYSQL:
+                    execute_query(conn, """
+                        CREATE TABLE IF NOT EXISTS sso_users (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            sso_sub VARCHAR(128) NOT NULL UNIQUE COMMENT 'OIDC sub 唯一ID',
+                            email VARCHAR(255),
+                            name VARCHAR(255),
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            last_login_at TIMESTAMP NULL DEFAULT NULL,
+                            INDEX idx_sso_users_email (email)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """)
+                else:
+                    execute_query(conn, """
+                        CREATE TABLE IF NOT EXISTS sso_users (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            sso_sub VARCHAR(128) NOT NULL UNIQUE,
+                            email VARCHAR(255),
+                            name VARCHAR(255),
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            last_login_at TIMESTAMP NULL DEFAULT NULL
+                        )
+                    """)
+                conn.commit()
+                print("[STARTUP] Created sso_users table", flush=True)
+            except Exception as e:
+                print(f"[STARTUP] Could not create sso_users: {e}", flush=True)
+
+
         # 创建 eval_corrections 表（few-shot 纠正案例）
         try:
             execute_query(conn, "SELECT 1 FROM eval_corrections LIMIT 1", fetch_one=True)
@@ -493,14 +527,188 @@ def _ensure_tables():
 
 # ─── 路由 ─────────────────────────────────────────
 
+# ─── SSO / OIDC 配置 ─────────────────────────────
+SSO_CLIENT_ID = os.environ.get("SSO_CLIENT_ID", "pipi-test")
+SSO_CLIENT_SECRET = os.environ.get("SSO_CLIENT_SECRET", "")
+SSO_ISSUER = os.environ.get("SSO_ISSUER", "https://<SSO_DOMAIN>")
+SSO_AUTHORIZE_URL = os.environ.get("SSO_AUTHORIZE_URL", f"{SSO_ISSUER}/oidc/authorize")
+SSO_TOKEN_URL = os.environ.get("SSO_TOKEN_URL", f"{SSO_ISSUER}/oidc/token")
+SSO_USERINFO_URL = os.environ.get("SSO_USERINFO_URL", f"{SSO_ISSUER}/oidc/userinfo")
+SSO_REDIRECT_URI = os.environ.get("SSO_REDIRECT_URI", "https://<APP_DOMAIN>/api/auth/callback")
+SESSION_SECRET = os.environ.get("SESSION_SECRET", "pipi-test-default-session-secret-change-me")
+CLI_TOKEN = os.environ.get("CLI_TOKEN", "")  # CLI 脚本 bypass token；为空则禁用 CLI 旁路
+
+# 允许未登录访问的路径前缀（白名单）
+_PUBLIC_API_PREFIXES = ("/api/auth/",)
+
+
+def _sign_session(payload):
+    """用 itsdangerous 签发 session token（含 user_id + sso_sub + 过期时间）。"""
+    from itsdangerous import URLSafeTimedSerializer
+    s = URLSafeTimedSerializer(SESSION_SECRET, salt="pipi-session")
+    return s.dumps(payload)
+
+
+def _verify_session(token):
+    """校验 session token，返回 payload 或 None。"""
+    if not token:
+        return None
+    from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+    s = URLSafeTimedSerializer(SESSION_SECRET, salt="pipi-session")
+    try:
+        return s.loads(token, max_age=86400)  # 24h 过期
+    except (BadSignature, SignatureExpired):
+        return None
+
+
+def _get_current_user():
+    """从 cookie 取当前登录用户。返回 dict 或 None。"""
+    token = request.cookies.get("pipi_session")
+    payload = _verify_session(token)
+    if not payload:
+        return None
+    # payload: {user_id, sso_sub, name, email}
+    return payload
+
+
+def _require_login():
+    """校验登录态。未登录返回 None（已登录返回 user payload）。
+    CLI bypass：若请求带 X-CLI-Token header 且等于 CLI_TOKEN，绕过校验。
+    """
+    user = _get_current_user()
+    if user:
+        return user
+    if CLI_TOKEN and request.headers.get("X-CLI-Token") == CLI_TOKEN:
+        return {"user_id": 0, "sso_sub": "cli", "name": "CLI", "email": None}
+    return None
+
+
 @app.before_request
 def before_request():
     _ensure_tables()
+    # 静态根路径 / 和非 /api 路径放行（让前端 HTML 加载，登录后由前端发 fetch）
+    if request.path == "/" or not request.path.startswith("/api/"):
+        return
+    # 白名单放行
+    if request.path.startswith(_PUBLIC_API_PREFIXES):
+        return
+    # 未登录拦截
+    user = _require_login()
+    if not user:
+        return jsonify({"error": "unauthorized", "login_url": "/api/auth/login"}), 401
+
+
+# ─── OIDC 路由 ───────────────────────────────────
+
+@app.route("/api/auth/login")
+def auth_login():
+    """跳转 SSO 授权页。state 防 CSRF。"""
+    import secrets
+    state = secrets.token_urlsafe(16)
+    params = {
+        "client_id": SSO_CLIENT_ID,
+        "redirect_uri": SSO_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "openid profile email",
+        "state": state,
+    }
+    # state 存 cookie，callback 时校验（短时，2 分钟）
+    from urllib.parse import urlencode
+    login_url = f"{SSO_AUTHORIZE_URL}?{urlencode(params)}"
+    resp = app.make_response(app.redirect(login_url))
+    resp.set_cookie("pipi_oauth_state", state, max_age=120, httponly=True, secure=True, samesite="Lax")
+    return resp
+
+
+@app.route("/api/auth/callback")
+def auth_callback():
+    """SSO 回调：换 token、查 userinfo、签发本地 session、跳回首页。"""
+    from urllib.parse import urlencode
+    import requests as req
+
+    code = request.args.get("code")
+    state = request.args.get("state")
+    cookie_state = request.cookies.get("pipi_oauth_state")
+
+    if not code:
+        return jsonify({"error": "missing code"}), 400
+    if not state or state != cookie_state:
+        return jsonify({"error": "invalid state"}), 400
+
+    # 换 token
+    try:
+        token_resp = req.post(SSO_TOKEN_URL, data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": SSO_REDIRECT_URI,
+            "client_id": SSO_CLIENT_ID,
+            "client_secret": SSO_CLIENT_SECRET,
+        }, timeout=15)
+        token_data = token_resp.json()
+    except Exception as e:
+        return jsonify({"error": f"token exchange failed: {e}"}), 500
+
+    access_token = token_data.get("access_token")
+    if not access_token:
+        return jsonify({"error": "no access_token", "detail": token_data}), 500
+
+    # 取 userinfo
+    try:
+        ui_resp = req.get(SSO_USERINFO_URL, headers={
+            "Authorization": f"Bearer {access_token}",
+        }, timeout=15)
+        userinfo = ui_resp.json()
+    except Exception as e:
+        return jsonify({"error": f"userinfo failed: {e}"}), 500
+
+    sso_sub = userinfo.get("sub") or userinfo.get("user_id") or ""
+    if not sso_sub:
+        return jsonify({"error": "no sub in userinfo"}), 500
+    email = userinfo.get("email") or ""
+    name = userinfo.get("name") or userinfo.get("preferred_username") or email or sso_sub
+
+    # 写库：首次登录创建，否则更新 last_login_at
+    conn = get_db_connection()
+    ph = "%s" if USE_MYSQL else "?"
+    row = execute_query(conn, f"SELECT id FROM sso_users WHERE sso_sub = {ph}", (sso_sub,), fetch_one=True)
+    if row:
+        uid = row["id"] if isinstance(row, dict) else row[0]
+        execute_query(conn, f"UPDATE sso_users SET email = {ph}, name = {ph}, last_login_at = NOW() WHERE id = {ph}" if USE_MYSQL else f"UPDATE sso_users SET email = ?, name = ?, last_login_at = CURRENT_TIMESTAMP WHERE id = ?", (email, name, uid))
+    else:
+        cur = execute_query(conn, f"INSERT INTO sso_users (sso_sub, email, name, last_login_at) VALUES ({ph}, {ph}, {ph}, {'NOW()' if USE_MYSQL else 'CURRENT_TIMESTAMP'})", (sso_sub, email, name))
+        uid = get_lastrowid(cur)
+    conn.commit()
+    conn.close()
+
+    # 签发 session cookie
+    session_token = _sign_session({"user_id": uid, "sso_sub": sso_sub, "name": name, "email": email})
+    resp = app.make_response(app.redirect("/"))
+    resp.set_cookie("pipi_session", session_token, max_age=86400, httponly=True, secure=True, samesite="Lax")
+    resp.delete_cookie("pipi_oauth_state")
+    return resp
+
+
+@app.route("/api/auth/logout", methods=["POST"])
+def auth_logout():
+    """清 session cookie。"""
+    resp = jsonify({"ok": True})
+    resp.delete_cookie("pipi_session")
+    return resp
+
+
+@app.route("/api/auth/me")
+def auth_me():
+    """返回当前登录用户信息。"""
+    user = _get_current_user()
+    if not user:
+        return jsonify({"logged_in": False})
+    return jsonify({"logged_in": True, "user": user})
 
 
 @app.route("/")
 def index():
     return send_file(HTML_PATH)
+
 
 
 @app.route("/api/personas", methods=["GET"])
@@ -4501,9 +4709,13 @@ def _execute_task_worker(task_id):
                 has_error = False
                 for i, msg in enumerate(rounds):
                     import requests as req
+                    headers = {}
+                    if CLI_TOKEN:
+                        headers["X-CLI-Token"] = CLI_TOKEN
                     resp = req.post(
                         "http://127.0.0.1:8080/api/test/chat",
                         json={"persona_id": persona_id, "device_id": device_id, "message": msg, "extract_facts": True, "target_api": target_api},
+                        headers=headers,
                         timeout=120
                     )
                     r = resp.json()
