@@ -690,8 +690,20 @@ def auth_callback():
 
 @app.route("/api/auth/logout", methods=["POST", "GET"])
 def auth_logout():
-    """清本地 session cookie 后跳 SSO /oidc/logout，清掉 IdP 会话再回到首页。"""
-    resp = redirect(f"{SSO_ISSUER}/oidc/logout")
+    """清本地 session cookie，返回静态登出页。"""
+    html = """<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><title>已登出</title>
+<style>body{font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f5f7;color:#1d1d1f}
+.card{text-align:center;padding:40px;background:#fff;border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,0.08)}
+button{margin-top:20px;padding:8px 24px;background:#007aff;color:#fff;border:none;border-radius:6px;font-size:14px;cursor:pointer}
+button:hover{background:#0066d6}
+.hint{margin-top:16px;font-size:12px;color:#86868b}
+</style></head>
+<body><div class="card"><h2>已登出</h2><p>您已退出登录</p>
+<button onclick="window.location.href='/api/auth/login'">重新登录</button>
+<p class="hint">如需彻底登出 SSO，请前往 SSO 站点手动登出</p>
+</div></body></html>"""
+    resp = make_response(html)
     resp.delete_cookie("pipi_session", path="/", secure=True, samesite="Lax")
     return resp
 
