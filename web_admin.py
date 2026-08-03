@@ -690,17 +690,8 @@ def auth_callback():
 
 @app.route("/api/auth/logout", methods=["POST", "GET"])
 def auth_logout():
-    """清 session cookie，返回静态登出页避免首页加载触发 401→自动登录循环。"""
-    html = """<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="UTF-8"><title>已登出</title>
-<style>body{font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f5f7;color:#1d1d1f}
-.card{text-align:center;padding:40px;background:#fff;border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,0.08)}
-button{margin-top:20px;padding:8px 20px;background:#007aff;color:#fff;border:none;border-radius:6px;font-size:14px;cursor:pointer}
-</style></head>
-<body><div class="card"><h2>已登出</h2><p>您已退出登录</p>
-<button onclick="window.location.href='/api/auth/login'">重新登录</button>
-</div></body></html>"""
-    resp = make_response(html)
+    """清 session cookie 后直接跳 SSO 登录入口。"""
+    resp = redirect("/api/auth/login")
     resp.delete_cookie("pipi_session", path="/", secure=True, samesite="Lax")
     return resp
 
