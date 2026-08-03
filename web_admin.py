@@ -23,7 +23,7 @@ def _tsprint(*args, **kwargs):
 
 builtins.print = _tsprint
 
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, redirect, make_response
 from flask_compress import Compress
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
@@ -615,7 +615,7 @@ def auth_login():
     # state 存 cookie，callback 时校验（短时，2 分钟）
     from urllib.parse import urlencode
     login_url = f"{SSO_AUTHORIZE_URL}?{urlencode(params)}"
-    resp = app.make_response(app.redirect(login_url))
+    resp = make_response(redirect(login_url))
     resp.set_cookie("pipi_oauth_state", state, max_age=120, httponly=True, secure=True, samesite="Lax")
     return resp
 
@@ -682,7 +682,7 @@ def auth_callback():
 
     # 签发 session cookie
     session_token = _sign_session({"user_id": uid, "sso_sub": sso_sub, "name": name, "email": email})
-    resp = app.make_response(app.redirect("/"))
+    resp = make_response(redirect("/"))
     resp.set_cookie("pipi_session", session_token, max_age=86400, httponly=True, secure=True, samesite="Lax")
     resp.delete_cookie("pipi_oauth_state")
     return resp
