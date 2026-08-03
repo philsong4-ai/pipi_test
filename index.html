@@ -869,9 +869,8 @@ function refreshAuthArea() {
 }
 
 function doLogout() {
-  fetch('/api/auth/logout', { method: 'POST' }).then(function() {
-    window.location.href = '/';
-  });
+  // 直接跳 GET /api/auth/logout，后端删 cookie + 返回静态登出页（避免首页加载触发 401→自动登录循环）
+  window.location.href = '/api/auth/logout';
 }
 
 refreshAuthArea();
