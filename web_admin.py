@@ -690,22 +690,9 @@ def auth_callback():
 
 @app.route("/api/auth/logout", methods=["POST", "GET"])
 def auth_logout():
-    """清 session cookie 后跳 SSO 授权页（带 prompt=login 强制重新认证）。"""
-    import secrets
-    from urllib.parse import urlencode
-    state = secrets.token_urlsafe(16)
-    params = {
-        "client_id": SSO_CLIENT_ID,
-        "redirect_uri": SSO_REDIRECT_URI,
-        "response_type": "code",
-        "scope": "openid profile email",
-        "state": state,
-        "prompt": "login",
-    }
-    login_url = f"{SSO_AUTHORIZE_URL}?{urlencode(params)}"
-    resp = redirect(login_url)
+    """清本地 session cookie 后跳 SSO /oidc/logout，清掉 IdP 会话再回到首页。"""
+    resp = redirect(f"{SSO_ISSUER}/oidc/logout")
     resp.delete_cookie("pipi_session", path="/", secure=True, samesite="Lax")
-    resp.set_cookie("pipi_oauth_state", state, max_age=120, httponly=True, secure=True, samesite="Lax")
     return resp
 
 
