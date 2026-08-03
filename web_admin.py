@@ -683,8 +683,8 @@ def auth_callback():
     # 签发 session cookie
     session_token = _sign_session({"user_id": uid, "sso_sub": sso_sub, "name": name, "email": email})
     resp = make_response(redirect("/"))
-    resp.set_cookie("pipi_session", session_token, max_age=86400, httponly=True, secure=True, samesite="Lax")
-    resp.delete_cookie("pipi_oauth_state")
+    resp.set_cookie("pipi_session", session_token, max_age=86400, httponly=True, secure=True, samesite="Lax", path="/")
+    resp.delete_cookie("pipi_oauth_state", path="/")
     return resp
 
 
@@ -692,7 +692,7 @@ def auth_callback():
 def auth_logout():
     """清 session cookie。"""
     resp = jsonify({"ok": True})
-    resp.delete_cookie("pipi_session")
+    resp.delete_cookie("pipi_session", path="/", secure=True, samesite="Lax")
     return resp
 
 
