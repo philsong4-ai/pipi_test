@@ -4592,6 +4592,7 @@ function loadTestTasks() {
     .then(r => r.json())
     .then(tasks => {
       var list = document.getElementById('test-task-list');
+      if (!list) return;
       if (!tasks || tasks.length === 0) {
         list.innerHTML = '<div style="color:#aeaeb2;font-size:13px;padding:20px;text-align:center">暂无测试任务</div>';
         return;
