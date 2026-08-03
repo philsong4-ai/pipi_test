@@ -3906,7 +3906,7 @@ function showToyPersonaModal(tp) {
   var isEdit = !!tp;
   // 拉 endpoints 填 target_api 下拉
   fetch('/api/endpoints').then(function(r) { return r.json(); }).then(function(eps) {
-    var opts = '<option value="pipi">pipi（默认）</option>';
+    var opts = '';
     (eps || []).forEach(function(e) {
       opts += '<option value="' + e.code + '"' + (tp && tp.target_api === e.code ? ' selected' : '') + '>' + e.code + ' (' + e.name + ')</option>';
     });
