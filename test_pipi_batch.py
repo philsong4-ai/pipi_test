@@ -26,14 +26,14 @@ _ROUND_PATTERN = re.compile(r"【R(\d+)】(.*?)(?=\n【R\d+】|$)", re.DOTALL)
 
 
 def _resolve_api(target_api: str = "pipi"):
-    """从 web_admin 的 api_endpoints 表查询 url/key/headers，CLI 脚本兜底走 env。"""
-    api_url, api_key, extra_headers = None, None, None
+    """从 web_admin 的 api_endpoints 表查询 url/key/headers/protocol，CLI 脚本兜底走 env。"""
+    api_url, api_key, extra_headers, protocol = None, None, None, "openai"
     try:
         from web_admin import get_api_config_by_code
-        api_url, api_key, extra_headers = get_api_config_by_code(target_api)
+        api_url, api_key, extra_headers, protocol = get_api_config_by_code(target_api)
     except Exception as e:
         print(f"[WARN] 无法从 api_endpoints 查到 target_api={target_api}: {e}（走 env 兜底）")
-    return api_url, api_key, extra_headers
+    return api_url, api_key, extra_headers, protocol
 
 
 def execute_multi_round_session(
@@ -48,7 +48,7 @@ def execute_multi_round_session(
     """
     matches = _ROUND_PATTERN.findall(case_input)
 
-    api_url, api_key, extra_headers = _resolve_api(target_api)
+    api_url, api_key, extra_headers, protocol = _resolve_api(target_api)
     system_prompt = build_system_prompt(device_id=device_id)
     messages = [{"role": "system", "content": system_prompt}]
 
@@ -65,7 +65,7 @@ def execute_multi_round_session(
 
         result = call_pipi_stream(
             messages.copy(), device_id=device_id,
-            api_url=api_url, api_key=api_key, extra_headers=extra_headers
+            api_url=api_url, api_key=api_key, extra_headers=extra_headers, protocol=protocol
         )
 
         if result.get("full_text"):
@@ -128,7 +128,7 @@ class CrossSessionTest:
             if msg["role"] == "user":
                 result = call_pipi_stream(
                     current_messages.copy(), device_id=self.device_id,
-                    api_url=api_url, api_key=api_key, extra_headers=extra_headers
+                    api_url=api_url, api_key=api_key, extra_headers=extra_headers, protocol=protocol
                 )
                 if result.get("full_text"):
                     current_messages.append({
@@ -251,7 +251,7 @@ def batch_test_from_xlsx(
 
 def quick_test(messages_text: str, device_id: str = "TEST_DEV_001", target_api: str = "pipi"):
     """快速测试单条对话。"""
-    api_url, api_key, extra_headers = _resolve_api(target_api)
+    api_url, api_key, extra_headers, protocol = _resolve_api(target_api)
     system_prompt = build_system_prompt(device_id=device_id)
 
     if messages_text.startswith("【R"):
@@ -275,7 +275,7 @@ def quick_test(messages_text: str, device_id: str = "TEST_DEV_001", target_api: 
 
     result = call_pipi_stream(
         single_messages, device_id=device_id,
-        api_url=api_url, api_key=api_key, extra_headers=extra_headers
+        api_url=api_url, api_key=api_key, extra_headers=extra_headers, protocol=protocol
     )
 
     print(f"<<< 皮皮: {result.get('full_text', '')}")

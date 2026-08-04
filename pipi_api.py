@@ -91,10 +91,13 @@ def call_pipi_stream(
     timeout: int = 30,
     api_url: str = None,
     api_key: str = None,
-    extra_headers: dict = None
+    extra_headers: dict = None,
+    protocol: str = "openai",
+    user_id: str = None,
 ) -> Dict:
     """
     调用皮皮流式 API，返回完整响应。
+    protocol: 'openai' (默认) — 走 OpenAI SSE 流；'oho' — 走 OHO 三步封装。
 
     返回:
         {
@@ -103,6 +106,28 @@ def call_pipi_stream(
             "error": 错误信息(如有)
         }
     """
+    # OHO 协议分发：单轮一次性创建会话+流+结束
+    if protocol and protocol.lower() == "oho":
+        uid = user_id or device_id or "test_user"
+        # 从 extra_headers 取 X-User-Id 兜底
+        if not user_id and extra_headers and extra_headers.get("X-User-Id"):
+            uid = extra_headers["X-User-Id"]
+        result = call_oho_chat(
+            messages,
+            user_id=uid,
+            base_url=api_url,
+            duration_seconds=0,
+            timeout=timeout,
+            extra_headers=extra_headers,
+        )
+        # 字段对齐 call_pipi_stream 返回结构
+        return {
+            "full_text": result.get("full_text", ""),
+            "response_time_ms": result.get("response_time_ms", -1),
+            "ttfb_ms": result.get("ttfb_ms"),
+            "record_id": result.get("record_id"),
+            "error": result.get("error"),
+        }
     # 确保 system message 中有 device_id
     has_device_id = False
     for msg in messages:

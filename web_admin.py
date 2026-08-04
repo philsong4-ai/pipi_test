@@ -139,20 +139,22 @@ def get_api_url_by_code(api_code: str) -> str:
 
 
 def get_api_config_by_code(api_code: str):
-    """根据接口代码获取 API URL、API Key 和自定义请求头，返回 (url, key, headers)
+    """根据接口代码获取 API URL、API Key、自定义请求头和协议，返回 (url, key, headers, protocol)
     auth_config JSON 格式: {"api_key": "xxx", "headers": {"X-Custom": "val"}}
+    protocol: 'openai' (默认) / 'oho'
     """
     if not api_code:
-        return None, None, {}
+        return None, None, {}, "openai"
     conn = get_db_connection()
     row = execute_query(conn,
-        "SELECT base_url, auth_config FROM api_endpoints WHERE code = %s AND is_active = 1" if USE_MYSQL else
-        "SELECT base_url, auth_config FROM api_endpoints WHERE code = ? AND is_active = 1",
+        "SELECT base_url, auth_config, protocol FROM api_endpoints WHERE code = %s AND is_active = 1" if USE_MYSQL else
+        "SELECT base_url, auth_config, protocol FROM api_endpoints WHERE code = ? AND is_active = 1",
         (api_code,), fetch_one=True)
     conn.close()
     if row:
         row = row_to_dict(row) if not isinstance(row, dict) else row
         base_url = row.get("base_url")
+        protocol = (row.get("protocol") or "openai").lower()
         auth_config = row.get("auth_config")
         api_key = None
         headers = {}
@@ -163,8 +165,8 @@ def get_api_config_by_code(api_code: str):
                 headers = config.get("headers", {})
             except:
                 pass
-        return base_url, api_key, headers
-    return None, None, {}
+        return base_url, api_key, headers, protocol
+    return None, None, {}, "openai"
 
 
 def _get_toy_persona_by_target(target_api: str = "pipi"):
@@ -362,7 +364,21 @@ def _ensure_tables():
             except Exception as e:
                 print(f"[STARTUP] Could not add test_results.target_api: {e}", flush=True)
 
-        # 创建 sso_users 表（OIDC 登录用户，首次登录自动建行）
+        # api_endpoints 加 protocol 字段（区分接口协议：openai/oho）
+        try:
+            execute_query(conn, "SELECT protocol FROM api_endpoints LIMIT 1", fetch_one=True)
+        except:
+            try:
+                if USE_MYSQL:
+                    execute_query(conn, "ALTER TABLE api_endpoints ADD COLUMN protocol VARCHAR(16) NOT NULL DEFAULT 'openai'")
+                else:
+                    execute_query(conn, "ALTER TABLE api_endpoints ADD COLUMN protocol VARCHAR(16) NOT NULL DEFAULT 'openai'")
+                conn.commit()
+                print("[STARTUP] Added api_endpoints.protocol column", flush=True)
+            except Exception as e:
+                print(f"[STARTUP] Could not add api_endpoints.protocol: {e}", flush=True)
+
+
         try:
             execute_query(conn, "SELECT 1 FROM sso_users LIMIT 1", fetch_one=True)
         except:
@@ -1100,7 +1116,7 @@ def test_chat():
     target_api = override_target_api or persona_data.get("target_api", "pipi")
 
     # 获取目标接口配置
-    api_url, api_key, api_headers = get_api_config_by_code(target_api)
+    api_url, api_key, api_headers, _protocol = get_api_config_by_code(target_api)
 
     # 保存用户消息
     save_chat_msg(persona_id, "user", name, message)
@@ -1112,7 +1128,7 @@ def test_chat():
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": message},
     ]
-    result = pipi_api.call_pipi_stream(api_messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers)
+    result = pipi_api.call_pipi_stream(api_messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers, protocol=_protocol)
     _ttfb = result.get("ttfb_ms")
     _total = result.get("response_time_ms")
     print(f"[TIMING] {persona_id} SE-web: TTFB={_ttfb}ms total={_total}ms", flush=True)
@@ -2182,7 +2198,7 @@ def simulate_chat():
     device_id = persona_data.get("device_id", persona_id)
     name = persona_data.get("name", persona_id)
     target_api = persona_data.get("target_api", "pipi")
-    api_url, api_key, api_headers = get_api_config_by_code(target_api)
+    api_url, api_key, api_headers, _protocol = get_api_config_by_code(target_api)
 
     conversations = []
 
@@ -2203,7 +2219,7 @@ def simulate_chat():
         ]
 
         # 调用目标接口
-        result = pipi_api.call_pipi_stream(api_messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers)
+        result = pipi_api.call_pipi_stream(api_messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers, protocol=_protocol)
 
         reply_text = result.get("full_text", "")
         reply_id = None
@@ -2805,7 +2821,7 @@ def call_api(persona_id, message):
         device_id = persona_data["device_id"]
         name = persona_data["name"]
         target_api = persona_data.get("target_api", "pipi")
-        api_url, api_key, api_headers = get_api_config_by_code(target_api)
+        api_url, api_key, api_headers, _protocol = get_api_config_by_code(target_api)
 
     system_prompt = pipi_api.build_system_prompt(persona_data, device_id)
     messages = [
@@ -2814,7 +2830,7 @@ def call_api(persona_id, message):
     ]
 
     print(f"[CALL API] persona_id={persona_id} device_id={device_id} msg={message[:50]}", flush=True)
-    result = pipi_api.call_pipi_stream(messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers)
+    result = pipi_api.call_pipi_stream(messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers, protocol=_protocol)
     if result.get("full_text"):
         msg_id = save_chat_msg(persona_id or "guest", "pipi", _get_toy_persona_name(target_api) if persona_id and persona_id != "__guest__" else "皮皮", result["full_text"])
         result["message_id"] = msg_id
@@ -4257,13 +4273,13 @@ def _growth_worker(task_id):
 
                 # 2. 调用玩偶接口
                 target_api = persona_data.get("target_api", "pipi")
-                api_url, api_key, api_headers = get_api_config_by_code(target_api)
+                api_url, api_key, api_headers, _protocol = get_api_config_by_code(target_api)
                 system_prompt = pipi_api.build_system_prompt(persona_data, device_id)
                 api_messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_message},
                 ]
-                result = pipi_api.call_pipi_stream(api_messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers)
+                result = pipi_api.call_pipi_stream(api_messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers, protocol=_protocol)
                 reply_text = result.get("full_text", "")
 
                 # 3. 保存玩偶回复
@@ -9152,6 +9168,7 @@ def test_endpoint(eid):
     endpoint = row_to_dict(row)
     base_url = endpoint.get("base_url", "")
     timeout_sec = endpoint.get("timeout_sec", 30)
+    protocol = (endpoint.get("protocol") or "openai").lower()
     # api_key 和自定义请求头从 auth_config JSON 中读取
     api_key = None
     api_headers = {}
@@ -9177,7 +9194,8 @@ def test_endpoint(eid):
             device_id="test_device_001",
             api_url=base_url,
             api_key=api_key,
-            extra_headers=api_headers
+            extra_headers=api_headers,
+            protocol=protocol,
         )
 
         # result 是 dict: {"full_text": "...", "response_time_ms": ..., "error": ...}
