@@ -239,6 +239,217 @@ def call_pipi_stream(
         }
 
 
+# ─── OHO Chat 对话（POST /chat/sessions + /stream + :end）─────────────
+
+OHO_DEFAULT_BASE = os.environ.get("OHO_BASE_URL", "https://api-staging.tryoho.ai/oho/v1")
+
+
+def _oho_envelope(resp) -> Dict:
+    """统一解析 OHO 响应信封 {code, message, data}。错误时返回 error dict。"""
+    try:
+        body = resp.json()
+    except ValueError:
+        return {"_error": f"non-json response: {resp.text[:200]}"}
+    if body.get("code") != 200:
+        return {"_error": f"OHO code={body.get('code')} msg={body.get('message')}"}
+    return body.get("data") or {}
+
+
+def oho_create_chat_session(
+    base_url: str = None,
+    user_id: str = "test_user",
+    started_at: int = None,
+    timeout: int = 15,
+    extra_headers: dict = None,
+) -> Dict:
+    """创建 OHO chat 会话，返回 {recordId, status, ...} 或 {error}。"""
+    base = base_url or OHO_DEFAULT_BASE
+    if started_at is None:
+        started_at = int(time.time() * 1000)
+    headers = {"Content-Type": "application/json", "X-User-Id": user_id}
+    if extra_headers:
+        headers.update(extra_headers)
+    try:
+        resp = requests.post(
+            f"{base}/chat/sessions",
+            headers=headers,
+            json={"startedAt": started_at},
+            timeout=timeout,
+        )
+        data = _oho_envelope(resp)
+        if "_error" in data:
+            return {"error": data["_error"]}
+        return data
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def oho_chat_stream(
+    record_id: str,
+    messages: List[Dict],
+    base_url: str = None,
+    user_id: str = "test_user",
+    timeout: int = 60,
+    extra_headers: dict = None,
+) -> Dict:
+    """
+    调 OHO chat SSE 流式接口，返回完整回复。
+    接口：POST /chat/sessions/{recordId}/stream
+    """
+    base = base_url or OHO_DEFAULT_BASE
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        "X-User-Id": user_id,
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+    payload = {"messages": messages}
+
+    start_time = time.time()
+    first_token_time = None
+    full_text = ""
+
+    try:
+        resp = requests.post(
+            f"{base}/chat/sessions/{record_id}/stream",
+            headers=headers,
+            json=payload,
+            stream=True,
+            timeout=timeout,
+        )
+        resp.encoding = "utf-8"
+        for line in resp.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            json_str = None
+            if line.startswith("data: "):
+                json_str = line[6:]
+            elif line.startswith("data:"):
+                json_str = line[5:].strip()
+            else:
+                json_str = line
+            if json_str == "[DONE]":
+                break
+            if not json_str:
+                continue
+            try:
+                data = json.loads(json_str)
+                for choice in data.get("choices", []):
+                    delta = choice.get("delta", {}) or {}
+                    content = delta.get("content", "")
+                    if content:
+                        if first_token_time is None:
+                            first_token_time = time.time() - start_time
+                        full_text += content
+            except (json.JSONDecodeError, ValueError):
+                continue
+        elapsed_ms = round((time.time() - start_time) * 1000, 2)
+        ttfb_ms = round(first_token_time * 1000, 2) if first_token_time else None
+        return {
+            "full_text": full_text,
+            "response_time_ms": elapsed_ms,
+            "ttfb_ms": ttfb_ms,
+        }
+    except requests.exceptions.Timeout:
+        return {"full_text": "", "response_time_ms": -1, "error": f"Timeout after {timeout}s"}
+    except Exception as e:
+        return {"full_text": "", "response_time_ms": -1, "error": str(e)}
+
+
+def oho_end_chat_session(
+    record_id: str,
+    duration_seconds: int = 0,
+    base_url: str = None,
+    user_id: str = "test_user",
+    timeout: int = 15,
+    extra_headers: dict = None,
+) -> Dict:
+    """结束 OHO chat 会话，触发归档。返回 {status} 或 {error}。"""
+    base = base_url or OHO_DEFAULT_BASE
+    headers = {"Content-Type": "application/json", "X-User-Id": user_id}
+    if extra_headers:
+        headers.update(extra_headers)
+    try:
+        resp = requests.post(
+            f"{base}/chat/sessions/{record_id}:end",
+            headers=headers,
+            json={"durationSeconds": duration_seconds},
+            timeout=timeout,
+        )
+        data = _oho_envelope(resp)
+        if "_error" in data:
+            return {"error": data["_error"]}
+        return data
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def oho_get_record_status(
+    record_id: str,
+    base_url: str = None,
+    user_id: str = "test_user",
+    timeout: int = 15,
+    extra_headers: dict = None,
+) -> Dict:
+    """轮询记录状态。返回 {status, title, summaryMarkdown, ...} 或 {error}。"""
+    base = base_url or OHO_DEFAULT_BASE
+    headers = {"X-User-Id": user_id}
+    if extra_headers:
+        headers.update(extra_headers)
+    try:
+        resp = requests.get(
+            f"{base}/records/{record_id}/status",
+            headers=headers,
+            timeout=timeout,
+        )
+        data = _oho_envelope(resp)
+        if "_error" in data:
+            return {"error": data["_error"]}
+        return data
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def call_oho_chat(
+    messages: List[Dict],
+    user_id: str = "test_user",
+    base_url: str = None,
+    duration_seconds: int = 0,
+    timeout: int = 60,
+    extra_headers: dict = None,
+) -> Dict:
+    """
+    端到端 OHO chat 调用：创建会话 → SSE 流式对话 → 结束归档。
+    返回 {full_text, response_time_ms, record_id, status, error}
+    """
+    base = base_url or OHO_DEFAULT_BASE
+
+    sess = oho_create_chat_session(
+        base_url=base, user_id=user_id, timeout=15, extra_headers=extra_headers
+    )
+    if "error" in sess:
+        return {"full_text": "", "response_time_ms": -1, "error": sess["error"]}
+    record_id = sess.get("recordId")
+    if not record_id:
+        return {"full_text": "", "response_time_ms": -1, "error": f"no recordId in response: {sess}"}
+
+    result = oho_chat_stream(
+        record_id, messages,
+        base_url=base, user_id=user_id,
+        timeout=timeout, extra_headers=extra_headers,
+    )
+
+    _ = oho_end_chat_session(
+        record_id, duration_seconds=duration_seconds,
+        base_url=base, user_id=user_id,
+        timeout=15, extra_headers=extra_headers,
+    )
+
+    result["record_id"] = record_id
+    return result
+
+
 # ─── LLM 调用（事实提取/用例生成/评测）─────────────
 
 def call_extract_llm(messages: List[Dict], timeout: int = 20, model: str = None, temperature: float = None, max_tokens: int = None) -> Dict:
