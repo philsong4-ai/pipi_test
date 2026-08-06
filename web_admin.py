@@ -1123,7 +1123,7 @@ def test_chat():
 
     # 构建请求并调用目标接口
     import time as _time
-    system_prompt = pipi_api.build_system_prompt(persona_data, device_id)
+    system_prompt = pipi_api.build_system_prompt(persona_data, device_id, target_api=target_api)
     api_messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": message},
@@ -1155,7 +1155,7 @@ def test_chat():
 
                 chat_history_for_extract = []
                 for row in reversed(history_rows):
-                    prefix = "用户: " if row["role"] == "user" else "秋秋: "
+                    prefix = "用户: " if row["role"] == "user" else _get_toy_persona_name(target_api) + ": "
                     chat_history_for_extract.append(prefix + row["text"])
 
                 _t_fact = _time.time()
@@ -2212,7 +2212,7 @@ def simulate_chat():
         save_chat_msg(persona_id, "user", name, user_message)
 
         # 构建请求
-        system_prompt = pipi_api.build_system_prompt(persona_data, device_id)
+        system_prompt = pipi_api.build_system_prompt(persona_data, device_id, target_api=target_api)
         api_messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
@@ -2242,7 +2242,7 @@ def simulate_chat():
 
                 chat_history_for_extract = []
                 for row in reversed(history_rows):
-                    prefix = "用户: " if row["role"] == "user" else "秋秋: "
+                    prefix = "用户: " if row["role"] == "user" else _get_toy_persona_name(target_api) + ": "
                     chat_history_for_extract.append(prefix + row["text"])
 
                 llm_config = get_llm_config()
@@ -2549,11 +2549,11 @@ def _format_history_with_gaps(msgs):
             if prev_time and (curr_time - prev_time).total_seconds() > 7200:
                 hours = int((curr_time - prev_time).total_seconds() / 3600)
                 result.append(f"—— 间隔 {hours} 小时 ——")
-            prefix = "用户: " if m["role"] == "user" else "秋秋: "
+            prefix = "用户: " if m["role"] == "user" else _get_toy_persona_name(persona_data.get("target_api", "pipi")) + ": "
             result.append(prefix + m["text"])
             prev_time = curr_time
         except:
-            prefix = "用户: " if m["role"] == "user" else "秋秋: "
+            prefix = "用户: " if m["role"] == "user" else _get_toy_persona_name(persona_data.get("target_api", "pipi")) + ": "
             result.append(prefix + m["text"])
     return result
 
@@ -2823,7 +2823,7 @@ def call_api(persona_id, message):
         target_api = persona_data.get("target_api", "pipi")
         api_url, api_key, api_headers, _protocol = get_api_config_by_code(target_api)
 
-    system_prompt = pipi_api.build_system_prompt(persona_data, device_id)
+    system_prompt = pipi_api.build_system_prompt(persona_data, device_id, target_api=target_api)
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": message},
@@ -2898,7 +2898,7 @@ def _extract_and_save(persona_id, message, persona_data):
 
         chat_history = []
         for row in reversed(history_rows):
-            prefix = "用户: " if row["role"] == "user" else "秋秋: "
+            prefix = "用户: " if row["role"] == "user" else _get_toy_persona_name(target_api) + ": "
             chat_history.append(prefix + row["text"])
 
         llm_config = get_llm_config()
@@ -4326,7 +4326,7 @@ def _growth_worker(task_id):
                 # 2. 调用玩偶接口
                 target_api = persona_data.get("target_api", "pipi")
                 api_url, api_key, api_headers, _protocol = get_api_config_by_code(target_api)
-                system_prompt = pipi_api.build_system_prompt(persona_data, device_id)
+                system_prompt = pipi_api.build_system_prompt(persona_data, device_id, target_api=target_api)
                 api_messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_message},
@@ -4353,7 +4353,7 @@ def _growth_worker(task_id):
 
                     chat_history = []
                     for row in reversed(history_rows):
-                        prefix = "用户: " if row["role"] == "user" else "秋秋: "
+                        prefix = "用户: " if row["role"] == "user" else _get_toy_persona_name(target_api) + ": "
                         chat_history.append(prefix + row["text"])
 
                     llm_config = get_llm_config()
@@ -4805,7 +4805,7 @@ def _execute_task_worker(task_id):
                         break
                     reply = r.get("reply", "")
                     ttfb = r.get("ttfb_ms")
-                    all_replies.append(f"【R{i+1}】秋秋：{reply}")
+                    all_replies.append(f"【R{i+1}】{_get_toy_persona_name(target_api)}：{reply}")
                     print(f"[TASK-EXEC] {case_code} R{i+1}: TTFB={ttfb}ms", flush=True)
 
                 if not has_error and all_replies:
@@ -7890,6 +7890,8 @@ def _execute_cases_worker(task_id):
 
                 # 逐轮发送，保存所有轮次回复
                 persona_id = case.get("persona_id") or case.get("device_id", "")
+                _p_row = execute_query(conn, f"SELECT target_api FROM personas WHERE id = {ph}", (persona_id,), fetch_one=True)
+                _exec_target_api = (row_to_dict(_p_row) if _p_row else {}).get("target_api", "pipi") if _p_row else "pipi"
                 all_replies = []
                 has_error = False
 
@@ -7916,7 +7918,7 @@ def _execute_cases_worker(task_id):
                         break
 
                     reply = result.get("reply", "")
-                    all_replies.append(f"【R{i+1}】秋秋：{reply}")
+                    all_replies.append(f"【R{i+1}】{_get_toy_persona_name(_exec_target_api)}：{reply}")
                     print(f"[EXEC] {case['case_id']} R{i+1}: {_elapsed:.1f}s reply_len={len(reply)}", flush=True)
 
                 # 合并所有轮次回复

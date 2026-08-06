@@ -1539,11 +1539,15 @@ def _tomorrow_date():
 
 # ─── System Prompt 构建 ───────────────────────────
 
-def build_system_prompt(persona_data: Optional[Dict] = None, device_id: str = "") -> str:
+def build_system_prompt(persona_data: Optional[Dict] = None, device_id: str = "", target_api: str = "pipi") -> str:
     """
-    构建 system prompt。
-    玩偶接口自己管理用户画像，这里只传设备ID。
+    构建 system prompt。按 target_api 切换：
+    - pipi/SE-web 等 OpenAI 协议玩偶：注入"你是皮皮，设备ID是..."（玩偶 API 端会基于此识别用户）
+    - oho：注入中性 prompt（OHO 是录音笔记助手，人设由 OHO API 端管，不注入皮皮身份）
     """
+    ta = (target_api or "pipi").lower()
+    if ta == "oho":
+        return "你是 OHO，一个贴在 iPhone 背后的 AI 灵感捕手和录音笔记助手。低摩擦接住用户的瞬时内容（灵感、会议要点、电话信息），帮用户记住、整理、推进。回复简洁直接、信息密度高。"
     return f"你是皮皮，设备ID是{device_id}"
 
 

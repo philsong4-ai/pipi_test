@@ -49,7 +49,7 @@ def execute_multi_round_session(
     matches = _ROUND_PATTERN.findall(case_input)
 
     api_url, api_key, extra_headers, protocol = _resolve_api(target_api)
-    system_prompt = build_system_prompt(device_id=device_id)
+    system_prompt = build_system_prompt(device_id=device_id, target_api=target_api)
     messages = [{"role": "system", "content": system_prompt}]
 
     round_results = []
@@ -119,7 +119,7 @@ class CrossSessionTest:
             timestamp = datetime.now().isoformat()
 
         api_url, api_key, extra_headers = _resolve_api(self.target_api)
-        system_prompt = build_system_prompt(device_id=self.device_id)
+        system_prompt = build_system_prompt(device_id=self.device_id, target_api=self.target_api)
         current_messages = [{"role": "system", "content": system_prompt}]
 
         results = []
@@ -252,7 +252,7 @@ def batch_test_from_xlsx(
 def quick_test(messages_text: str, device_id: str = "TEST_DEV_001", target_api: str = "pipi"):
     """快速测试单条对话。"""
     api_url, api_key, extra_headers, protocol = _resolve_api(target_api)
-    system_prompt = build_system_prompt(device_id=device_id)
+    system_prompt = build_system_prompt(device_id=device_id, target_api=target_api)
 
     if messages_text.startswith("【R"):
         matches = _ROUND_PATTERN.findall(messages_text)
