@@ -3190,9 +3190,32 @@ def get_growth_result(task_id):
     })
 
 
-def _generate_persona_profile(name=""):
-    """调用 LLM 生成完整的用户画像"""
-    system_prompt = """你是用户画像生成器。为AI陪伴玩偶产品生成虚拟用户。
+def _generate_persona_profile(name="", target_api="pipi"):
+    """调用 LLM 生成完整的用户画像，按 target_api 切换目标人群画像。"""
+    if target_api == "oho":
+        system_prompt = """你是用户画像生成器。为 OHO（贴在 iPhone 背后的 AI 灵感捕手 + 录音笔记助手）生成虚拟测试用户。
+
+目标用户：25-44 岁，iPhone 用户，以一二线城市为主。
+核心人群：
+A. 高频会议与推进型用户 — PM、创业者、创始人、管理层、研究者，频繁电话/会议/访谈，记录目的是后续推进而非归档。
+B. 记录型知识工作者 + 写作者/创作者 — 设计师、运营、记者、内容创作者，输入碎片多，灵感出现频繁。
+次级：终身学习者（读书/摘录/课程笔记/思考碎片）。
+
+共性：
+- 高频输入（不断遇到想记该记的内容）
+- 低容忍记录摩擦（不愿为记录切 App 或做复杂整理）
+- 需要后续推进（记录为了行动、输出、跟进）
+- 对隐私与可控性敏感（可导出、可删除、可关闭同步）
+- 愿意尝试新工具，但只接受"有用且酷"，不愿做实验品
+
+痛点：想法来得快但手机记录路径太慢；对话/会议/灵感/待办断裂不在一个流里；录了音很难再推进；不想维护重系统。
+购买驱动：低摩擦（贴手机背后不额外带设备）；接住瞬时内容（灵感、半成形表达、会议要点、电话信息）；后续可调起、可整理、可推进；physical presence 区别于纯 App。
+顾虑：速度、可靠性、隐私、电池、是否真比手机 App 顺手。
+反向筛掉：只想要 AI 玩具的人、只想要录音卡平替的人、只看陪伴感的人、愿意忍受复杂系统学习成本的人。
+
+要求：字段间有逻辑关联，像真实的人。直接返回JSON。"""
+    else:
+        system_prompt = """你是用户画像生成器。为AI陪伴玩偶产品生成虚拟用户。
 
 目标用户：15-34岁女性，三线及以上城市，喜欢毛绒玩具和宠物。
 消费特点：视觉吸引→情绪共鸣→瞬间下单，颜值正义，情绪消费。
@@ -3255,13 +3278,42 @@ def _generate_persona_profile(name=""):
 
     # 降级到随机生成
     print(f"[PERSONA GEN] fallback to random", flush=True)
-    return _generate_persona_profile_fallback()
+    return _generate_persona_profile_fallback(target_api=target_api)
 
 
-def _generate_persona_profile_fallback():
+def _generate_persona_profile_fallback(target_api="pipi"):
     """随机生成用户画像（降级方案）"""
     def pick(arr):
         return arr[random.randint(0, len(arr) - 1)]
+
+    if target_api == "oho":
+        return {
+            "age": pick(["27", "30", "32", "34", "36", "38", "42"]),
+            "gender": pick(["男", "女"]),
+            "city": pick(["北京", "上海", "深圳", "杭州", "成都", "广州"]),
+            "hometown": pick(["江苏", "浙江", "山东", "湖北", "湖南", "四川"]),
+            "occupation": pick(["创业者/CEO", "产品经理", "设计师", "运营", "投资人", "内容创作者", "研究者"]),
+            "education": pick(["本科", "硕士"]),
+            "family_status": pick(["已婚有娃", "已婚无娃", "单身"]),
+            "relationship": pick(["已婚", "有对象", "单身"]),
+            "interests": pick(["创业,读书", "写作,长跑", "投资,播客", "设计,摄影", "阅读,思考碎片"]),
+            "language_style": pick(["直接简洁、信息密度高", "冷静理性、少废话", "简洁但带温度"]),
+            "personality": pick(["目标导向、低耐受摩擦", "理性、效率优先", "好奇驱动、爱折腾"]),
+            "devices": "iPhone 15 Pro + MacBook Pro",
+            "usage_scenes": pick(["会议、电话、走路灵感", "采访、写作素材、跨场景输入", "会议、daily notes、复盘"]),
+            "core_goal": "让信息从输入到推进零损耗",
+            "short_goal": pick(["本周完成季度规划", "把上次访谈沉淀成可推进的行动项", "把碎片灵感整理成提纲"]),
+            "long_goal": pick(["3年内公司IPO", "做成一个有影响力的产品", "把个人知识库变成可调用的资产"]),
+            "pain_points": "想法来得快但记录路径太慢，录音后很难再推进",
+            "constraints": "不愿维护复杂系统，只接受有用且酷",
+            "risk_profile": "对新硬件 early adopter",
+            "info_sources": pick(["播客、社群、读书", "Newsletter、行业群、X", "会议、电话、走动思考"]),
+            "decision_style": "快速判断、低摩擦执行",
+            "relation_pace": "高频低长度",
+            "scene_pref": "会议、电话、灵感捕捉",
+            "top_expectations": "快速接住、后续可推进、不丢重要念头",
+            "minefields": "别让我做系统管理员，别让我多切一个 App",
+        }
 
     return {
         "age": pick(["23", "25", "27", "28", "30", "32", "35"]),
@@ -4027,7 +4079,7 @@ def _create_one_persona_async(persona_id, device_id, name, cfg):
     old_messages = cfg.get("messages", [])
 
     # 调用 LLM 生成完整的用户画像
-    profile = _generate_persona_profile(name)
+    profile = _generate_persona_profile(name, target_api=target_api)
 
     # 根据 persona 生成消息
     if categories:
