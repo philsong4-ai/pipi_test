@@ -5725,6 +5725,10 @@ def generate_test_report_v2():
     # 生成描述性总结
     summary_text = _generate_report_summary(cluster_summary, failed, pass_rate, avg_score)
 
+    # 接口标签（标题用）
+    _ta = (task.get("target_api") or "pipi").lower()
+    target_api_label = {"oho": "OHO", "pipi": "皮皮"}.get(_ta, _ta)
+
     # 生成用例详情 HTML（只显示失败用例）
     case_details = ""
     current_dimension = ""
@@ -5840,8 +5844,8 @@ def generate_test_report_v2():
 <body>
     <div class="container">
         <div class="header">
-            <h1>📊 AI玩偶测试报告</h1>
-            <div class="subtitle">📋 {task.get('name', task.get('task_id', ''))} | 🆔 {task.get('task_id', '')} | 📅 {task_created} | ⏰ 报告生成: {report_time}</div>
+            <h1>📊 {target_api_label}测试报告</h1>
+            <div class="subtitle">📋 {task.get('name', task.get('task_id', ''))} | 🆔 {task.get('task_id', '')} | 🎯 接口: {task.get('target_api', 'pipi')} | 📅 {task_created} | ⏰ 报告生成: {report_time}</div>
         </div>
 
         <div class="summary">
@@ -5979,8 +5983,10 @@ def export_test_report_excel():
     ws_summary["B4"] = task.get("name", "")
     ws_summary["A5"] = "测试用户:"
     ws_summary["B5"] = task.get("persona_id", "")
-    ws_summary["A6"] = "创建时间:"
-    ws_summary["B6"] = str(task.get("created_at", ""))
+    ws_summary["A6"] = "测试接口:"
+    ws_summary["B6"] = task.get("target_api", "pipi")
+    ws_summary["A7"] = "创建时间:"
+    ws_summary["B7"] = str(task.get("created_at", ""))
 
     # 统计数据
     total = len(results)
@@ -5990,28 +5996,28 @@ def export_test_report_excel():
     avg_score = sum(r["score"] for r in evaluated) / len(evaluated) if evaluated else 0
     pass_rate = round(len(passed) / len(evaluated) * 100, 1) if evaluated else 0
 
-    ws_summary["A8"] = "统计指标"
-    ws_summary["A8"].font = Font(bold=True, size=12)
-    ws_summary["A9"] = "总用例数"
-    ws_summary["B9"] = total
-    ws_summary["A10"] = "已评测"
-    ws_summary["B10"] = len(evaluated)
-    ws_summary["A11"] = "通过"
-    ws_summary["B11"] = len(passed)
-    ws_summary["A12"] = "失败"
-    ws_summary["B12"] = len(failed)
-    ws_summary["A13"] = "通过率"
-    ws_summary["B13"] = f"{pass_rate}%"
-    ws_summary["A14"] = "平均分"
-    ws_summary["B14"] = round(avg_score, 2)
+    ws_summary["A9"] = "统计指标"
+    ws_summary["A9"].font = Font(bold=True, size=12)
+    ws_summary["A10"] = "总用例数"
+    ws_summary["B10"] = total
+    ws_summary["A11"] = "已评测"
+    ws_summary["B11"] = len(evaluated)
+    ws_summary["A12"] = "通过"
+    ws_summary["B12"] = len(passed)
+    ws_summary["A13"] = "失败"
+    ws_summary["B13"] = len(failed)
+    ws_summary["A14"] = "通过率"
+    ws_summary["B14"] = f"{pass_rate}%"
+    ws_summary["A15"] = "平均分"
+    ws_summary["B15"] = round(avg_score, 2)
 
     # 按维度统计
-    ws_summary["A16"] = "维度统计"
-    ws_summary["A16"].font = Font(bold=True, size=12)
+    ws_summary["A17"] = "维度统计"
+    ws_summary["A17"].font = Font(bold=True, size=12)
 
     dim_headers = ["维度代码", "维度名称", "能力簇", "总数", "通过", "失败", "通过率", "平均分"]
     for col, header in enumerate(dim_headers, 1):
-        cell = ws_summary.cell(row=17, column=col, value=header)
+        cell = ws_summary.cell(row=18, column=col, value=header)
         cell.font = header_font
         cell.fill = header_fill
         cell.border = thin_border
@@ -6030,7 +6036,7 @@ def export_test_report_excel():
         if r.get("score") is not None:
             by_dim[dim]["scores"].append(r["score"])
 
-    row = 18
+    row = 19
     for dim_code in sorted(by_dim.keys()):
         stats = by_dim[dim_code]
         d_evaluated = stats["passed"] + stats["failed"]
@@ -8290,11 +8296,18 @@ def generate_test_report():
     report_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # 报告副标题：显示任务信息或角色信息
+    _task_target_api = None
     if task_info:
         task_created = task_info.get("created_at", "")
         if hasattr(task_created, "strftime"):
             task_created = task_created.strftime("%Y-%m-%d %H:%M:%S")
-        report_subtitle = f"评测任务: {task_id} | 角色: {persona_id} | 任务创建: {task_created} | 报告生成: {report_time}"
+        try:
+            _cfg = json.loads(task_info.get("config_json", "{}")) if task_info.get("config_json") else {}
+            _task_target_api = _cfg.get("target_api")
+        except Exception:
+            pass
+        _ta_label = {"oho": "OHO", "pipi": "皮皮"}.get((_task_target_api or "").lower(), _task_target_api or "皮皮")
+        report_subtitle = f"评测任务: {task_id} | 接口: {_ta_label} | 角色: {persona_id} | 任务创建: {task_created} | 报告生成: {report_time}"
     elif persona_id:
         report_subtitle = f"角色: {persona_id} | 生成时间: {report_time}"
     else:
@@ -8400,7 +8413,7 @@ def generate_test_report():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI玩偶测试报告</title>
+    <title>{_ta_label}测试报告</title>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{
@@ -8616,7 +8629,7 @@ def generate_test_report():
 <body>
     <div class="container">
         <div class="report-header">
-            <h1 class="report-title">🧸 AI玩偶测试报告</h1>
+            <h1 class="report-title">🧸 {_ta_label}测试报告</h1>
             <p class="report-subtitle">{report_subtitle}</p>
         </div>
 
