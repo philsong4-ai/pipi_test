@@ -8310,11 +8310,11 @@ def _evaluate_cases_worker(task_id, user_id=None, slot_type=None):
                 )
 
                 if core_result.get("success"):
-                    task["evaluated_count"] += 1
+                    task["evaluated_count"] = task.get("evaluated_count", 0) + 1
                     if core_result.get("status") == "passed":
-                        task["passed_count"] += 1
+                        task["passed_count"] = task.get("passed_count", 0) + 1
                     else:
-                        task["failed_count"] += 1
+                        task["failed_count"] = task.get("failed_count", 0) + 1
                     score = core_result.get("score")
                 else:
                     score = None
