@@ -8089,7 +8089,7 @@ def _execute_cases_worker(task_id, user_id=None, slot_type=None):
                         " AND user_id = " + ("%s" if USE_MYSQL else "?"),
                         (actual_output, case_id, user_id))
                     conn.commit()
-                    task["executed_count"] += 1
+                    task["executed_count"] = task.get("executed_count", 0) + 1
 
             except Exception as e:
                 print(f"[EXEC ERROR] {case['case_id']}: {e}", flush=True)
