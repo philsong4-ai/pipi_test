@@ -8041,10 +8041,12 @@ def _execute_cases_worker(task_id, user_id=None, slot_type=None):
 
                 # 逐轮发送，保存所有轮次回复
                 persona_id = case.get("persona_id") or case.get("device_id", "")
-                _p_row = execute_query(conn, f"SELECT target_api FROM personas WHERE id = {ph} AND user_id = {ph}", (persona_id, user_id), fetch_one=True)
+                _ph = "%s" if USE_MYSQL else "?"
+                _p_row = execute_query(conn, f"SELECT target_api FROM personas WHERE id = {_ph} AND user_id = {_ph}", (persona_id, user_id), fetch_one=True)
                 _exec_target_api = (row_to_dict(_p_row) if _p_row else {}).get("target_api", "pipi") if _p_row else "pipi"
                 all_replies = []
                 has_error = False
+                actual_output = ""
 
                 for i, msg in enumerate(rounds):
                     # 调用 /api/test/chat
