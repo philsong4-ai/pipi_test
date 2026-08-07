@@ -106,6 +106,34 @@ def call_pipi_stream(
             "error": 错误信息(如有)
         }
     """
+    # 全局目标 API 并发闸（max=8）：跨 gunicorn worker 共享 MySQL 行锁原子计数
+    # Why: burst 测试时多 worker 并发调玩偶 API 会触发上游限流/锁 IP
+    slot_acquired = False
+    try:
+        from web_admin import _acquire_slot, _release_slot
+        if not _acquire_slot('api_global', 8, ttl_seconds=300, wait=True, timeout=300):
+            return {
+                "full_text": "",
+                "response_time_ms": -1,
+                "error": "目标 API 并发槽已满，请稍后重试"
+            }
+        slot_acquired = True
+    except ImportError:
+        pass
+
+    try:
+        return _call_pipi_stream_inner(messages, device_id, timeout, api_url, api_key, extra_headers, protocol, user_id)
+    finally:
+        if slot_acquired:
+            try:
+                from web_admin import _release_slot
+                _release_slot('api_global')
+            except Exception as e:
+                print(f"[SLOT RELEASE] api_global failed: {e}", flush=True)
+
+
+def _call_pipi_stream_inner(messages, device_id, timeout, api_url, api_key, extra_headers, protocol, user_id):
+    """实际调用皮皮流式 API 的内部实现（已被 call_pipi_stream 包装限流）"""
     # OHO 协议分发：单轮一次性创建会话+流+结束
     if protocol and protocol.lower() == "oho":
         uid = user_id or device_id or "test_user"
@@ -490,57 +518,81 @@ def call_extract_llm(messages: List[Dict], timeout: int = 20, model: str = None,
             "error": "EXTRACT_LLM_KEY 未配置，请检查环境变量"
         }
 
-    use_model = model or EXTRACT_LLM_MODEL
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {EXTRACT_LLM_KEY}"
-    }
-    payload = {
-        "model": use_model,
-        "messages": messages,
-        "temperature": temperature if temperature is not None else 0.3,
-        "max_tokens": max_tokens if max_tokens is not None else 8192,
-    }
-
-    start_time = time.time()
+    # 全局 LLM 并发闸（max=16）：跨 gunicorn worker 共享 MySQL 行锁原子计数
+    # Why: gunicorn 16 worker × 进程内信号量 8 = 128 并发评测，远超 LiteLLM 代理可承载
+    slot_acquired = False
     try:
-        response = requests.post(
-            EXTRACT_LLM_URL,
-            headers=headers,
-            json=payload,
-            timeout=timeout
-        )
-        elapsed_ms = round((time.time() - start_time) * 1000, 2)
-
-        if response.status_code != 200:
+        from web_admin import _acquire_slot, _release_slot
+        if not _acquire_slot('llm_global', 16, ttl_seconds=600, wait=True, timeout=600):
             return {
                 "full_text": "",
+                "response_time_ms": -1,
+                "error": "LLM 并发槽已满，请稍后重试"
+            }
+        slot_acquired = True
+    except ImportError:
+        # web_admin 未加载（独立脚本场景），降级无限制
+        pass
+
+    try:
+        use_model = model or EXTRACT_LLM_MODEL
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {EXTRACT_LLM_KEY}"
+        }
+        payload = {
+            "model": use_model,
+            "messages": messages,
+            "temperature": temperature if temperature is not None else 0.3,
+            "max_tokens": max_tokens if max_tokens is not None else 8192,
+        }
+
+        start_time = time.time()
+        try:
+            response = requests.post(
+                EXTRACT_LLM_URL,
+                headers=headers,
+                json=payload,
+                timeout=timeout
+            )
+            elapsed_ms = round((time.time() - start_time) * 1000, 2)
+
+            if response.status_code != 200:
+                return {
+                    "full_text": "",
+                    "response_time_ms": elapsed_ms,
+                    "error": f"HTTP {response.status_code}: {response.text[:200]}"
+                }
+
+            data = response.json()
+            content = ""
+            if "choices" in data and len(data["choices"]) > 0:
+                content = data["choices"][0].get("message", {}).get("content", "")
+
+            return {
+                "full_text": content,
                 "response_time_ms": elapsed_ms,
-                "error": f"HTTP {response.status_code}: {response.text[:200]}"
             }
 
-        data = response.json()
-        content = ""
-        if "choices" in data and len(data["choices"]) > 0:
-            content = data["choices"][0].get("message", {}).get("content", "")
-
-        return {
-            "full_text": content,
-            "response_time_ms": elapsed_ms,
-        }
-
-    except requests.exceptions.Timeout:
-        return {
-            "full_text": "",
-            "response_time_ms": -1,
-            "error": f"Timeout after {timeout}s"
-        }
-    except Exception as e:
-        return {
-            "full_text": "",
-            "response_time_ms": -1,
-            "error": str(e)
-        }
+        except requests.exceptions.Timeout:
+            return {
+                "full_text": "",
+                "response_time_ms": -1,
+                "error": f"Timeout after {timeout}s"
+            }
+        except Exception as e:
+            return {
+                "full_text": "",
+                "response_time_ms": -1,
+                "error": str(e)
+            }
+    finally:
+        if slot_acquired:
+            try:
+                from web_admin import _release_slot
+                _release_slot('llm_global')
+            except Exception as e:
+                print(f"[SLOT RELEASE] llm_global failed: {e}", flush=True)
 
 
 def call_llm_simple(system_prompt: str, user_prompt: str, timeout: int = 30, model: str = None, temperature: float = None, max_tokens: int = None) -> str:

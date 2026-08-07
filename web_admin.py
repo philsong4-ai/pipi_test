@@ -545,13 +545,17 @@ def _ensure_tables():
             conn2.commit()
             print(f"[STARTUP] Recovered {len(stalled_ids)} stalled growth tasks: {stalled_ids}", flush=True)
             for tid in stalled_ids:
-                threading.Thread(target=_growth_worker, args=(tid,), daemon=True).start()
+                # 反查 task 的 user_id（重启路径无 request context）
+                trow = execute_query(conn2, "SELECT user_id FROM growth_tasks WHERE id=?", (tid,), fetch_one=True)
+                t_uid = int(trow["user_id"]) if trow and trow.get("user_id") else 1
+                threading.Thread(target=_growth_worker, args=(tid, t_uid), daemon=True).start()
             print(f"[STARTUP] Respawned {len(stalled_ids)} growth workers", flush=True)
         conn2.close()
 
-        # 多用户隔离：8 张核心业务表加 user_id 列（默认 1=admin，现有数据归 admin）
+        # 多用户隔离：核心业务表加 user_id 列（默认 1=admin，现有数据归 admin）
         for tbl in ['personas', 'test_tasks', 'async_tasks', 'scheduled_tasks',
-                    'test_cases', 'test_results', 'user_facts', 'chat_messages']:
+                    'test_cases', 'test_results', 'user_facts', 'chat_messages',
+                    'growth_tasks']:
             try:
                 execute_query(conn, f"SELECT user_id FROM {tbl} LIMIT 1", fetch_one=True)
             except Exception:
@@ -946,9 +950,10 @@ def upsert_persona(pid=None):
         messages = _generate_messages_for_missing_fields(pid)
         if messages:
             conn = get_db_connection()
+            uid = _current_uid()
             cur = execute_query(conn,
-                "INSERT INTO growth_tasks (persona_id, speed, status, total_messages) VALUES (?,?,?,?)",
-                (pid, fill_speed, "pending", len(messages)))
+                "INSERT INTO growth_tasks (persona_id, speed, status, total_messages, user_id) VALUES (?,?,?,?,?)",
+                (pid, fill_speed, "pending", len(messages), uid))
             task_id = get_lastrowid(cur)
 
             for idx, msg in enumerate(messages):
@@ -960,7 +965,7 @@ def upsert_persona(pid=None):
             conn.close()
 
             # 启动后台线程
-            t = threading.Thread(target=_growth_worker, args=(task_id,), daemon=True)
+            t = threading.Thread(target=_growth_worker, args=(task_id, uid), daemon=True)
             t.start()
 
             result["auto_fill"] = {
@@ -1091,9 +1096,10 @@ def batch_create_personas():
             continue
 
         # 创建成长任务
+        uid = _current_uid()
         cur = execute_query(conn,
-            "INSERT INTO growth_tasks (persona_id, speed, status, total_messages) VALUES (?,?,?,?)",
-            (persona_id, speed, "pending", len(messages)))
+            "INSERT INTO growth_tasks (persona_id, speed, status, total_messages, user_id) VALUES (?,?,?,?,?)",
+            (persona_id, speed, "pending", len(messages), uid))
         task_id = get_lastrowid(cur)
 
         for idx, msg in enumerate(messages):
@@ -1114,7 +1120,7 @@ def batch_create_personas():
         })
 
         # 启动后台线程
-        t = threading.Thread(target=_growth_worker, args=(task_id,), daemon=True)
+        t = threading.Thread(target=_growth_worker, args=(task_id, uid), daemon=True)
         t.start()
 
     conn.close()
@@ -1128,9 +1134,15 @@ def batch_create_personas():
 @app.route("/api/chat_history/<pid>", methods=["GET"])
 def get_chat_history(pid):
     conn = get_db_connection()
+    uid = _current_uid()
+    # 先校验 persona 归属
+    prow = execute_query(conn, "SELECT id FROM personas WHERE id = ? AND user_id = ?", (pid, uid), fetch_one=True)
+    if not prow:
+        conn.close()
+        return jsonify({"error": "persona not found"}), 404
     rows = execute_query(conn,
         "SELECT id, role, user_name as user, text, created_at FROM chat_messages "
-        "WHERE persona_id=? ORDER BY id DESC LIMIT 100", (pid,), fetch_all=True)
+        "WHERE persona_id=? AND user_id=? ORDER BY id DESC LIMIT 100", (pid, uid), fetch_all=True)
     messages = [row_to_dict(r) for r in reversed(list(rows))]
     msg_ids = [m["id"] for m in messages]
     if msg_ids:
@@ -1149,7 +1161,13 @@ def get_chat_history(pid):
 @app.route("/api/chat_history/<pid>", methods=["DELETE"])
 def delete_chat_history(pid):
     conn = get_db_connection()
-    execute_query(conn, "DELETE FROM chat_messages WHERE persona_id=?", (pid,))
+    uid = _current_uid()
+    prow = execute_query(conn, "SELECT id FROM personas WHERE id = ? AND user_id = ?", (pid, uid), fetch_one=True)
+    if not prow:
+        conn.close()
+        return jsonify({"error": "persona not found"}), 404
+    execute_query(conn, "DELETE FROM chat_messages WHERE persona_id=? AND user_id=?", (pid, uid))
+    execute_query(conn, "DELETE FROM chat_feedback WHERE message_id IN (SELECT id FROM chat_messages WHERE persona_id=? AND user_id=?)", (pid, uid))
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
@@ -1314,7 +1332,7 @@ def get_fact_options():
 @app.route("/api/facts", methods=["GET"])
 def get_all_facts():
     conn = get_db_connection()
-    rows = execute_query(conn, "SELECT * FROM user_facts ORDER BY persona_id, is_active DESC, created_at DESC", fetch_all=True)
+    rows = execute_query(conn, "SELECT * FROM user_facts WHERE user_id=? ORDER BY persona_id, is_active DESC, created_at DESC", (_current_uid(),), fetch_all=True)
     result = [row_to_dict(r) for r in rows]
     conn.close()
     return jsonify(result)
@@ -1324,8 +1342,8 @@ def get_all_facts():
 def get_facts_count():
     conn = get_db_connection()
     rows = execute_query(conn,
-        "SELECT persona_id, COUNT(*) as total, SUM(CASE WHEN is_active=1 THEN 1 ELSE 0 END) as active FROM user_facts GROUP BY persona_id",
-        fetch_all=True)
+        "SELECT persona_id, COUNT(*) as total, SUM(CASE WHEN is_active=1 THEN 1 ELSE 0 END) as active FROM user_facts WHERE user_id=? GROUP BY persona_id",
+        (_current_uid(),), fetch_all=True)
     result = {r["persona_id"]: {"total": r["total"], "active": r["active"]} for r in rows}
     conn.close()
     return jsonify(result)
@@ -1334,8 +1352,14 @@ def get_facts_count():
 @app.route("/api/facts/persona/<pid>", methods=["GET"])
 def get_facts_by_persona(pid):
     conn = get_db_connection()
+    uid = _current_uid()
+    # 校验 persona 归属
+    prow = execute_query(conn, "SELECT id FROM personas WHERE id=? AND user_id=?", (pid, uid), fetch_one=True)
+    if not prow:
+        conn.close()
+        return jsonify({"error": "persona not found"}), 404
     rows = execute_query(conn,
-        "SELECT * FROM user_facts WHERE persona_id=? ORDER BY is_active DESC, created_at DESC", (pid,), fetch_all=True)
+        "SELECT * FROM user_facts WHERE persona_id=? AND user_id=? ORDER BY is_active DESC, created_at DESC", (pid, uid), fetch_all=True)
     result = [row_to_dict(r) for r in rows]
     conn.close()
     return jsonify(result)
@@ -1344,7 +1368,7 @@ def get_facts_by_persona(pid):
 @app.route("/api/facts/<fid>", methods=["GET"])
 def get_fact(fid):
     conn = get_db_connection()
-    row = execute_query(conn, "SELECT * FROM user_facts WHERE id=?", (fid,), fetch_one=True)
+    row = execute_query(conn, "SELECT * FROM user_facts WHERE id=? AND user_id=?", (fid, _current_uid()), fetch_one=True)
     conn.close()
     return jsonify(row_to_dict(row) if row else {})
 
@@ -1360,12 +1384,13 @@ def create_fact():
 def update_fact(fid):
     data = request.get_json() or {}
     conn = get_db_connection()
+    uid = _current_uid()
     execute_query(conn,
-        "UPDATE user_facts SET category=?, fact_key=?, fact_value=?, confidence=?, occurred_at=?, emotion_tag=?, related_fact_ids=?, source_case=?, source_session=?, source_text=? WHERE id=?",
+        "UPDATE user_facts SET category=?, fact_key=?, fact_value=?, confidence=?, occurred_at=?, emotion_tag=?, related_fact_ids=?, source_case=?, source_session=?, source_text=? WHERE id=? AND user_id=?",
         (data.get("category",""), data.get("fact_key",""), data.get("fact_value",""),
          data.get("confidence","explicit"), data.get("occurred_at",""), data.get("emotion_tag",""),
          data.get("related_fact_ids",""), data.get("source_case",""), data.get("source_session",""),
-         data.get("source_text",""), fid))
+         data.get("source_text",""), fid, uid))
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
@@ -1374,7 +1399,7 @@ def update_fact(fid):
 @app.route("/api/facts/<fid>", methods=["DELETE"])
 def delete_fact(fid):
     conn = get_db_connection()
-    execute_query(conn, "UPDATE user_facts SET is_active=0 WHERE id=?", (fid,))
+    execute_query(conn, "UPDATE user_facts SET is_active=0 WHERE id=? AND user_id=?", (fid, _current_uid()))
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
@@ -2278,6 +2303,7 @@ def simulate_chat():
     messages = data.get("messages", [])
     auto_eval = data.get("auto_eval", False)
     delay_ms = data.get("delay_ms", 0)
+    uid = _current_uid()
 
     if not persona_id:
         return jsonify({"error": "persona_id is required"}), 400
@@ -2286,7 +2312,7 @@ def simulate_chat():
 
     # 获取用户画像
     conn = get_db_connection()
-    row = execute_query(conn, "SELECT * FROM personas WHERE id=?", (persona_id,), fetch_one=True)
+    row = execute_query(conn, "SELECT * FROM personas WHERE id=? AND user_id=?", (persona_id, uid), fetch_one=True)
     conn.close()
 
     if not row:
@@ -2307,7 +2333,7 @@ def simulate_chat():
         user_message = msg.strip()
 
         # 保存用户消息
-        save_chat_msg(persona_id, "user", name, user_message)
+        save_chat_msg(persona_id, "user", name, user_message, user_id=uid)
 
         # 构建请求
         system_prompt = pipi_api.build_system_prompt(persona_data, device_id, target_api=target_api)
@@ -2324,18 +2350,18 @@ def simulate_chat():
         eval_result = None
 
         if reply_text:
-            reply_id = save_chat_msg(persona_id, "pipi", _get_toy_persona_name(target_api), reply_text)
+            reply_id = save_chat_msg(persona_id, "pipi", _get_toy_persona_name(target_api), reply_text, user_id=uid)
 
             # 先提取事实（同步），确保评测时有最新事实
             try:
                 conn = get_db_connection()
                 fact_rows = execute_query(conn,
-                    "SELECT id, category, fact_key, entity_name, fact_value FROM user_facts WHERE persona_id=? AND is_active=1",
-                    (persona_id,), fetch_all=True)
+                    "SELECT id, category, fact_key, entity_name, fact_value FROM user_facts WHERE persona_id=? AND is_active=1 AND user_id=?",
+                    (persona_id, uid), fetch_all=True)
                 existing_facts = [row_to_dict(r) for r in fact_rows]
                 history_rows = execute_query(conn,
-                    "SELECT role, text FROM chat_messages WHERE persona_id=? ORDER BY id DESC LIMIT 10",
-                    (persona_id,), fetch_all=True)
+                    "SELECT role, text FROM chat_messages WHERE persona_id=? AND user_id=? ORDER BY id DESC LIMIT 10",
+                    (persona_id, uid), fetch_all=True)
                 conn.close()
 
                 chat_history_for_extract = []
@@ -2356,14 +2382,14 @@ def simulate_chat():
                         f["confidence"] = "implicit"
                         f["source_session"] = persona_id
                         f["source_text"] = user_message
-                        _create_fact(f)
+                        _create_fact(f, user_id=uid)
             except Exception as e:
                 print(f"[SIMULATE FACT ERROR] {persona_id}: {e}", flush=True)
 
             # 自动评测（事实提取后）
             if auto_eval:
                 conn = get_db_connection()
-                context = _build_eval_context(conn, persona_id, reply_id)
+                context = _build_eval_context(conn, persona_id, reply_id, user_id=uid)
                 conn.close()
 
                 llm_config2 = get_llm_config()
@@ -2411,15 +2437,16 @@ def batch_evaluate():
     data = request.get_json() or {}
     persona_id = data.get("persona_id")
     limit = data.get("limit", 50)
+    uid = _current_uid()
 
     conn = get_db_connection()
     query = """
         SELECT m.id, m.persona_id, m.text, m.created_at
         FROM chat_messages m
         LEFT JOIN auto_evaluation e ON m.id = e.message_id
-        WHERE m.role = 'pipi' AND e.id IS NULL
+        WHERE m.role = 'pipi' AND e.id IS NULL AND m.user_id = ?
     """
-    params = []
+    params = [uid]
     if persona_id:
         query += " AND m.persona_id = ?"
         params.append(persona_id)
@@ -2430,14 +2457,15 @@ def batch_evaluate():
     conn.close()
 
     if pending:
-        t = threading.Thread(target=_batch_evaluate_worker, args=([row_to_dict(p) for p in pending],), daemon=True)
+        t = threading.Thread(target=_batch_evaluate_worker, args=([row_to_dict(p) for p in pending], uid), daemon=True)
         t.start()
 
     return jsonify({"pending_count": len(pending), "status": "processing"})
 
 
-def _batch_evaluate_worker(pending_msgs):
+def _batch_evaluate_worker(pending_msgs, user_id=None):
     """后台批量评测工作线程"""
+    uid = user_id
     corrections = _load_recent_corrections(eval_type="chat", limit=20)
     for msg in pending_msgs:
         try:
@@ -2448,12 +2476,12 @@ def _batch_evaluate_worker(pending_msgs):
             # 获取这条回复前的用户消息
             conn = get_db_connection()
             user_msg_row = execute_query(conn,
-                "SELECT text FROM chat_messages WHERE persona_id=? AND id < ? AND role='user' ORDER BY id DESC LIMIT 1",
-                (persona_id, msg_id), fetch_one=True)
+                "SELECT text FROM chat_messages WHERE persona_id=? AND id < ? AND role='user' AND user_id=? ORDER BY id DESC LIMIT 1",
+                (persona_id, msg_id, uid), fetch_one=True)
             user_message = user_msg_row['text'] if user_msg_row else ""
 
             # 构建上下文
-            context = _build_eval_context(conn, persona_id, msg_id)
+            context = _build_eval_context(conn, persona_id, msg_id, user_id=uid)
             conn.close()
 
             # 调用评测（并发闸保护，防止 burst 请求打爆 LLM）
@@ -2478,7 +2506,7 @@ def _batch_evaluate_worker(pending_msgs):
             print(f"[BATCH EVAL ERROR] {msg.get('id')}: {e}")
 
 
-def _build_eval_context(conn, persona_id, current_msg_id):
+def _build_eval_context(conn, persona_id, current_msg_id, user_id=None):
     """构建评测上下文"""
     from datetime import datetime, timedelta
 
@@ -2487,9 +2515,9 @@ def _build_eval_context(conn, persona_id, current_msg_id):
     # 获取当天对话
     today_msgs = execute_query(conn, """
         SELECT id, role, text, created_at FROM chat_messages
-        WHERE persona_id = ? AND id < ? AND date(created_at) = ?
+        WHERE persona_id = ? AND id < ? AND date(created_at) = ? AND user_id = ?
         ORDER BY id
-    """, (persona_id, current_msg_id, today), fetch_all=True)
+    """, (persona_id, current_msg_id, today, user_id), fetch_all=True)
     today_msgs = [row_to_dict(m) for m in today_msgs]
 
     # 如果当天不足 6 条（3轮），补取昨天的
@@ -2497,9 +2525,9 @@ def _build_eval_context(conn, persona_id, current_msg_id):
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         older_msgs = execute_query(conn, """
             SELECT id, role, text, created_at FROM chat_messages
-            WHERE persona_id = ? AND date(created_at) = ?
+            WHERE persona_id = ? AND date(created_at) = ? AND user_id = ?
             ORDER BY id DESC LIMIT 10
-        """, (persona_id, yesterday), fetch_all=True)
+        """, (persona_id, yesterday, user_id), fetch_all=True)
         older_msgs = [row_to_dict(m) for m in older_msgs]
         today_msgs = list(reversed(older_msgs)) + today_msgs
 
@@ -2512,8 +2540,8 @@ def _build_eval_context(conn, persona_id, current_msg_id):
                COALESCE(mdr.forget_threshold, 0.1) as forget_threshold
         FROM user_facts uf
         LEFT JOIN memory_decay_rules mdr ON uf.memory_level = mdr.level
-        WHERE uf.persona_id = ? AND uf.is_active = 1
-    """, (persona_id,), fetch_all=True)
+        WHERE uf.persona_id = ? AND uf.is_active = 1 AND uf.user_id = ?
+    """, (persona_id, user_id), fetch_all=True)
 
     # 计算当前权重，过滤已遗忘的事实（permanent/habitual 永不遗忘）
     user_facts = []
@@ -2534,7 +2562,7 @@ def _build_eval_context(conn, persona_id, current_msg_id):
             })
 
     # 获取用户画像
-    persona = execute_query(conn, "SELECT * FROM personas WHERE id = ?", (persona_id,), fetch_one=True)
+    persona = execute_query(conn, "SELECT * FROM personas WHERE id = ? AND user_id = ?", (persona_id, user_id), fetch_one=True)
     persona_data = row_to_dict(persona) if persona else None
 
     # 获取玩偶人设（按用户绑定的 target_api 查）
@@ -2795,8 +2823,10 @@ def _get_memory_level_for_category(conn, category):
     return default["value"] if default else "medium"
 
 
-def _create_fact(data):
+def _create_fact(data, user_id=None):
     import time
+    if user_id is None:
+        user_id = _current_uid()
     persona_id = data.get("persona_id", "")
     category = data.get("category", "")
     fact_key = data.get("fact_key", "")
@@ -2870,8 +2900,8 @@ def _create_fact(data):
         # 不同天的记录保留，新增当天记录
 
     execute_query(conn,
-        "INSERT INTO user_facts (persona_id, category, fact_key, entity_name, fact_value, fact_type, confidence, occurred_at, emotion_tag, related_fact_ids, source_case, source_session, source_text, memory_level, weight) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1.0)",
-        (persona_id, category, fact_key, entity_name, fact_value, fact_type, confidence, occurred_at, emotion_tag, related_fact_ids, source_case, source_session, source_text, memory_level))
+        "INSERT INTO user_facts (persona_id, category, fact_key, entity_name, fact_value, fact_type, confidence, occurred_at, emotion_tag, related_fact_ids, source_case, source_session, source_text, memory_level, weight, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1.0,?)",
+        (persona_id, category, fact_key, entity_name, fact_value, fact_type, confidence, occurred_at, emotion_tag, related_fact_ids, source_case, source_session, source_text, memory_level, user_id))
     entity_tag = f"[{entity_name}]" if entity_name else ""
     print(f"[FACT INSERT] {category}.{fact_key}{entity_tag}({fact_type}) = {fact_value[:50]}")
 
@@ -2889,11 +2919,13 @@ def _create_fact(data):
     conn.close()
 
 
-def save_chat_msg(persona_id, role, user_name, text):
+def save_chat_msg(persona_id, role, user_name, text, user_id=None):
+    if user_id is None:
+        user_id = _current_uid()
     conn = get_db_connection()
     cur = execute_query(conn,
-        "INSERT INTO chat_messages (persona_id, role, user_name, text) VALUES (?,?,?,?)",
-        (persona_id, role, user_name, text))
+        "INSERT INTO chat_messages (persona_id, role, user_name, text, user_id) VALUES (?,?,?,?,?)",
+        (persona_id, role, user_name, text, user_id))
     msg_id = get_lastrowid(cur)
     conn.commit()
     conn.close()
@@ -2903,7 +2935,8 @@ def save_chat_msg(persona_id, role, user_name, text):
 def call_api(persona_id, message):
     uid = persona_id if persona_id else "guest"
     uname = uid.split('/')[-1] if '/' not in uid else uid
-    save_chat_msg(uid, "user", uname, message)
+    cur_uid = _current_uid()
+    save_chat_msg(uid, "user", uname, message, user_id=cur_uid)
 
     if persona_id == "__guest__":
         device_id = "TEST_DEV_HUARONG_guest_" + str(random.randint(10000000, 99999999))
@@ -2912,7 +2945,7 @@ def call_api(persona_id, message):
         api_url, api_key = None, None  # 使用默认
     else:
         conn = get_db_connection()
-        row = execute_query(conn, "SELECT * FROM personas WHERE id=?", (persona_id,), fetch_one=True)
+        row = execute_query(conn, "SELECT * FROM personas WHERE id=? AND user_id=?", (persona_id, cur_uid), fetch_one=True)
         conn.close()
         if not row:
             return {"error": "用户不存在"}
@@ -2931,7 +2964,7 @@ def call_api(persona_id, message):
     print(f"[CALL API] persona_id={persona_id} device_id={device_id} msg={message[:50]}", flush=True)
     result = pipi_api.call_pipi_stream(messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers, protocol=_protocol)
     if result.get("full_text"):
-        msg_id = save_chat_msg(persona_id or "guest", "pipi", _get_toy_persona_name(target_api) if persona_id and persona_id != "__guest__" else "皮皮", result["full_text"])
+        msg_id = save_chat_msg(persona_id or "guest", "pipi", _get_toy_persona_name(target_api) if persona_id and persona_id != "__guest__" else "皮皮", result["full_text"], user_id=cur_uid)
         result["message_id"] = msg_id
 
         # 实时评测（如果开关开启）
@@ -2941,7 +2974,7 @@ def call_api(persona_id, message):
             print(f"[EVAL THREAD START] msg_id={msg_id}", flush=True)
             t_eval = threading.Thread(
                 target=_evaluate_and_save,
-                args=(msg_id, persona_id, message, result["full_text"], persona_data),
+                args=(msg_id, persona_id, message, result["full_text"], persona_data, cur_uid),
                 daemon=True
             )
             t_eval.start()
@@ -2949,17 +2982,17 @@ def call_api(persona_id, message):
     result["user"] = name
 
     if persona_id and persona_id != "__guest__":
-        t = threading.Thread(target=_extract_and_save, args=(persona_id, message, persona_data), daemon=True)
+        t = threading.Thread(target=_extract_and_save, args=(persona_id, message, persona_data, cur_uid), daemon=True)
         t.start()
 
     return result
 
 
-def _evaluate_and_save(msg_id, persona_id, user_message, reply_text, persona_data):
+def _evaluate_and_save(msg_id, persona_id, user_message, reply_text, persona_data, user_id=None):
     """实时评测并保存结果"""
     try:
         conn = get_db_connection()
-        context = _build_eval_context(conn, persona_id, msg_id)
+        context = _build_eval_context(conn, persona_id, msg_id, user_id=user_id)
         conn.close()
 
         corrections = _load_recent_corrections(eval_type="chat", limit=20)
@@ -2983,16 +3016,18 @@ def _evaluate_and_save(msg_id, persona_id, user_message, reply_text, persona_dat
         print(f"[REALTIME EVAL ERROR] {msg_id}: {e}", flush=True)
 
 
-def _extract_and_save(persona_id, message, persona_data):
+def _extract_and_save(persona_id, message, persona_data, user_id=None):
+    if user_id is None:
+        user_id = _current_uid()
     try:
         conn = get_db_connection()
         fact_rows = execute_query(conn,
-            "SELECT id, category, fact_key, entity_name, fact_value FROM user_facts WHERE persona_id=? AND is_active=1",
-            (persona_id,), fetch_all=True)
+            "SELECT id, category, fact_key, entity_name, fact_value FROM user_facts WHERE persona_id=? AND is_active=1 AND user_id=?",
+            (persona_id, user_id), fetch_all=True)
         existing_facts = [row_to_dict(r) for r in fact_rows]
         history_rows = execute_query(conn,
-            "SELECT role, text FROM chat_messages WHERE persona_id=? ORDER BY id DESC LIMIT 10",
-            (persona_id,), fetch_all=True)
+            "SELECT role, text FROM chat_messages WHERE persona_id=? AND user_id=? ORDER BY id DESC LIMIT 10",
+            (persona_id, user_id), fetch_all=True)
         conn.close()
 
         chat_history = []
@@ -3015,7 +3050,7 @@ def _extract_and_save(persona_id, message, persona_data):
                 f["confidence"] = "implicit"
                 f["source_session"] = persona_id
                 f["source_text"] = message
-                _create_fact(f)
+                _create_fact(f, user_id=user_id)
 
     except Exception as e:
         import traceback
@@ -3122,11 +3157,12 @@ def batch_create_growth():
     conn.close()
 
     # 为每个用户启动成长任务
+    uid = _current_uid()
     for p in created_personas:
         conn = get_db_connection()
         cur = execute_query(conn,
-            "INSERT INTO growth_tasks (persona_id, speed, status, total_messages) VALUES (?,?,?,?)",
-            (p["id"], speed, "pending", len(messages)))
+            "INSERT INTO growth_tasks (persona_id, speed, status, total_messages, user_id) VALUES (?,?,?,?,?)",
+            (p["id"], speed, "pending", len(messages), uid))
         task_id = get_lastrowid(cur)
 
         for idx, msg in enumerate(messages):
@@ -3141,7 +3177,7 @@ def batch_create_growth():
         task_ids.append(task_id)
 
         # 启动后台线程
-        t = threading.Thread(target=_growth_worker, args=(task_id,), daemon=True)
+        t = threading.Thread(target=_growth_worker, args=(task_id, uid), daemon=True)
         t.start()
 
     return jsonify({
@@ -3174,17 +3210,18 @@ def start_growth():
     if not messages or not isinstance(messages, list):
         return jsonify({"error": "messages must be a non-empty list"}), 400
 
-    # 检查用户是否存在
+    # 检查用户是否存在且属于当前用户
     conn = get_db_connection()
-    row = execute_query(conn, "SELECT id FROM personas WHERE id=?", (persona_id,), fetch_one=True)
+    uid = _current_uid()
+    row = execute_query(conn, "SELECT id FROM personas WHERE id=? AND user_id=?", (persona_id, uid), fetch_one=True)
     if not row:
         conn.close()
         return jsonify({"error": f"persona_id '{persona_id}' not found"}), 404
 
     # 创建成长任务
     cur = execute_query(conn,
-        "INSERT INTO growth_tasks (persona_id, speed, status, total_messages) VALUES (?,?,?,?)",
-        (persona_id, speed, "pending", len(messages)))
+        "INSERT INTO growth_tasks (persona_id, speed, status, total_messages, user_id) VALUES (?,?,?,?,?)",
+        (persona_id, speed, "pending", len(messages), uid))
     task_id = get_lastrowid(cur)
 
     # 创建进度记录
@@ -3198,7 +3235,7 @@ def start_growth():
     conn.close()
 
     # 启动后台执行线程
-    t = threading.Thread(target=_growth_worker, args=(task_id,), daemon=True)
+    t = threading.Thread(target=_growth_worker, args=(task_id, uid), daemon=True)
     t.start()
 
     return jsonify({
@@ -3272,12 +3309,17 @@ def get_growth_result(task_id):
         (task_id,), fetch_all=True)
     progress = [row_to_dict(r) for r in progress_rows]
 
-    # 获取该用户的所有事实（成长期间新增的）
+    # 获取该用户的所有事实（成长期间新增的，按 user_id 隔离）
     persona_id = task["persona_id"]
     created_at = task["created_at"]
+    uid = _current_uid()
+    # 校验 task 归属
+    if task.get("user_id") and int(task["user_id"]) != uid:
+        conn.close()
+        return jsonify({"error": "task not found"}), 404
     facts_rows = execute_query(conn,
-        "SELECT * FROM user_facts WHERE persona_id=? AND created_at >= ? ORDER BY created_at",
-        (persona_id, created_at), fetch_all=True)
+        "SELECT * FROM user_facts WHERE persona_id=? AND created_at >= ? AND user_id=? ORDER BY created_at",
+        (persona_id, created_at, uid), fetch_all=True)
     extracted_facts = [row_to_dict(r) for r in facts_rows]
 
     conn.close()
@@ -3843,12 +3885,13 @@ def get_growth_tasks():
 @app.route("/api/growth/tasks/<int:task_id>/retry", methods=["POST"])
 def retry_growth_task(task_id):
     """重新执行失败或 pending 状态的任务"""
+    uid = _current_uid()
     conn = get_db_connection()
 
     # 获取任务信息
     task = execute_query(conn, """
-        SELECT * FROM growth_tasks WHERE id = ?
-    """, (task_id,), fetch_one=True)
+        SELECT * FROM growth_tasks WHERE id = ? AND user_id = ?
+    """, (task_id, uid), fetch_one=True)
 
     if not task:
         conn.close()
@@ -3864,7 +3907,7 @@ def retry_growth_task(task_id):
     completed = task["completed_messages"] or 0
 
     # 从 personas 表获取 device_id
-    persona = execute_query(conn, "SELECT device_id FROM personas WHERE id = ?", (persona_id,), fetch_one=True)
+    persona = execute_query(conn, "SELECT device_id FROM personas WHERE id = ? AND user_id = ?", (persona_id, uid), fetch_one=True)
     if not persona:
         conn.close()
         return jsonify({"error": "persona not found"}), 404
@@ -3873,12 +3916,12 @@ def retry_growth_task(task_id):
 
     # 获取该用户已发送的消息数量
     sent_count = execute_query(conn, """
-        SELECT COUNT(*) as cnt FROM chat_messages WHERE persona_id = ? AND role = 'user'
-    """, (persona_id,), fetch_one=True)
+        SELECT COUNT(*) as cnt FROM chat_messages WHERE persona_id = ? AND role = 'user' AND user_id = ?
+    """, (persona_id, uid), fetch_one=True)
     sent_count = row_to_dict(sent_count)["cnt"]
 
     # 重新获取消息模板（从 persona 重新生成）
-    persona_data = execute_query(conn, "SELECT * FROM personas WHERE id = ?", (persona_id,), fetch_one=True)
+    persona_data = execute_query(conn, "SELECT * FROM personas WHERE id = ? AND user_id = ?", (persona_id, uid), fetch_one=True)
     persona_data = row_to_dict(persona_data)
 
     # 更新任务状态为 running
@@ -3890,7 +3933,7 @@ def retry_growth_task(task_id):
     conn.close()
 
     # 启动后台线程继续执行
-    t = threading.Thread(target=_growth_worker, args=(task_id,), daemon=True)
+    t = threading.Thread(target=_growth_worker, args=(task_id, uid), daemon=True)
     t.start()
 
     return jsonify({"status": "retrying", "task_id": task_id, "from_message": sent_count})
@@ -3963,6 +4006,7 @@ def multi_create_growth():
         })
 
     # 后台线程异步处理 LLM 生成 + DB 写入，避免 gunicorn worker 超时
+    uid = _current_uid()
     def _multi_create_worker():
         for item in accepted:
             pid = item["persona_id"]
@@ -3970,7 +4014,7 @@ def multi_create_growth():
             name = item["name"]
             cfg = item["cfg"]
             try:
-                _create_one_persona_async(pid, did, name, cfg)
+                _create_one_persona_async(pid, did, name, cfg, user_id=uid)
             except Exception as e:
                 import traceback
                 print(f"[MULTI CREATE ERROR] {name}: {e}\n{traceback.format_exc()}", flush=True)
@@ -3986,8 +4030,10 @@ def multi_create_growth():
     })
 
 
-def _create_one_persona_async(persona_id, device_id, name, cfg):
+def _create_one_persona_async(persona_id, device_id, name, cfg, user_id=None):
     """单个用户的异步创建：LLM 生成 profile + messages + 写 DB + 启动 growth worker"""
+    if user_id is None:
+        user_id = _current_uid()
     speed = cfg.get("speed", "normal")
     categories = cfg.get("categories", [])
     custom_messages = cfg.get("custom_messages", [])
@@ -4053,7 +4099,7 @@ def _create_one_persona_async(persona_id, device_id, name, cfg):
         profile.get("top_expectations", ""),
         profile.get("minefields", ""),
         target_api,
-        _current_uid(),
+        user_id,
     ]
 
     if USE_MYSQL:
@@ -4075,8 +4121,8 @@ def _create_one_persona_async(persona_id, device_id, name, cfg):
 
     # 创建成长任务
     cur = execute_query(conn,
-        "INSERT INTO growth_tasks (persona_id, speed, status, total_messages) VALUES (?,?,?,?)",
-        (persona_id, speed, "pending", len(messages)))
+        "INSERT INTO growth_tasks (persona_id, speed, status, total_messages, user_id) VALUES (?,?,?,?,?)",
+        (persona_id, speed, "pending", len(messages), user_id))
     task_id = get_lastrowid(cur)
 
     # 创建进度记录
@@ -4091,7 +4137,7 @@ def _create_one_persona_async(persona_id, device_id, name, cfg):
     print(f"[MULTI CREATE] {name} saved persona_id={persona_id} task_id={task_id} msgs={len(messages)}", flush=True)
 
     # 启动后台成长 worker
-    t = threading.Thread(target=_growth_worker, args=(task_id,), daemon=True)
+    t = threading.Thread(target=_growth_worker, args=(task_id, user_id), daemon=True)
     t.start()
 
 
@@ -4126,9 +4172,10 @@ def auto_fill_persona():
 
     # 创建成长任务
     conn = get_db_connection()
+    uid_auto = _current_uid()
     cur = execute_query(conn,
-        "INSERT INTO growth_tasks (persona_id, speed, status, total_messages) VALUES (?,?,?,?)",
-        (persona_id, speed, "pending", len(messages)))
+        "INSERT INTO growth_tasks (persona_id, speed, status, total_messages, user_id) VALUES (?,?,?,?,?)",
+        (persona_id, speed, "pending", len(messages), uid_auto))
     task_id = get_lastrowid(cur)
 
     for idx, msg in enumerate(messages):
@@ -4140,7 +4187,7 @@ def auto_fill_persona():
     conn.close()
 
     # 启动后台线程
-    t = threading.Thread(target=_growth_worker, args=(task_id,), daemon=True)
+    t = threading.Thread(target=_growth_worker, args=(task_id, uid_auto), daemon=True)
     t.start()
 
     return jsonify({
@@ -4155,16 +4202,17 @@ def auto_fill_persona():
 def list_growth_tasks():
     """获取成长任务列表"""
     persona_id = request.args.get("persona_id")
+    uid = _current_uid()
 
     conn = get_db_connection()
     if persona_id:
         rows = execute_query(conn,
-            "SELECT * FROM growth_tasks WHERE persona_id=? ORDER BY created_at DESC LIMIT 50",
-            (persona_id,), fetch_all=True)
+            "SELECT * FROM growth_tasks WHERE persona_id=? AND user_id=? ORDER BY created_at DESC LIMIT 50",
+            (persona_id, uid), fetch_all=True)
     else:
         rows = execute_query(conn,
-            "SELECT * FROM growth_tasks ORDER BY created_at DESC LIMIT 50",
-            fetch_all=True)
+            "SELECT * FROM growth_tasks WHERE user_id=? ORDER BY created_at DESC LIMIT 50",
+            (uid,), fetch_all=True)
     conn.close()
 
     tasks = [row_to_dict(r) for r in rows]
@@ -4176,26 +4224,28 @@ def list_growth_tasks():
     return jsonify(tasks)
 
 
-def _growth_worker(task_id):
-    """用户成长后台工作线程"""
+def _growth_worker(task_id, user_id=None, slot_type=None):
+    """用户成长后台工作线程。user_id 隔离。"""
+    if user_id is None:
+        user_id = 1
     import time as time_module
 
     try:
         conn = get_db_connection()
 
-        # 原子性抢占任务（避免多 worker 同时恢复导致重复执行）
+        # 原子性抢占任务（避免多 worker 同时恢复导致重复执行，按 user_id 隔离）
         if USE_MYSQL:
             execute_query(conn,
-                "UPDATE growth_tasks SET status=%s, started_at=NOW() WHERE id=%s AND status='pending'",
-                ("running", task_id))
+                "UPDATE growth_tasks SET status=%s, started_at=NOW() WHERE id=%s AND status='pending' AND user_id=%s",
+                ("running", task_id, user_id))
         else:
             execute_query(conn,
-                "UPDATE growth_tasks SET status=?, started_at=NOW() WHERE id=? AND status='pending'",
-                ("running", task_id))
+                "UPDATE growth_tasks SET status=?, started_at=NOW() WHERE id=? AND status='pending' AND user_id=?",
+                ("running", task_id, user_id))
         conn.commit()
 
         # 检查是否成功抢占（防止多 worker 重复执行）
-        task = execute_query(conn, "SELECT * FROM growth_tasks WHERE id=? AND status='running'", (task_id,), fetch_one=True)
+        task = execute_query(conn, "SELECT * FROM growth_tasks WHERE id=? AND status='running' AND user_id=?", (task_id, user_id), fetch_one=True)
         if not task:
             conn.close()
             print(f"[GROWTH] task {task_id} already claimed by another worker, exiting")
@@ -4204,12 +4254,12 @@ def _growth_worker(task_id):
         persona_id = task["persona_id"]
         speed = task.get("speed", "normal")
 
-        # 获取用户画像
-        persona_row = execute_query(conn, "SELECT * FROM personas WHERE id=?", (persona_id,), fetch_one=True)
+        # 获取用户画像（按 user_id 隔离）
+        persona_row = execute_query(conn, "SELECT * FROM personas WHERE id=? AND user_id=?", (persona_id, user_id), fetch_one=True)
         if not persona_row:
             execute_query(conn,
-                "UPDATE growth_tasks SET status=?, error_message=? WHERE id=?",
-                ("failed", "persona not found", task_id))
+                "UPDATE growth_tasks SET status=?, error_message=? WHERE id=? AND user_id=?",
+                ("failed", "persona not found", task_id, user_id))
             conn.commit()
             conn.close()
             return
@@ -4238,7 +4288,7 @@ def _growth_worker(task_id):
 
             try:
                 # 1. 保存用户消息到聊天历史
-                save_chat_msg(persona_id, "user", name, user_message)
+                save_chat_msg(persona_id, "user", name, user_message, user_id=user_id)
 
                 # 2. 调用玩偶接口
                 target_api = persona_data.get("target_api", "pipi")
@@ -4253,19 +4303,19 @@ def _growth_worker(task_id):
 
                 # 3. 保存玩偶回复
                 if reply_text:
-                    save_chat_msg(persona_id, "pipi", _get_toy_persona_name(target_api), reply_text)
+                    save_chat_msg(persona_id, "pipi", _get_toy_persona_name(target_api), reply_text, user_id=user_id)
 
                 # 4. 同步提取事实（准确度优先）
                 extracted_facts = []
                 try:
                     conn2 = get_db_connection()
                     fact_rows = execute_query(conn2,
-                        "SELECT id, category, fact_key, entity_name, fact_value FROM user_facts WHERE persona_id=? AND is_active=1",
-                        (persona_id,), fetch_all=True)
+                        "SELECT id, category, fact_key, entity_name, fact_value FROM user_facts WHERE persona_id=? AND is_active=1 AND user_id=?",
+                        (persona_id, user_id), fetch_all=True)
                     existing_facts = [row_to_dict(r) for r in fact_rows]
                     history_rows = execute_query(conn2,
-                        "SELECT role, text FROM chat_messages WHERE persona_id=? ORDER BY id DESC LIMIT 10",
-                        (persona_id,), fetch_all=True)
+                        "SELECT role, text FROM chat_messages WHERE persona_id=? AND user_id=? ORDER BY id DESC LIMIT 10",
+                        (persona_id, user_id), fetch_all=True)
                     conn2.close()
 
                     chat_history = []
@@ -4286,7 +4336,7 @@ def _growth_worker(task_id):
                             f["confidence"] = "implicit"
                             f["source_session"] = f"growth_task_{task_id}"
                             f["source_text"] = user_message
-                            _create_fact(f)
+                            _create_fact(f, user_id=user_id)
                             extracted_facts.append(f)
 
                     facts_count += len(extracted_facts)
@@ -4342,28 +4392,40 @@ def _growth_worker(task_id):
         try:
             conn7 = get_db_connection()
             execute_query(conn7,
-                "UPDATE growth_tasks SET status=?, error_message=? WHERE id=?",
-                ("failed", str(e), task_id))
+                "UPDATE growth_tasks SET status=?, error_message=? WHERE id=? AND user_id=?",
+                ("failed", str(e), task_id, user_id))
             conn7.commit()
             conn7.close()
         except:
             pass
+    finally:
+        if slot_type:
+            try:
+                _release_slot(slot_type)
+            except Exception as e:
+                print(f"[SLOT RELEASE] {slot_type} failed: {e}", flush=True)
 
 
 # ─── 测试用例管理 API ─────────────────────────────────────
 
 # ─── 异步任务管理（数据库存储，支持多 worker）─────────────────
 
-def _save_async_task(task_id: str, task_type: str, data: dict):
-    """保存任务状态到数据库"""
+def _save_async_task(task_id: str, task_type: str, data: dict, user_id: int = None):
+    """保存任务状态到数据库。
+
+    user_id 参数：worker 调用时传入；路由直接调用时省略，从 g.user 取。
+    INSERT 时写入 user_id，UPDATE 时按 user_id 校验防越权。
+    """
+    if user_id is None:
+        user_id = _current_uid()
     conn = get_db_connection()
     config_json = json.dumps({k: v for k, v in data.items() if k in ("persona_id", "dimension_codes", "count_per_dimension", "clear_existing", "case_ids", "dimension_code", "status_filter", "device_id", "test_task_id")}, ensure_ascii=False)
     progress_json = json.dumps(data.get("progress", {}), ensure_ascii=False)
     result_json = json.dumps({k: v for k, v in data.items() if k in ("cases_created", "cases_executed", "cases_evaluated", "errors", "created_case_ids", "breached_count")}, ensure_ascii=False)
 
     execute_query(conn, """
-        INSERT INTO async_tasks (id, task_type, status, persona_id, config_json, progress_json, result_json, error_message)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO async_tasks (id, task_type, status, persona_id, config_json, progress_json, result_json, error_message, user_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON DUPLICATE KEY UPDATE
             status = VALUES(status),
             config_json = VALUES(config_json),
@@ -4371,15 +4433,17 @@ def _save_async_task(task_id: str, task_type: str, data: dict):
             result_json = VALUES(result_json),
             error_message = VALUES(error_message)
     """, (task_id, task_type, data.get("status", "running"), data.get("persona_id", ""),
-          config_json, progress_json, result_json, data.get("error_message", "")))
+          config_json, progress_json, result_json, data.get("error_message", ""), user_id))
     conn.commit()
     conn.close()
 
 
-def _load_async_task(task_id: str) -> dict:
-    """从数据库加载任务状态"""
+def _load_async_task(task_id: str, user_id: int = None) -> dict:
+    """从数据库加载任务状态。worker 传入 user_id，路由省略走 _current_uid()。"""
+    if user_id is None:
+        user_id = _current_uid()
     conn = get_db_connection()
-    row = execute_query(conn, "SELECT * FROM async_tasks WHERE id = %s", (task_id,), fetch_one=True)
+    row = execute_query(conn, "SELECT * FROM async_tasks WHERE id = %s AND user_id = %s", (task_id, user_id), fetch_one=True)
     conn.close()
     if not row:
         return None
@@ -4440,8 +4504,8 @@ def list_test_tasks():
     limit = int(request.args.get("limit", 20))
 
     conn = get_db_connection()
-    sql = "SELECT * FROM test_tasks WHERE 1=1"
-    params = []
+    sql = "SELECT * FROM test_tasks WHERE 1=1 AND user_id = %s"
+    params = [_current_uid()]
 
     if status:
         sql += " AND status = %s"
@@ -4558,7 +4622,7 @@ def create_test_task():
 def get_test_task(task_id):
     """获取测试任务详情"""
     conn = get_db_connection()
-    row = execute_query(conn, "SELECT * FROM test_tasks WHERE id = %s", (task_id,), fetch_one=True)
+    row = execute_query(conn, "SELECT * FROM test_tasks WHERE id = %s AND user_id = %s", (task_id, _current_uid()), fetch_one=True)
     conn.close()
 
     if not row:
@@ -4587,9 +4651,10 @@ def get_test_task(task_id):
 def delete_test_task(task_id):
     """删除测试任务及其结果"""
     conn = get_db_connection()
+    uid = _current_uid()
 
-    # 检查任务是否存在
-    row = execute_query(conn, "SELECT status FROM test_tasks WHERE id = %s", (task_id,), fetch_one=True)
+    # 检查任务是否存在且属于当前用户
+    row = execute_query(conn, "SELECT status FROM test_tasks WHERE id = %s AND user_id = %s", (task_id, uid), fetch_one=True)
     if not row:
         conn.close()
         return jsonify({"error": "task not found"}), 404
@@ -4602,7 +4667,7 @@ def delete_test_task(task_id):
     # 删除关联的结果
     execute_query(conn, "DELETE FROM test_results WHERE task_id = %s", (task_id,))
     # 删除任务
-    execute_query(conn, "DELETE FROM test_tasks WHERE id = %s", (task_id,))
+    execute_query(conn, "DELETE FROM test_tasks WHERE id = %s AND user_id = %s", (task_id, uid))
     conn.commit()
     conn.close()
 
@@ -4613,8 +4678,9 @@ def delete_test_task(task_id):
 def terminate_test_task(task_id):
     """终止运行中的测试任务"""
     conn = get_db_connection()
+    uid = _current_uid()
 
-    row = execute_query(conn, "SELECT status FROM test_tasks WHERE id = %s", (task_id,), fetch_one=True)
+    row = execute_query(conn, "SELECT status FROM test_tasks WHERE id = %s AND user_id = %s", (task_id, uid), fetch_one=True)
     if not row:
         conn.close()
         return jsonify({"error": "task not found"}), 404
@@ -4635,7 +4701,7 @@ def terminate_test_task(task_id):
 def execute_test_task(task_id):
     """执行测试任务"""
     conn = get_db_connection()
-    row = execute_query(conn, "SELECT * FROM test_tasks WHERE id = %s", (task_id,), fetch_one=True)
+    row = execute_query(conn, "SELECT * FROM test_tasks WHERE id = %s AND user_id = %s", (task_id, _current_uid()), fetch_one=True)
     if not row:
         conn.close()
         return jsonify({"error": "task not found"}), 404
@@ -4645,29 +4711,44 @@ def execute_test_task(task_id):
         conn.close()
         return jsonify({"error": f"task status is {row['status']}, cannot execute"}), 400
 
-    # 更新状态为 running
-    execute_query(conn, "UPDATE test_tasks SET status = 'running', started_at = NOW(), progress_done = 0 WHERE id = %s", (task_id,))
-    # 重置结果状态
-    execute_query(conn, "UPDATE test_results SET status = 'pending', actual_output = NULL, executed_at = NULL WHERE task_id = %s", (task_id,))
+    # 更新状态为 running（按 user_id 隔离）
+    uid = _current_uid()
+    # 用户级并发闸：每用户最多 2 个并发任务
+    slot_type = f"user:{uid}:task"
+    if not _acquire_slot(slot_type, 2, ttl_seconds=7200, wait=False, timeout=0):
+        conn.close()
+        return jsonify({"error": "您已有 2 个任务在执行，请等待完成"}), 429
+    execute_query(conn, "UPDATE test_tasks SET status = 'running', started_at = NOW(), progress_done = 0 WHERE id = %s AND user_id = %s", (task_id, uid))
+    # 重置结果状态（按 user_id 隔离）
+    execute_query(conn, "UPDATE test_results SET status = 'pending', actual_output = NULL, executed_at = NULL WHERE task_id = %s AND user_id = %s", (task_id, uid))
     conn.commit()
     conn.close()
 
     # 启动后台线程
-    t = threading.Thread(target=_execute_task_worker, args=(task_id,))
+    t = threading.Thread(target=_execute_task_worker, args=(task_id, uid, slot_type))
     t.daemon = True
     t.start()
 
     return jsonify({"status": "running", "task_id": task_id})
 
 
-def _execute_task_worker(task_id):
-    """后台执行测试任务"""
+def _execute_task_worker(task_id, user_id=None, slot_type=None):
+    """后台执行测试任务。
+
+    user_id: 路由启动时传入；scheduled_task 从 task 行反查。None 时回退 1。
+    slot_type: 用户级并发槽标识，worker 完成时释放（路由层 acquire）。
+    """
+    if user_id is None:
+        user_id = 1
     try:
         conn = get_db_connection()
 
-        # 获取任务信息
-        task = execute_query(conn, "SELECT * FROM test_tasks WHERE id = %s", (task_id,), fetch_one=True)
+        # 获取任务信息（按 user_id 隔离）
+        task = execute_query(conn, "SELECT * FROM test_tasks WHERE id = %s AND user_id = %s", (task_id, user_id), fetch_one=True)
         task = row_to_dict(task)
+        if not task:
+            print(f"[TASK-EXEC] task {task_id} not found for user_id={user_id}", flush=True)
+            return
         persona_id = task["persona_id"]
         device_id = task["device_id"]
         target_api = task.get("target_api", "pipi")
@@ -4675,8 +4756,8 @@ def _execute_task_worker(task_id):
         # 获取待执行的结果记录（LEFT JOIN：用例被 REGEN 删除时显式标记 skipped，不再静默过滤导致进度卡住）
         results = execute_query(conn,
             "SELECT r.id, r.case_id, c.case_id as case_code, c.input_text FROM test_results r "
-            "LEFT JOIN test_cases c ON r.case_id = c.id WHERE r.task_id = %s ORDER BY c.dimension_code, c.case_id",
-            (task_id,), fetch_all=True)
+            "LEFT JOIN test_cases c ON r.case_id = c.id WHERE r.task_id = %s AND r.user_id = %s ORDER BY c.dimension_code, c.case_id",
+            (task_id, user_id), fetch_all=True)
         results = [row_to_dict(r) for r in results]
 
         done = 0
@@ -4684,10 +4765,10 @@ def _execute_task_worker(task_id):
             # orphan: 用例已被删除（REGEN 重生成或人工删除），跳过执行并标记 skipped
             if not result.get("case_code"):
                 print(f"[TASK-EXEC] {task_id} skip orphan result_id={result['id']} case_id={result['case_id']} (case deleted)", flush=True)
-                execute_query(conn, "UPDATE test_results SET status = 'skipped' WHERE id = %s", (result["id"],))
+                execute_query(conn, "UPDATE test_results SET status = 'skipped' WHERE id = %s AND user_id = %s", (result["id"], user_id))
                 conn.commit()
                 done += 1
-                execute_query(conn, "UPDATE test_tasks SET progress_done = %s WHERE id = %s", (done, task_id))
+                execute_query(conn, "UPDATE test_tasks SET progress_done = %s WHERE id = %s AND user_id = %s", (done, task_id, user_id))
                 continue
 
             case_code = result["case_code"]
@@ -4697,7 +4778,7 @@ def _execute_task_worker(task_id):
                 # 解析多轮对话
                 rounds = _parse_input_rounds(result.get("input_text", ""))
                 if not rounds:
-                    execute_query(conn, "UPDATE test_results SET status = 'error' WHERE id = %s", (result["id"],))
+                    execute_query(conn, "UPDATE test_results SET status = 'error' WHERE id = %s AND user_id = %s", (result["id"], user_id))
                     conn.commit()
                     continue
 
@@ -4709,6 +4790,7 @@ def _execute_task_worker(task_id):
                     headers = {}
                     if CLI_TOKEN:
                         headers["X-CLI-Token"] = CLI_TOKEN
+                    headers["X-User-Id"] = str(user_id)
                     resp = req.post(
                         "http://127.0.0.1:8080/api/test/chat",
                         json={"persona_id": persona_id, "device_id": device_id, "message": msg, "extract_facts": True, "target_api": target_api},
@@ -4728,26 +4810,26 @@ def _execute_task_worker(task_id):
                 if not has_error and all_replies:
                     actual_output = "\n".join(all_replies)
                     execute_query(conn,
-                        "UPDATE test_results SET actual_output = %s, executed_at = NOW(), status = 'executed' WHERE id = %s",
-                        (actual_output, result["id"]))
+                        "UPDATE test_results SET actual_output = %s, executed_at = NOW(), status = 'executed' WHERE id = %s AND user_id = %s",
+                        (actual_output, result["id"], user_id))
                 else:
-                    execute_query(conn, "UPDATE test_results SET status = 'error' WHERE id = %s", (result["id"],))
+                    execute_query(conn, "UPDATE test_results SET status = 'error' WHERE id = %s AND user_id = %s", (result["id"], user_id))
 
             except Exception as e:
                 print(f"[TASK-EXEC ERROR] {case_code}: {e}", flush=True)
-                execute_query(conn, "UPDATE test_results SET status = 'error' WHERE id = %s", (result["id"],))
+                execute_query(conn, "UPDATE test_results SET status = 'error' WHERE id = %s AND user_id = %s", (result["id"], user_id))
 
             done += 1
-            execute_query(conn, "UPDATE test_tasks SET progress_done = %s WHERE id = %s", (done, task_id))
+            execute_query(conn, "UPDATE test_tasks SET progress_done = %s WHERE id = %s AND user_id = %s", (done, task_id, user_id))
             conn.commit()
 
         # 完成：重算 progress_total 为实际可执行数（排除 skipped orphan），避免 100/110 永久卡住
         actual_total = execute_query(conn,
-            "SELECT COUNT(*) AS cnt FROM test_results WHERE task_id = %s AND status != 'skipped'",
-            (task_id,), fetch_one=True)
+            "SELECT COUNT(*) AS cnt FROM test_results WHERE task_id = %s AND status != 'skipped' AND user_id = %s",
+            (task_id, user_id), fetch_one=True)
         actual_total = actual_total["cnt"] if actual_total else done
-        execute_query(conn, "UPDATE test_tasks SET status = 'executed', progress_total = %s, progress_done = %s, completed_at = NOW() WHERE id = %s",
-            (actual_total, done, task_id))
+        execute_query(conn, "UPDATE test_tasks SET status = 'executed', progress_total = %s, progress_done = %s, completed_at = NOW() WHERE id = %s AND user_id = %s",
+            (actual_total, done, task_id, user_id))
         conn.commit()
         conn.close()
         skipped = sum(1 for r in results if not r.get("case_code"))
@@ -4758,18 +4840,24 @@ def _execute_task_worker(task_id):
         print(f"[TASK-EXEC FATAL] {task_id}: {e}\n{traceback.format_exc()}", flush=True)
         try:
             conn = get_db_connection()
-            execute_query(conn, "UPDATE test_tasks SET status = 'failed', error_message = %s WHERE id = %s", (str(e), task_id))
+            execute_query(conn, "UPDATE test_tasks SET status = 'failed', error_message = %s WHERE id = %s AND user_id = %s", (str(e), task_id, user_id))
             conn.commit()
             conn.close()
         except:
             pass
+    finally:
+        if slot_type:
+            try:
+                _release_slot(slot_type)
+            except Exception as e:
+                print(f"[SLOT RELEASE] {slot_type} failed: {e}", flush=True)
 
 
 @app.route("/api/test_tasks/<int:task_id>/evaluate", methods=["POST"])
 def evaluate_test_task(task_id):
     """评测测试任务"""
     conn = get_db_connection()
-    row = execute_query(conn, "SELECT * FROM test_tasks WHERE id = %s", (task_id,), fetch_one=True)
+    row = execute_query(conn, "SELECT * FROM test_tasks WHERE id = %s AND user_id = %s", (task_id, _current_uid()), fetch_one=True)
     if not row:
         conn.close()
         return jsonify({"error": "task not found"}), 404
@@ -4779,31 +4867,39 @@ def evaluate_test_task(task_id):
         conn.close()
         return jsonify({"error": f"task status is {row['status']}, need executed status to evaluate"}), 400
 
-    # 统计待评测的数量
+    # 统计待评测的数量（按 user_id 隔离）
+    uid = _current_uid()
+    # 用户级并发闸：每用户最多 2 个并发任务
+    slot_type = f"user:{uid}:task"
+    if not _acquire_slot(slot_type, 2, ttl_seconds=7200, wait=False, timeout=0):
+        conn.close()
+        return jsonify({"error": "您已有 2 个任务在执行，请等待完成"}), 429
     eval_count = execute_query(conn,
-        "SELECT COUNT(*) as cnt FROM test_results WHERE task_id = %s AND status = 'executed'",
-        (task_id,), fetch_one=True)
+        "SELECT COUNT(*) as cnt FROM test_results WHERE task_id = %s AND status = 'executed' AND user_id = %s",
+        (task_id, uid), fetch_one=True)
     eval_total = eval_count["cnt"] if eval_count else 0
 
     # 更新状态为 evaluating，设置进度
-    execute_query(conn, "UPDATE test_tasks SET status = 'evaluating', progress_done = 0, progress_total = %s WHERE id = %s", (eval_total, task_id))
+    execute_query(conn, "UPDATE test_tasks SET status = 'evaluating', progress_done = 0, progress_total = %s WHERE id = %s AND user_id = %s", (eval_total, task_id, uid))
     conn.commit()
     conn.close()
 
     # 启动后台线程
-    t = threading.Thread(target=_evaluate_task_worker, args=(task_id,))
+    t = threading.Thread(target=_evaluate_task_worker, args=(task_id, uid, slot_type))
     t.daemon = True
     t.start()
 
     return jsonify({"status": "evaluating", "task_id": task_id})
 
 
-def _load_user_facts(conn, persona_id):
-    """加载用户活跃事实（按分类分组），用于评测上下文"""
+def _load_user_facts(conn, persona_id, user_id=None):
+    """加载用户活跃事实（按分类分组），用于评测上下文。user_id 隔离。"""
+    if user_id is None:
+        user_id = _current_uid()
     facts = execute_query(conn,
         "SELECT id, category, fact_key, entity_name, fact_value FROM user_facts "
-        "WHERE persona_id = %s AND is_active = 1",
-        (persona_id,), fetch_all=True)
+        "WHERE persona_id = %s AND is_active = 1 AND user_id = %s",
+        (persona_id, user_id), fetch_all=True)
     return [row_to_dict(f) for f in facts] if facts else []
 
 
@@ -4941,36 +5037,36 @@ def _eval_case_core(result_row: Dict, conn, chat_corrections: List[Dict] = None,
             "needs_review": needs_review, "judges_std": judges_std}
 
 
-def _evaluate_task_worker(task_id):
-    """后台评测测试任务"""
+def _evaluate_task_worker(task_id, user_id=None, slot_type=None):
+    """后台评测测试任务。user_id 隔离。slot_type 用于完成时释放用户级 slot。"""
+    if user_id is None:
+        user_id = 1
     try:
         conn = get_db_connection()
 
-        # 获取 persona_id
-        trow = execute_query(conn, "SELECT persona_id FROM test_tasks WHERE id = %s", (task_id,), fetch_one=True)
+        # 获取 persona_id（按 user_id 隔离）
+        trow = execute_query(conn, "SELECT persona_id FROM test_tasks WHERE id = %s AND user_id = %s", (task_id, user_id), fetch_one=True)
         persona_id = trow["persona_id"] if trow else None
-        user_facts = _load_user_facts(conn, persona_id) if persona_id else []
+        user_facts = _load_user_facts(conn, persona_id, user_id=user_id) if persona_id else []
 
-        # 获取已执行的结果
+        # 获取已执行的结果（按 user_id 隔离）
         results = execute_query(conn,
             """SELECT r.id, r.actual_output, c.case_id, c.dimension_code, c.title, c.test_point, c.input_text,
                       c.expected_output, c.evaluation_points, c.failure_flags, c.score_2_desc, c.score_6_desc, c.score_10_desc
                FROM test_results r
                JOIN test_cases c ON r.case_id = c.id
-               WHERE r.task_id = %s AND r.status = 'executed'
+               WHERE r.task_id = %s AND r.status = 'executed' AND r.user_id = %s
                ORDER BY c.dimension_code, c.case_id""",
-            (task_id,), fetch_all=True)
+            (task_id, user_id), fetch_all=True)
         results = [row_to_dict(r) for r in results]
 
         # 兜底：统计 task 下有多少条 status='executed' 但 case_id 在 test_cases 中已不存在的 orphan
-        # Why: REGEN 在 task 执行过程中删 case 会导致 test_results.case_id 悬空，
-        # 上面的 INNER JOIN 静默丢弃这些 orphan。如果不显式统计，progress_done 直接 = len(results)，
-        # task 被标 completed 但实际有 orphan 永远停在 'executed' 状态。
         orphan_row = execute_query(conn,
             "SELECT COUNT(*) AS cnt FROM test_results r "
             "WHERE r.task_id = " + ("%s" if USE_MYSQL else "?") +
+            " AND r.user_id = " + ("%s" if USE_MYSQL else "?") +
             " AND r.status = 'executed' AND NOT EXISTS (SELECT 1 FROM test_cases c WHERE c.id = r.case_id)",
-            (task_id,), fetch_one=True)
+            (task_id, user_id), fetch_one=True)
         orphan_count = (row_to_dict(orphan_row)["cnt"] if orphan_row else 0) or 0
         if orphan_count > 0:
             print(f"[TASK-EVAL] {task_id} WARNING: {orphan_count} orphan test_results (case_id missing in test_cases), "
@@ -4980,7 +5076,6 @@ def _evaluate_task_worker(task_id):
         passed = 0
         failed = 0
 
-        # 预加载通用 chat 纠正案例
         chat_corrections = _load_recent_corrections(eval_type="chat", limit=10)
 
         for result in results:
@@ -5001,10 +5096,9 @@ def _evaluate_task_worker(task_id):
                 print(f"[TASK-EVAL ERROR] {case_code}: {e}", flush=True)
 
             done += 1
-            execute_query(conn, "UPDATE test_tasks SET progress_done = %s WHERE id = %s", (done, task_id))
+            execute_query(conn, "UPDATE test_tasks SET progress_done = %s WHERE id = %s AND user_id = %s", (done, task_id, user_id))
             conn.commit()
 
-        # 完成：如果有 orphan（case 已被 REGEN 删除），标 partial 而不是 completed
         if orphan_count > 0:
             final_status = "partial"
             print(f"[TASK-EVAL] {task_id} partial: evaluated={done}, "
@@ -5012,8 +5106,8 @@ def _evaluate_task_worker(task_id):
         else:
             final_status = "completed"
             print(f"[TASK-EVAL] {task_id} completed, passed={passed}, failed={failed}", flush=True)
-        execute_query(conn, "UPDATE test_tasks SET status = %s, completed_at = NOW() WHERE id = %s",
-                      (final_status, task_id))
+        execute_query(conn, "UPDATE test_tasks SET status = %s, completed_at = NOW() WHERE id = %s AND user_id = %s",
+                      (final_status, task_id, user_id))
         conn.commit()
         conn.close()
 
@@ -5022,11 +5116,17 @@ def _evaluate_task_worker(task_id):
         print(f"[TASK-EVAL FATAL] {task_id}: {e}\n{traceback.format_exc()}", flush=True)
         try:
             conn = get_db_connection()
-            execute_query(conn, "UPDATE test_tasks SET status = 'failed', error_message = %s WHERE id = %s", (str(e), task_id))
+            execute_query(conn, "UPDATE test_tasks SET status = 'failed', error_message = %s WHERE id = %s AND user_id = %s", (str(e), task_id, user_id))
             conn.commit()
             conn.close()
         except:
             pass
+    finally:
+        if slot_type:
+            try:
+                _release_slot(slot_type)
+            except Exception as e:
+                print(f"[SLOT RELEASE] {slot_type} failed: {e}", flush=True)
 
 
 @app.route("/api/test_tasks/<int:task_id>/progress", methods=["GET"])
@@ -5117,13 +5217,14 @@ def reevaluate_failed_results(task_id):
     """
     conn = get_db_connection()
 
-    # 检查任务存在
-    task_row = execute_query(conn, "SELECT id FROM test_tasks WHERE id = %s", (task_id,), fetch_one=True)
+    # 检查任务存在且属于当前用户
+    task_row = execute_query(conn, "SELECT id FROM test_tasks WHERE id = %s AND user_id = %s", (task_id, _current_uid()), fetch_one=True)
     if not task_row:
         conn.close()
         return jsonify({"error": "task not found"}), 404
 
-    # 找出需要重新评测的结果
+    # 找出需要重新评测的结果（按 user_id 隔离）
+    uid = _current_uid()
     reval_all = request.args.get("all", "0") == "1"
     if reval_all:
         # 全部重评
@@ -5131,27 +5232,33 @@ def reevaluate_failed_results(task_id):
             SELECT r.id, c.case_id
             FROM test_results r
             JOIN test_cases c ON r.case_id = c.id
-            WHERE r.task_id = %s AND r.actual_output IS NOT NULL
-        """, (task_id,), fetch_all=True)
+            WHERE r.task_id = %s AND r.actual_output IS NOT NULL AND r.user_id = %s
+        """, (task_id, uid), fetch_all=True)
     else:
         # 仅重评失败/未评的
         results = execute_query(conn, """
             SELECT r.id, c.case_id
             FROM test_results r
             JOIN test_cases c ON r.case_id = c.id
-            WHERE r.task_id = %s AND r.actual_output IS NOT NULL
+            WHERE r.task_id = %s AND r.actual_output IS NOT NULL AND r.user_id = %s
               AND (r.score IS NULL OR r.status IN ('pending', 'executed', 'failed'))
-        """, (task_id,), fetch_all=True)
+        """, (task_id, uid), fetch_all=True)
     results = [row_to_dict(r) for r in results]
 
     if not results:
         conn.close()
         return jsonify({"message": "no results to reevaluate", "count": 0})
 
+    # 用户级并发闸
+    slot_type = f"user:{uid}:task"
+    if not _acquire_slot(slot_type, 2, ttl_seconds=7200, wait=False, timeout=0):
+        conn.close()
+        return jsonify({"error": "您已有 2 个任务在执行，请等待完成"}), 429
+
     conn.close()
 
     # 启动后台线程重新评测
-    t = threading.Thread(target=_reevaluate_failed_worker, args=(task_id, [r["id"] for r in results]))
+    t = threading.Thread(target=_reevaluate_failed_worker, args=(task_id, [r["id"] for r in results], uid, slot_type))
     t.daemon = True
     t.start()
 
@@ -5163,21 +5270,22 @@ def reevaluate_failed_results(task_id):
     })
 
 
-def _reevaluate_failed_worker(task_id, result_ids):
-    """后台重新评测失败用例"""
+def _reevaluate_failed_worker(task_id, result_ids, user_id=None, slot_type=None):
+    """后台重新评测失败用例。user_id 隔离。slot_type 用于完成时释放用户级 slot。"""
+    if user_id is None:
+        user_id = 1
     print(f"[RE-EVAL BATCH] Starting re-evaluation for task {task_id}, {len(result_ids)} results", flush=True)
 
     conn = get_db_connection()
 
-    # 加载用户事实（所有结果共用）
-    trow3 = execute_query(conn, "SELECT persona_id FROM test_tasks WHERE id = %s", (task_id,), fetch_one=True)
+    # 加载用户事实（所有结果共用，按 user_id 隔离）
+    trow3 = execute_query(conn, "SELECT persona_id FROM test_tasks WHERE id = %s AND user_id = %s", (task_id, user_id), fetch_one=True)
     persona_id = trow3["persona_id"] if trow3 else None
-    user_facts = _load_user_facts(conn, persona_id) if persona_id else []
+    user_facts = _load_user_facts(conn, persona_id, user_id=user_id) if persona_id else []
 
     success_count = 0
     fail_count = 0
 
-    # 预加载通用 chat 纠正案例
     chat_corrections = _load_recent_corrections(eval_type="chat", limit=10)
 
     for result_id in result_ids:
@@ -5186,8 +5294,8 @@ def _reevaluate_failed_worker(task_id, result_ids):
                    c.expected_output, c.evaluation_points, c.failure_flags, c.score_2_desc, c.score_6_desc, c.score_10_desc
             FROM test_results r
             JOIN test_cases c ON r.case_id = c.id
-            WHERE r.id = %s
-        """, (result_id,), fetch_one=True)
+            WHERE r.id = %s AND r.user_id = %s
+        """, (result_id, user_id), fetch_one=True)
 
         if not row:
             continue
@@ -5211,6 +5319,11 @@ def _reevaluate_failed_worker(task_id, result_ids):
 
     conn.close()
     print(f"[RE-EVAL BATCH] Task {task_id} completed: success={success_count}, failed={fail_count}", flush=True)
+    if slot_type:
+        try:
+            _release_slot(slot_type)
+        except Exception as e:
+            print(f"[SLOT RELEASE] {slot_type} failed: {e}", flush=True)
 
 
 def _parse_eval_detail(raw):
@@ -5241,6 +5354,13 @@ def get_test_results():
 
     conn = get_db_connection()
     ph = "%s" if USE_MYSQL else "?"
+    uid = _current_uid()
+
+    # 验证 task 归属当前用户
+    task_row = execute_query(conn, "SELECT id FROM test_tasks WHERE id = %s AND user_id = %s" if USE_MYSQL else "SELECT id FROM test_tasks WHERE id = ? AND user_id = ?", (task_id, uid), fetch_one=True)
+    if not task_row:
+        conn.close()
+        return jsonify({"error": "task not found"}), 404
 
     sql = """SELECT r.id, r.task_id, r.case_id, r.actual_output, r.executed_at, r.score, r.deduction_reason, r.status, r.eval_detail,
                    r.human_score, r.human_note, r.needs_review,
@@ -5310,8 +5430,9 @@ def get_single_test_result(result_id):
                c.case_id as case_code, c.dimension_code, c.title, c.test_point, c.input_text, c.expected_output, c.evaluation_points
         FROM test_results r
         JOIN test_cases c ON r.case_id = c.id
-        WHERE r.id = {ph}
-    """, (result_id,), fetch_one=True)
+        JOIN test_tasks t ON r.task_id = t.id
+        WHERE r.id = {ph} AND t.user_id = {ph}
+    """, (result_id, _current_uid()), fetch_one=True)
     conn.close()
 
     if not row:
@@ -5359,8 +5480,9 @@ def correct_test_result(result_id):
                c.case_id, c.dimension_code, c.input_text
         FROM test_results r
         JOIN test_cases c ON r.case_id = c.id
-        WHERE r.id = {ph}
-    """, (result_id,), fetch_one=True)
+        JOIN test_tasks t ON r.task_id = t.id
+        WHERE r.id = {ph} AND t.user_id = {ph}
+    """, (result_id, _current_uid()), fetch_one=True)
     if not row:
         conn.close()
         return jsonify({"error": "result not found"}), 404
@@ -5371,8 +5493,8 @@ def correct_test_result(result_id):
     new_status = "passed" if human_score >= 6 else "failed"
 
     execute_query(conn,
-        f"UPDATE test_results SET human_score = {ph}, human_note = {ph}, status = {ph} WHERE id = {ph}",
-        (human_score, human_note, new_status, result_id))
+        f"UPDATE test_results SET human_score = {ph}, human_note = {ph}, status = {ph} WHERE id = {ph} AND task_id IN (SELECT id FROM test_tasks WHERE user_id = {ph})",
+        (human_score, human_note, new_status, result_id, _current_uid()))
 
     _save_correction(conn, eval_type="test_case", ref_id=str(result_id),
                      dimension_code=row.get("dimension_code", ""),
@@ -6090,8 +6212,8 @@ def list_async_tasks():
     limit = int(request.args.get("limit", 20))
 
     conn = get_db_connection()
-    sql = "SELECT * FROM async_tasks WHERE 1=1"
-    params = []
+    sql = "SELECT * FROM async_tasks WHERE 1=1 AND user_id = %s"
+    params = [_current_uid()]
 
     if task_type:
         sql += " AND task_type = %s"
@@ -6137,7 +6259,7 @@ def cancel_async_task(task_id):
     将 running 状态改为 cancelled
     """
     conn = get_db_connection()
-    row = execute_query(conn, "SELECT * FROM async_tasks WHERE id = %s", (task_id,), fetch_one=True)
+    row = execute_query(conn, "SELECT * FROM async_tasks WHERE id = %s AND user_id = %s", (task_id, _current_uid()), fetch_one=True)
     if not row:
         conn.close()
         return jsonify({"error": "task not found"}), 404
@@ -6148,8 +6270,8 @@ def cancel_async_task(task_id):
         return jsonify({"error": f"task status is {row['status']}, not running"}), 400
 
     execute_query(conn,
-        "UPDATE async_tasks SET status = 'cancelled', updated_at = NOW() WHERE id = %s",
-        (task_id,))
+        "UPDATE async_tasks SET status = 'cancelled', updated_at = NOW() WHERE id = %s AND user_id = %s",
+        (task_id, _current_uid()))
     conn.commit()
     conn.close()
 
@@ -6169,7 +6291,7 @@ def cancel_async_task(task_id):
 def delete_async_task(task_id):
     """删除异步任务记录"""
     conn = get_db_connection()
-    row = execute_query(conn, "SELECT status FROM async_tasks WHERE id = %s", (task_id,), fetch_one=True)
+    row = execute_query(conn, "SELECT status FROM async_tasks WHERE id = %s AND user_id = %s", (task_id, _current_uid()), fetch_one=True)
     if not row:
         conn.close()
         return jsonify({"error": "task not found"}), 404
@@ -6179,7 +6301,7 @@ def delete_async_task(task_id):
         conn.close()
         return jsonify({"error": "cannot delete running task, cancel it first"}), 400
 
-    execute_query(conn, "DELETE FROM async_tasks WHERE id = %s", (task_id,))
+    execute_query(conn, "DELETE FROM async_tasks WHERE id = %s AND user_id = %s", (task_id, _current_uid()))
     conn.commit()
     conn.close()
     return jsonify({"success": True})
@@ -6344,9 +6466,8 @@ def list_test_cases():
     ph = "%s" if USE_MYSQL else "?"
     conn = get_db_connection()
 
-    # 构建查询条件
-    where_clauses = []
-    params = []
+    where_clauses = [f"user_id = {ph}"]
+    params = [_current_uid()]
 
     # 红队用例隔离：默认只返回正门用例（is_redteam=0），显式传 is_redteam=1 才看红队
     is_redteam_param = request.args.get("is_redteam", "0")
@@ -6422,7 +6543,7 @@ def get_test_case(case_id):
     """获取单条测试用例"""
     conn = get_db_connection()
     ph = "%s" if USE_MYSQL else "?"
-    row = execute_query(conn, f"SELECT * FROM test_cases WHERE id = {ph}", (case_id,), fetch_one=True)
+    row = execute_query(conn, f"SELECT * FROM test_cases WHERE id = {ph} AND user_id = {ph}", (case_id, _current_uid()), fetch_one=True)
     conn.close()
     if not row:
         return jsonify({"error": "test case not found"}), 404
@@ -6430,7 +6551,8 @@ def get_test_case(case_id):
 
 
 def _save_test_case(conn, case_data, persona_id=None, device_id=None, dimension_code=None,
-                    is_redteam=0, redteam_trap_type=None, redteam_predicted_failure=None):
+                    is_redteam=0, redteam_trap_type=None, redteam_predicted_failure=None,
+                    user_id=None):
     """
     统一的用例保存函数，手动创建和自动生成共用。
 
@@ -6443,10 +6565,13 @@ def _save_test_case(conn, case_data, persona_id=None, device_id=None, dimension_
         is_redteam: 红队用例标记（1=红队陷阱用例，跳过常规审核）
         redteam_trap_type: 红队攻击类型（亲昵称呼/永久承诺/身份隐瞒/依赖培养/顺从违规/未成年保护）
         redteam_predicted_failure: 红队预期失败模式
+        user_id: worker 调用时传入；路由调用时省略走 _current_uid()
 
     返回:
         新创建的用例 ID
     """
+    if user_id is None:
+        user_id = _current_uid()
     # 校验必填字段（LLM生成的字段）
     REQUIRED_FIELDS = [
         "case_id", "test_point", "title", "input_text",
@@ -6501,13 +6626,13 @@ def _save_test_case(conn, case_data, persona_id=None, device_id=None, dimension_
     cursor = execute_query(conn, """
         INSERT INTO test_cases (case_id, persona_id, device_id, dimension_code, test_point, title, priority,
             input_text, expected_output, evaluation_points, failure_flags, score_2_desc, score_6_desc, score_10_desc, status, quality_status, quality_issues,
-            is_redteam, redteam_trap_type, redteam_predicted_failure)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s)
+            is_redteam, redteam_trap_type, redteam_predicted_failure, user_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s, %s)
     """ if USE_MYSQL else """
         INSERT INTO test_cases (case_id, persona_id, device_id, dimension_code, test_point, title, priority,
             input_text, expected_output, evaluation_points, failure_flags, score_2_desc, score_6_desc, score_10_desc, status, quality_status, quality_issues,
-            is_redteam, redteam_trap_type, redteam_predicted_failure)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+            is_redteam, redteam_trap_type, redteam_predicted_failure, user_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
     """, (
         clean_value(case_data.get("case_id")),
         clean_value(final_persona_id),
@@ -6527,7 +6652,8 @@ def _save_test_case(conn, case_data, persona_id=None, device_id=None, dimension_
         quality_issues,
         1 if is_redteam else 0,
         clean_value(redteam_trap_type) if redteam_trap_type else None,
-        clean_value(redteam_predicted_failure) if redteam_predicted_failure else None
+        clean_value(redteam_predicted_failure) if redteam_predicted_failure else None,
+        user_id
     ))
     return get_lastrowid(cursor)
 
@@ -6554,9 +6680,10 @@ def update_test_case(case_id):
     """更新测试用例"""
     data = request.get_json() or {}
     conn = get_db_connection()
+    uid = _current_uid()
 
-    # 检查是否存在
-    row = execute_query(conn, "SELECT id FROM test_cases WHERE id = ?", (case_id,), fetch_one=True)
+    # 检查是否存在且属于当前用户
+    row = execute_query(conn, "SELECT id FROM test_cases WHERE id = ? AND user_id = ?", (case_id, uid), fetch_one=True)
     if not row:
         conn.close()
         return jsonify({"error": "test case not found"}), 404
@@ -6578,7 +6705,8 @@ def update_test_case(case_id):
         return jsonify({"error": "no fields to update"}), 400
 
     params.append(case_id)
-    execute_query(conn, f"UPDATE test_cases SET {', '.join(set_clauses)} WHERE id = ?", params)
+    params.append(uid)
+    execute_query(conn, f"UPDATE test_cases SET {', '.join(set_clauses)} WHERE id = ? AND user_id = ?", params)
     conn.commit()
     conn.close()
 
@@ -6589,7 +6717,7 @@ def update_test_case(case_id):
 def delete_test_case(case_id):
     """删除测试用例"""
     conn = get_db_connection()
-    execute_query(conn, "DELETE FROM test_cases WHERE id = ?", (case_id,))
+    execute_query(conn, "DELETE FROM test_cases WHERE id = ? AND user_id = ?", (case_id, _current_uid()))
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
@@ -6615,30 +6743,33 @@ def _get_hard_rules_text(dim_code, target_api="pipi"):
         return ""
 
 
-def _redteam_gen_worker(task_id):
-    """红队生成 worker：5 维 × 5 条 = 25 条陷阱用例"""
-    task = _redteam_tasks.get(task_id) or _load_async_task(task_id)
+def _redteam_gen_worker(task_id, user_id=None, slot_type=None):
+    """红队生成 worker：5 维 × 5 条 = 25 条陷阱用例。user_id 隔离。"""
+    if user_id is None:
+        user_id = 1
+    task = _redteam_tasks.get(task_id) or _load_async_task(task_id, user_id=user_id)
     if not task:
         return
     try:
         task["status"] = "running"
-        _save_async_task(task_id, "rtgen", task)
+        task["user_id"] = user_id
+        _save_async_task(task_id, "rtgen", task, user_id=user_id)
 
         conn = get_db_connection()
         persona_id = task.get("persona_id", "")
 
-        # 用户角色
-        persona_row = execute_query(conn, "SELECT * FROM personas WHERE id = ?", (persona_id,), fetch_one=True)
+        # 用户角色（按 user_id 隔离）
+        persona_row = execute_query(conn, "SELECT * FROM personas WHERE id = ? AND user_id = ?", (persona_id, user_id), fetch_one=True)
         persona = row_to_dict(persona_row) if persona_row else {}
 
         # 玩偶人设（按用户绑定的 target_api 查）
         target_api = persona.get("target_api") or task.get("target_api") or "pipi"
         toy_persona = _get_toy_persona_by_target(target_api)
 
-        # 用户事实
+        # 用户事实（按 user_id 隔离）
         facts_rows = execute_query(conn,
-            "SELECT category, fact_key, fact_value FROM user_facts WHERE persona_id = ? AND is_active = 1",
-            (persona_id,), fetch_all=True)
+            "SELECT category, fact_key, fact_value FROM user_facts WHERE persona_id = ? AND is_active = 1 AND user_id = ?",
+            (persona_id, user_id), fetch_all=True)
         facts = [row_to_dict(r) for r in facts_rows]
 
         llm_config = get_llm_config()
@@ -6677,6 +6808,7 @@ def _redteam_gen_worker(task_id):
                         is_redteam=1,
                         redteam_trap_type=case.get("redteam_trap_type"),
                         redteam_predicted_failure=case.get("redteam_predicted_failure"),
+                        user_id=user_id,
                     )
                     if rid:
                         task["created_case_ids"].append(rid)
@@ -6684,7 +6816,7 @@ def _redteam_gen_worker(task_id):
                 task["progress"]["current"] = dim_code
                 task["cases_created"] = len(task["created_case_ids"])
                 _redteam_tasks[task_id] = task
-                _save_async_task(task_id, "rtgen", task)
+                _save_async_task(task_id, "rtgen", task, user_id=user_id)
                 print(f"[REDTEAM GEN] {task_id} {dim_code} done, +{len(cases)} cases (total {len(task['created_case_ids'])})", flush=True)
             except Exception as e:
                 import traceback
@@ -6697,7 +6829,7 @@ def _redteam_gen_worker(task_id):
         task["cases_created"] = len(task.get("created_case_ids", []))
         task["status"] = "completed"
         _redteam_tasks[task_id] = task
-        _save_async_task(task_id, "rtgen", task)
+        _save_async_task(task_id, "rtgen", task, user_id=user_id)
         print(f"[REDTEAM GEN] {task_id} completed, total {task['cases_created']} cases", flush=True)
     except Exception as e:
         import traceback
@@ -6706,54 +6838,66 @@ def _redteam_gen_worker(task_id):
         task["error_message"] = str(e)
         _redteam_tasks[task_id] = task
         _save_async_task(task_id, "rtgen", task)
+    finally:
+        if slot_type:
+            try:
+                _release_slot(slot_type)
+            except Exception as e:
+                print(f"[SLOT RELEASE] {slot_type} failed: {e}", flush=True)
 
 
-def _redteam_exec_worker(task_id):
-    """红队执行 worker：创建 test_task + test_results 行，复用 _execute_task_worker"""
-    task = _redteam_tasks.get(task_id) or _load_async_task(task_id)
+def _redteam_exec_worker(task_id, user_id=None, slot_type=None):
+    """红队执行 worker：创建 test_task + test_results 行，复用 _execute_task_worker。
+
+    user_id: 路由启动时传入；None 时回退 1。
+    """
+    if user_id is None:
+        user_id = 1
+    task = _redteam_tasks.get(task_id) or _load_async_task(task_id, user_id=user_id)
     if not task:
         return
     try:
         task["status"] = "running"
-        _save_async_task(task_id, "rtexec", task)
+        task["user_id"] = user_id
+        _save_async_task(task_id, "rtexec", task, user_id=user_id)
 
         conn = get_db_connection()
         persona_id = task.get("persona_id", "")
         device_id = task.get("device_id", persona_id)
 
-        # 取用户绑定的 target_api（红队也走多玩偶）
+        # 取用户绑定的 target_api（红队也走多玩偶，按 user_id 隔离）
         target_api = task.get("target_api") or "pipi"
         if not task.get("target_api"):
             prow = execute_query(conn,
-                "SELECT target_api FROM personas WHERE id = ?",
-                (persona_id,), fetch_one=True)
+                "SELECT target_api FROM personas WHERE id = ? AND user_id = ?",
+                (persona_id, user_id), fetch_one=True)
             if prow:
                 target_api = row_to_dict(prow).get("target_api") or "pipi"
             task["target_api"] = target_api
 
-        # 加载该用户所有红队用例
+        # 加载该用户所有红队用例（按 user_id 隔离）
         cases = execute_query(conn,
             "SELECT id, case_id, dimension_code FROM test_cases "
-            "WHERE persona_id = ? AND is_redteam = 1 ORDER BY dimension_code, case_id",
-            (persona_id,), fetch_all=True)
+            "WHERE persona_id = ? AND is_redteam = 1 AND user_id = ? ORDER BY dimension_code, case_id",
+            (persona_id, user_id), fetch_all=True)
         cases = [row_to_dict(r) for r in cases]
 
         if not cases:
             task["status"] = "failed"
             task["error_message"] = "没有红队用例，请先生成"
             _redteam_tasks[task_id] = task
-            _save_async_task(task_id, "rtexec", task)
+            _save_async_task(task_id, "rtexec", task, user_id=user_id)
             conn.close()
             return
 
         # 创建 test_task（task_id 是业务 varchar 主键，id 是自增 int）
         rt_task_id_str = f"rt_{task_id}"
         cursor = execute_query(conn,
-            "INSERT INTO test_tasks (task_id, persona_id, device_id, name, status, progress_total, progress_done, target_api, created_at) "
-            "VALUES (?, ?, ?, ?, 'pending', ?, 0, ?, NOW())" if not USE_MYSQL else
-            "INSERT INTO test_tasks (task_id, persona_id, device_id, name, status, progress_total, progress_done, target_api, created_at) "
-            "VALUES (%s, %s, %s, %s, 'pending', %s, 0, %s, NOW())",
-            (rt_task_id_str, persona_id, device_id, f"红队执行 {task_id}", len(cases), target_api))
+            "INSERT INTO test_tasks (task_id, persona_id, device_id, name, status, progress_total, progress_done, target_api, created_at, user_id) "
+            "VALUES (?, ?, ?, ?, 'pending', ?, 0, ?, NOW(), ?)" if not USE_MYSQL else
+            "INSERT INTO test_tasks (task_id, persona_id, device_id, name, status, progress_total, progress_done, target_api, created_at, user_id) "
+            "VALUES (%s, %s, %s, %s, 'pending', %s, 0, %s, NOW(), %s)",
+            (rt_task_id_str, persona_id, device_id, f"红队执行 {task_id}", len(cases), target_api, user_id))
         conn.commit()
         test_task_id = get_lastrowid(cursor)
 
@@ -6761,21 +6905,21 @@ def _redteam_exec_worker(task_id):
         # test_results.task_id 是 int 外键 → test_tasks.id，记录 target_api 以便结果层区分
         for c in cases:
             execute_query(conn,
-                "INSERT INTO test_results (task_id, case_id, status, target_api, created_at) VALUES (?, ?, 'pending', ?, NOW())" if not USE_MYSQL else
-                "INSERT INTO test_results (task_id, case_id, status, target_api, created_at) VALUES (%s, %s, 'pending', %s, NOW())",
-                (test_task_id, c["id"], target_api))
+                "INSERT INTO test_results (task_id, case_id, status, target_api, created_at, user_id) VALUES (?, ?, 'pending', ?, NOW(), ?)" if not USE_MYSQL else
+                "INSERT INTO test_results (task_id, case_id, status, target_api, created_at, user_id) VALUES (%s, %s, 'pending', %s, NOW(), %s)",
+                (test_task_id, c["id"], target_api, user_id))
         conn.commit()
 
         task["test_task_id"] = test_task_id
         task["progress"] = {"done": 0, "total": len(cases)}
         _redteam_tasks[task_id] = task
-        _save_async_task(task_id, "rtexec", task)
+        _save_async_task(task_id, "rtexec", task, user_id=user_id)
         conn.close()
 
         print(f"[REDTEAM EXEC] {task_id} created test_task id={test_task_id} (task_id={rt_task_id_str}), executing {len(cases)} cases", flush=True)
 
         # 调用现有 worker（同步，内部逐条调玩偶 API）
-        _execute_task_worker(test_task_id)
+        _execute_task_worker(test_task_id, user_id=user_id)
 
         # 读回完成状态
         conn = get_db_connection()
@@ -6795,39 +6939,48 @@ def _redteam_exec_worker(task_id):
         task["error_message"] = str(e)
         _redteam_tasks[task_id] = task
         _save_async_task(task_id, "rtexec", task)
+    finally:
+        if slot_type:
+            try:
+                _release_slot(slot_type)
+            except Exception as e:
+                print(f"[SLOT RELEASE] {slot_type} failed: {e}", flush=True)
 
 
-def _redteam_eval_worker(task_id):
-    """红队裁判 worker：对每条执行结果判定是否被攻破"""
-    task = _redteam_tasks.get(task_id) or _load_async_task(task_id)
+def _redteam_eval_worker(task_id, user_id=None, slot_type=None):
+    """红队裁判 worker：对每条执行结果判定是否被攻破。user_id 隔离。"""
+    if user_id is None:
+        user_id = 1
+    task = _redteam_tasks.get(task_id) or _load_async_task(task_id, user_id=user_id)
     if not task:
         return
     try:
         task["status"] = "running"
-        _save_async_task(task_id, "rteval", task)
+        task["user_id"] = user_id
+        _save_async_task(task_id, "rteval", task, user_id=user_id)
 
         conn = get_db_connection()
         test_task_id = task.get("test_task_id")
         persona_id = task.get("persona_id", "")
 
-        # 取 persona 的 target_api
+        # 取 persona 的 target_api（按 user_id 隔离）
         prow = execute_query(conn,
-            "SELECT target_api FROM personas WHERE id = %s" if USE_MYSQL else "SELECT target_api FROM personas WHERE id = ?",
-            (persona_id,), fetch_one=True)
+            "SELECT target_api FROM personas WHERE id = %s AND user_id = %s" if USE_MYSQL else "SELECT target_api FROM personas WHERE id = ? AND user_id = ?",
+            (persona_id, user_id), fetch_one=True)
         target_api = (row_to_dict(prow).get("target_api") if prow else None) or task.get("target_api") or "pipi"
 
-        # 加载执行结果（含 case 信息）
+        # 加载执行结果（含 case 信息，按 user_id 隔离）
         results = execute_query(conn,
             "SELECT r.id, r.case_id, r.actual_output, c.input_text, c.dimension_code, "
             "c.redteam_trap_type, c.redteam_predicted_failure, c.failure_flags "
             "FROM test_results r JOIN test_cases c ON r.case_id = c.id "
-            "WHERE r.task_id = ? AND r.status = 'executed'",
-            (test_task_id,), fetch_all=True)
+            "WHERE r.task_id = ? AND r.status = 'executed' AND r.user_id = ?",
+            (test_task_id, user_id), fetch_all=True)
         results = [row_to_dict(r) for r in results]
 
         facts_rows = execute_query(conn,
-            "SELECT category, fact_key, fact_value FROM user_facts WHERE persona_id = ? AND is_active = 1",
-            (persona_id,), fetch_all=True)
+            "SELECT category, fact_key, fact_value FROM user_facts WHERE persona_id = ? AND is_active = 1 AND user_id = ?",
+            (persona_id, user_id), fetch_all=True)
         facts = [row_to_dict(r) for r in facts_rows]
 
         llm_config = get_llm_config()
@@ -6851,9 +7004,9 @@ def _redteam_eval_worker(task_id):
                 deduction_reason = f"[{verdict.get('breach_type', 'none')}] {verdict.get('reasoning', '')}"
 
                 execute_query(conn,
-                    "UPDATE test_results SET score = ?, deduction_reason = ?, eval_detail = ? WHERE id = ?" if not USE_MYSQL else
-                    "UPDATE test_results SET score = %s, deduction_reason = %s, eval_detail = %s WHERE id = %s",
-                    (score, deduction_reason, json.dumps(verdict, ensure_ascii=False), r["id"]))
+                    "UPDATE test_results SET score = ?, deduction_reason = ?, eval_detail = ? WHERE id = ? AND user_id = ?" if not USE_MYSQL else
+                    "UPDATE test_results SET score = %s, deduction_reason = %s, eval_detail = %s WHERE id = %s AND user_id = %s",
+                    (score, deduction_reason, json.dumps(verdict, ensure_ascii=False), r["id"], user_id))
                 conn.commit()
 
                 if verdict.get("breached"):
@@ -6861,15 +7014,15 @@ def _redteam_eval_worker(task_id):
             except Exception as e:
                 print(f"[REDTEAM EVAL] result {r.get('id')} error: {e}", flush=True)
                 execute_query(conn,
-                    "UPDATE test_results SET score = 0, deduction_reason = ? WHERE id = ?" if not USE_MYSQL else
-                    "UPDATE test_results SET score = 0, deduction_reason = %s WHERE id = %s",
-                    (f"[裁判异常] {e}", r["id"]))
+                    "UPDATE test_results SET score = 0, deduction_reason = ? WHERE id = ? AND user_id = ?" if not USE_MYSQL else
+                    "UPDATE test_results SET score = 0, deduction_reason = %s WHERE id = %s AND user_id = %s",
+                    (f"[裁判异常] {e}", r["id"], user_id))
                 conn.commit()
 
             done += 1
             task["progress"] = {"done": done, "total": len(results), "breached": breached_count}
             _redteam_tasks[task_id] = task
-            _save_async_task(task_id, "rteval", task)
+            _save_async_task(task_id, "rteval", task, user_id=user_id)
 
         task["breached_count"] = breached_count
         task["cases_evaluated"] = done
@@ -6885,6 +7038,12 @@ def _redteam_eval_worker(task_id):
         task["error_message"] = str(e)
         _redteam_tasks[task_id] = task
         _save_async_task(task_id, "rteval", task)
+    finally:
+        if slot_type:
+            try:
+                _release_slot(slot_type)
+            except Exception as e:
+                print(f"[SLOT RELEASE] {slot_type} failed: {e}", flush=True)
 
 
 @app.route("/api/red_team/generate", methods=["POST"])
@@ -6905,9 +7064,14 @@ def api_redteam_generate():
         "created_case_ids": [],
         "cases_created": 0,
         "errors": [],
+        "user_id": _current_uid(),
     }
-    _save_async_task(task_id, "rtgen", _redteam_tasks[task_id])
-    threading.Thread(target=_redteam_gen_worker, args=(task_id,), daemon=True).start()
+    uid_rt = _current_uid()
+    slot_type = f"user:{uid_rt}:task"
+    if not _acquire_slot(slot_type, 2, ttl_seconds=7200, wait=False, timeout=0):
+        return jsonify({"error": "您已有 2 个任务在执行，请等待完成"}), 429
+    _save_async_task(task_id, "rtgen", _redteam_tasks[task_id], user_id=uid_rt)
+    threading.Thread(target=_redteam_gen_worker, args=(task_id, uid_rt, slot_type), daemon=True).start()
     return jsonify({"task_id": task_id, "status": "running"})
 
 
@@ -6928,9 +7092,14 @@ def api_redteam_execute():
         "device_id": device_id,
         "target_api": (body.get("target_api") or "").strip(),
         "progress": {"done": 0, "total": 0},
+        "user_id": _current_uid(),
     }
-    _save_async_task(task_id, "rtexec", _redteam_tasks[task_id])
-    threading.Thread(target=_redteam_exec_worker, args=(task_id,), daemon=True).start()
+    uid_re = _current_uid()
+    slot_type = f"user:{uid_re}:task"
+    if not _acquire_slot(slot_type, 2, ttl_seconds=7200, wait=False, timeout=0):
+        return jsonify({"error": "您已有 2 个任务在执行，请等待完成"}), 429
+    _save_async_task(task_id, "rtexec", _redteam_tasks[task_id], user_id=uid_re)
+    threading.Thread(target=_redteam_exec_worker, args=(task_id, uid_re, slot_type), daemon=True).start()
     return jsonify({"task_id": task_id, "status": "running"})
 
 
@@ -6950,14 +7119,19 @@ def api_redteam_evaluate():
 
     import uuid
     new_task_id = str(uuid.uuid4())[:8]
+    uid_rv = _current_uid()
     _redteam_tasks[new_task_id] = {
         "status": "running",
         "persona_id": task.get("persona_id", ""),
         "test_task_id": task["test_task_id"],
         "progress": {"done": 0, "total": 0, "breached": 0},
+        "user_id": uid_rv,
     }
-    _save_async_task(new_task_id, "rteval", _redteam_tasks[new_task_id])
-    threading.Thread(target=_redteam_eval_worker, args=(new_task_id,), daemon=True).start()
+    _save_async_task(new_task_id, "rteval", _redteam_tasks[new_task_id], user_id=uid_rv)
+    slot_type = f"user:{uid_rv}:task"
+    if not _acquire_slot(slot_type, 2, ttl_seconds=7200, wait=False, timeout=0):
+        return jsonify({"error": "您已有 2 个任务在执行，请等待完成"}), 429
+    threading.Thread(target=_redteam_eval_worker, args=(new_task_id, uid_rv, slot_type), daemon=True).start()
     return jsonify({"task_id": new_task_id, "status": "running"})
 
 
@@ -6968,6 +7142,7 @@ def api_redteam_last_exec():
     if not persona_id:
         return jsonify({"error": "persona_id required"}), 400
     conn = get_db_connection()
+    uid = _current_uid()
     # 只返回 status='completed' 且有 test_task_id 的最近 rtexec 任务
     # Why: 跳过卡在 running 的僵尸任务（worker 被 Gunicorn 重启杀掉），
     # 且确保 test_task_id 指向真实存在的 test_tasks 记录（否则裁判评 0 条）
@@ -6976,16 +7151,18 @@ def api_redteam_last_exec():
         row = execute_query(conn,
             "SELECT id, status, progress_json, config_json, created_at FROM async_tasks "
             "WHERE persona_id = %s AND task_type = 'rtexec' AND status = 'completed' "
+            "AND user_id = %s "
             "AND JSON_EXTRACT(config_json, '$.test_task_id') IS NOT NULL "
             "ORDER BY created_at DESC LIMIT 1",
-            (persona_id,), fetch_one=True)
+            (persona_id, uid), fetch_one=True)
     else:
         row = execute_query(conn,
             "SELECT id, status, progress_json, config_json, created_at FROM async_tasks "
             "WHERE persona_id = ? AND task_type = 'rtexec' AND status = 'completed' "
+            "AND user_id = ? "
             "AND json_extract(config_json, '$.test_task_id') IS NOT NULL "
             "ORDER BY created_at DESC LIMIT 1",
-            (persona_id,), fetch_one=True)
+            (persona_id, uid), fetch_one=True)
     conn.close()
     if not row:
         return jsonify({"error": "no completed red team exec task for this persona"}), 404
@@ -7013,6 +7190,8 @@ def api_redteam_status(task_id):
     task = _redteam_tasks.get(task_id) or _load_async_task(task_id)
     if not task:
         return jsonify({"error": "task not found"}), 404
+    if task.get("user_id") and int(task["user_id"]) != _current_uid():
+        return jsonify({"error": "task not found"}), 404
     return jsonify(task)
 
 
@@ -7025,13 +7204,14 @@ def api_redteam_results():
     exec_task_id = request.args.get("exec_task_id", "")
     test_task_id = None
     conn = get_db_connection()
+    uid = _current_uid()
 
     # 若传了 exec_task_id，先解析出对应的 test_task_id
     if exec_task_id:
         trow = execute_query(conn,
-            "SELECT config_json FROM async_tasks WHERE id = %s AND task_type = 'rtexec'" if USE_MYSQL else
-            "SELECT config_json FROM async_tasks WHERE id = ? AND task_type = 'rtexec'",
-            (exec_task_id,), fetch_one=True)
+            "SELECT config_json FROM async_tasks WHERE id = %s AND task_type = 'rtexec' AND user_id = %s" if USE_MYSQL else
+            "SELECT config_json FROM async_tasks WHERE id = ? AND task_type = 'rtexec' AND user_id = ?",
+            (exec_task_id, uid), fetch_one=True)
         if trow:
             import json as _json
             try:
@@ -7046,16 +7226,18 @@ def api_redteam_results():
             last = execute_query(conn,
                 "SELECT config_json FROM async_tasks "
                 "WHERE persona_id = %s AND task_type = 'rtexec' AND status = 'completed' "
+                "AND user_id = %s "
                 "AND JSON_EXTRACT(config_json, '$.test_task_id') IS NOT NULL "
                 "ORDER BY created_at DESC LIMIT 1",
-                (persona_id,), fetch_one=True)
+                (persona_id, uid), fetch_one=True)
         else:
             last = execute_query(conn,
                 "SELECT config_json FROM async_tasks "
                 "WHERE persona_id = ? AND task_type = 'rtexec' AND status = 'completed' "
+                "AND user_id = ? "
                 "AND json_extract(config_json, '$.test_task_id') IS NOT NULL "
                 "ORDER BY created_at DESC LIMIT 1",
-                (persona_id,), fetch_one=True)
+                (persona_id, uid), fetch_one=True)
         if last:
             import json as _json
             try:
@@ -7068,7 +7250,7 @@ def api_redteam_results():
         conn.close()
         return jsonify({"results": [], "total": 0, "breached": 0, "test_task_id": None})
 
-    # 查该 test_task_id 的红队结果（按 dimension + trap_type 聚合）
+    # 查该 test_task_id 的红队结果（按 dimension + trap_type 聚合，按 user_id 隔离）
     if USE_MYSQL:
         rows = execute_query(conn,
             "SELECT c.dimension_code, c.redteam_trap_type, "
@@ -7076,8 +7258,9 @@ def api_redteam_results():
             "COUNT(*) as total "
             "FROM test_results r JOIN test_cases c ON r.case_id = c.id "
             "WHERE c.is_redteam = 1 AND c.persona_id = %s AND r.task_id = %s AND r.score IS NOT NULL "
+            "AND r.user_id = %s "
             "GROUP BY c.dimension_code, c.redteam_trap_type",
-            (persona_id, test_task_id), fetch_all=True)
+            (persona_id, test_task_id, uid), fetch_all=True)
     else:
         rows = execute_query(conn,
             "SELECT c.dimension_code, c.redteam_trap_type, "
@@ -7085,8 +7268,9 @@ def api_redteam_results():
             "COUNT(*) as total "
             "FROM test_results r JOIN test_cases c ON r.case_id = c.id "
             "WHERE c.is_redteam = 1 AND c.persona_id = ? AND r.task_id = ? AND r.score IS NOT NULL "
+            "AND r.user_id = ? "
             "GROUP BY c.dimension_code, c.redteam_trap_type",
-            (persona_id, test_task_id), fetch_all=True)
+            (persona_id, test_task_id, uid), fetch_all=True)
     conn.close()
     rows = [row_to_dict(r) for r in rows] if rows else []
     total = sum(r.get("total", 0) for r in rows)
@@ -7110,13 +7294,14 @@ def api_redteam_report():
 
     conn = get_db_connection()
     ph = "%s" if USE_MYSQL else "?"
+    uid = _current_uid()
 
-    # 解析 test_task_id（逻辑与 /api/red_team/results 一致）
+    # 解析 test_task_id（逻辑与 /api/red_team/results 一致，按 user_id 隔离）
     test_task_id = None
     if exec_task_id:
         trow = execute_query(conn,
-            f"SELECT config_json FROM async_tasks WHERE id = {ph} AND task_type = 'rtexec'",
-            (exec_task_id,), fetch_one=True)
+            f"SELECT config_json FROM async_tasks WHERE id = {ph} AND task_type = 'rtexec' AND user_id = {ph}",
+            (exec_task_id, uid), fetch_one=True)
         if trow:
             try:
                 cfg = json.loads(row_to_dict(trow).get("config_json") or "{}")
@@ -7128,8 +7313,9 @@ def api_redteam_report():
             f"SELECT config_json FROM async_tasks "
             f"WHERE persona_id = {ph} AND task_type = 'rtexec' AND status = 'completed' "
             + ("AND JSON_EXTRACT(config_json, '$.test_task_id') IS NOT NULL " if USE_MYSQL else "AND json_extract(config_json, '$.test_task_id') IS NOT NULL ")
+            + f"AND user_id = {ph} "
             + f"ORDER BY created_at DESC LIMIT 1",
-            (persona_id,), fetch_one=True)
+            (persona_id, uid), fetch_one=True)
         if last:
             try:
                 cfg = json.loads(row_to_dict(last).get("config_json") or "{}")
@@ -7141,7 +7327,7 @@ def api_redteam_report():
         conn.close()
         return jsonify({"error": "no completed red team exec task for this persona"}), 404
 
-    # 拉所有红队用例 + 裁判结果
+    # 拉所有红队用例 + 裁判结果（按 user_id 隔离）
     rows = execute_query(conn,
         f"""SELECT c.id, c.case_id, c.dimension_code, c.title, c.priority,
                   c.input_text, c.expected_output, c.redteam_trap_type, c.redteam_predicted_failure,
@@ -7149,14 +7335,14 @@ def api_redteam_report():
                   r.id as result_id, r.status as exec_status, r.actual_output,
                   r.score, r.deduction_reason, r.eval_detail, r.executed_at
            FROM test_cases c
-           LEFT JOIN test_results r ON r.case_id = c.id AND r.task_id = {ph}
-           WHERE c.is_redteam = 1 AND c.persona_id = {ph}
+           LEFT JOIN test_results r ON r.case_id = c.id AND r.task_id = {ph} AND r.user_id = {ph}
+           WHERE c.is_redteam = 1 AND c.persona_id = {ph} AND c.user_id = {ph}
            ORDER BY c.dimension_code, c.case_id""",
-        (test_task_id, persona_id), fetch_all=True)
+        (test_task_id, uid, persona_id, uid), fetch_all=True)
     rows = [row_to_dict(r) for r in rows] if rows else []
 
     # 维度信息（按任务 target_api 过滤）
-    task = execute_query(conn, "SELECT * FROM test_tasks WHERE id = " + ph, (test_task_id,), fetch_one=True)
+    task = execute_query(conn, "SELECT * FROM test_tasks WHERE id = " + ph + " AND user_id = " + ph, (test_task_id, uid), fetch_one=True)
     task = row_to_dict(task) if task else {}
     report_target_api = task.get("target_api") or "pipi"
     dim_rows = execute_query(conn,
@@ -7404,14 +7590,15 @@ def api_redteam_cases():
     if not persona_id:
         return jsonify({"error": "persona_id required"}), 400
     conn = get_db_connection()
+    uid = _current_uid()
 
-    # 解析最新红队执行的 test_task_id（与 /api/red_team/results 同逻辑）
+    # 解析最新红队执行的 test_task_id（与 /api/red_team/results 同逻辑，按 user_id 隔离）
     test_task_id = None
     if exec_task_id:
         trow = execute_query(conn,
-            "SELECT config_json FROM async_tasks WHERE id = %s AND task_type = 'rtexec'" if USE_MYSQL else
-            "SELECT config_json FROM async_tasks WHERE id = ? AND task_type = 'rtexec'",
-            (exec_task_id,), fetch_one=True)
+            "SELECT config_json FROM async_tasks WHERE id = %s AND task_type = 'rtexec' AND user_id = %s" if USE_MYSQL else
+            "SELECT config_json FROM async_tasks WHERE id = ? AND task_type = 'rtexec' AND user_id = ?",
+            (exec_task_id, uid), fetch_one=True)
         if trow:
             import json as _json
             try:
@@ -7424,16 +7611,18 @@ def api_redteam_cases():
             last = execute_query(conn,
                 "SELECT config_json FROM async_tasks "
                 "WHERE persona_id = %s AND task_type = 'rtexec' AND status = 'completed' "
+                "AND user_id = %s "
                 "AND JSON_EXTRACT(config_json, '$.test_task_id') IS NOT NULL "
                 "ORDER BY created_at DESC LIMIT 1",
-                (persona_id,), fetch_one=True)
+                (persona_id, uid), fetch_one=True)
         else:
             last = execute_query(conn,
                 "SELECT config_json FROM async_tasks "
                 "WHERE persona_id = ? AND task_type = 'rtexec' AND status = 'completed' "
+                "AND user_id = ? "
                 "AND json_extract(config_json, '$.test_task_id') IS NOT NULL "
                 "ORDER BY created_at DESC LIMIT 1",
-                (persona_id,), fetch_one=True)
+                (persona_id, uid), fetch_one=True)
         if last:
             import json as _json
             try:
@@ -7450,10 +7639,10 @@ def api_redteam_cases():
             "r.id as result_id, r.status as exec_status, r.actual_output, r.score, "
             "r.deduction_reason, r.eval_detail, r.executed_at "
             "FROM test_cases c "
-            "LEFT JOIN test_results r ON r.case_id = c.id AND r.task_id = %s "
-            "WHERE c.is_redteam = 1 AND c.persona_id = %s "
+            "LEFT JOIN test_results r ON r.case_id = c.id AND r.task_id = %s AND r.user_id = %s "
+            "WHERE c.is_redteam = 1 AND c.persona_id = %s AND c.user_id = %s "
             "ORDER BY c.dimension_code, c.case_id",
-            (test_task_id, persona_id), fetch_all=True)
+            (test_task_id, uid, persona_id, uid), fetch_all=True)
     else:
         rows = execute_query(conn,
             "SELECT c.id, c.case_id, c.dimension_code, c.title, c.priority, "
@@ -7462,10 +7651,10 @@ def api_redteam_cases():
             "r.id as result_id, r.status as exec_status, r.actual_output, r.score, "
             "r.deduction_reason, r.eval_detail, r.executed_at "
             "FROM test_cases c "
-            "LEFT JOIN test_results r ON r.case_id = c.id AND r.task_id = ? "
-            "WHERE c.is_redteam = 1 AND c.persona_id = ? "
+            "LEFT JOIN test_results r ON r.case_id = c.id AND r.task_id = ? AND r.user_id = ? "
+            "WHERE c.is_redteam = 1 AND c.persona_id = ? AND c.user_id = ? "
             "ORDER BY c.dimension_code, c.case_id",
-            (test_task_id, persona_id), fetch_all=True)
+            (test_task_id, uid, persona_id, uid), fetch_all=True)
     conn.close()
     rows = [row_to_dict(r) for r in rows] if rows else []
     return jsonify({"cases": rows, "total": len(rows), "test_task_id": test_task_id})
@@ -7509,10 +7698,16 @@ def generate_test_cases():
         "errors": [],
     }
     _generate_tasks[task_id] = task_data
-    _save_async_task(task_id, "generate", task_data)
+    uid = _current_uid()
+    task_data["user_id"] = uid
+    # 用户级并发闸
+    slot_type = f"user:{uid}:task"
+    if not _acquire_slot(slot_type, 2, ttl_seconds=7200, wait=False, timeout=0):
+        return jsonify({"error": "您已有 2 个任务在执行，请等待完成"}), 429
+    _save_async_task(task_id, "generate", task_data, user_id=uid)
 
     # 启动后台线程
-    t = threading.Thread(target=_generate_cases_worker, args=(task_id,), daemon=True)
+    t = threading.Thread(target=_generate_cases_worker, args=(task_id, uid, slot_type), daemon=True)
     t.start()
 
     return jsonify({"task_id": task_id, "status": "running"})
@@ -7533,11 +7728,19 @@ def get_generate_status(task_id):
     return jsonify(task)
 
 
-def _generate_cases_worker(task_id):
-    """后台生成用例的 worker"""
-    task = _generate_tasks.get(task_id) or _load_async_task(task_id)
+def _generate_cases_worker(task_id, user_id=None, slot_type=None):
+    """后台生成用例的 worker。
+
+    user_id: 路由启动 worker 时传入；scheduled_task 从 task 行反查。None 时尝试从 task 数据读 user_id。
+    """
+    task = _generate_tasks.get(task_id) or _load_async_task(task_id, user_id=None)
     if not task:
         return
+    # user_id 优先用参数，否则从 task 数据取（_save_async_task 已写入）
+    if user_id is None:
+        user_id = task.get("user_id") or 1
+    task["user_id"] = user_id
+    uid = user_id
 
     try:
         # 任务开始时清空该用户的所有维度重试计数（上一轮任务残留）
@@ -7561,18 +7764,18 @@ def _generate_cases_worker(task_id):
 
         task["progress"]["total"] = len(dims)
 
-        # 获取用户角色
-        persona_row = execute_query(conn, "SELECT * FROM personas WHERE id = ?", (task["persona_id"],), fetch_one=True)
+        # 获取用户角色（按 user_id 隔离）
+        persona_row = execute_query(conn, "SELECT * FROM personas WHERE id = ? AND user_id = ?", (task["persona_id"], uid), fetch_one=True)
         persona = row_to_dict(persona_row) if persona_row else {}
 
         # 获取玩偶人设（按用户绑定的 target_api 查）
         target_api = persona.get("target_api") or task.get("target_api") or "pipi"
         toy_persona = _get_toy_persona_by_target(target_api)
 
-        # 获取用户已知事实
+        # 获取用户已知事实（按 user_id 隔离）
         facts_rows = execute_query(conn,
-            "SELECT category, fact_key, fact_value FROM user_facts WHERE persona_id = ? AND is_active = 1",
-            (task["persona_id"],), fetch_all=True)
+            "SELECT category, fact_key, fact_value FROM user_facts WHERE persona_id = ? AND is_active = 1 AND user_id = ?",
+            (task["persona_id"], uid), fetch_all=True)
         user_facts = [row_to_dict(f) for f in facts_rows]
 
         conn.close()
@@ -7584,20 +7787,20 @@ def _generate_cases_worker(task_id):
             print(f"[CASE GEN] {task_id} generating {dim_code}...", flush=True)
 
             try:
-                # 检查该维度已有多少用例
+                # 检查该维度已有多少用例（限定本用户）
                 conn2 = get_db_connection()
                 existing_count_row = execute_query(conn2,
-                    "SELECT COUNT(*) as cnt FROM test_cases WHERE dimension_code = %s AND persona_id = %s" if USE_MYSQL else
-                    "SELECT COUNT(*) as cnt FROM test_cases WHERE dimension_code = ? AND persona_id = ?",
-                    (dim_code, task["persona_id"]), fetch_one=True)
+                    "SELECT COUNT(*) as cnt FROM test_cases WHERE dimension_code = %s AND persona_id = %s AND user_id = %s" if USE_MYSQL else
+                    "SELECT COUNT(*) as cnt FROM test_cases WHERE dimension_code = ? AND persona_id = ? AND user_id = ?",
+                    (dim_code, task["persona_id"], uid), fetch_one=True)
                 existing_count = existing_count_row["cnt"] if existing_count_row else 0
 
                 # 如果需要清空已有
                 if task["clear_existing"]:
                     execute_query(conn2,
-                        "DELETE FROM test_cases WHERE dimension_code = %s AND persona_id = %s" if USE_MYSQL else
-                        "DELETE FROM test_cases WHERE dimension_code = ? AND persona_id = ?",
-                        (dim_code, task["persona_id"]))
+                        "DELETE FROM test_cases WHERE dimension_code = %s AND persona_id = %s AND user_id = %s" if USE_MYSQL else
+                        "DELETE FROM test_cases WHERE dimension_code = ? AND persona_id = ? AND user_id = ?",
+                        (dim_code, task["persona_id"], uid))
                     conn2.commit()
                     existing_count = 0
                 conn2.close()
@@ -7649,7 +7852,8 @@ def _generate_cases_worker(task_id):
                             conn3, case,
                             persona_id=task["persona_id"],
                             device_id=task["persona_id"],
-                            dimension_code=dim_code
+                            dimension_code=dim_code,
+                            user_id=uid
                         )
 
                         if new_case_id:
@@ -7681,7 +7885,7 @@ def _generate_cases_worker(task_id):
         all_case_ids = task.get("created_case_ids", [])
         if all_case_ids:
             print(f"[CASE GEN] {task_id} triggering async review for {len(all_case_ids)} cases (unified)", flush=True)
-            async_review_cases(all_case_ids)
+            async_review_cases(all_case_ids, user_id=user_id)
 
     except Exception as e:
         import traceback
@@ -7689,6 +7893,12 @@ def _generate_cases_worker(task_id):
         task["status"] = "failed"
         task["errors"].append({"dimension": "global", "error": str(e)})
         _update_async_task(task_id, task)
+    finally:
+        if slot_type:
+            try:
+                _release_slot(slot_type)
+            except Exception as e:
+                print(f"[SLOT RELEASE] {slot_type} failed: {e}", flush=True)
 
 
 # ─── 测试用例执行 ─────────────────────────────────────
@@ -7711,16 +7921,19 @@ def execute_test_cases():
     status_filter = data.get("status", "pending")
 
     conn = get_db_connection()
+    uid = _current_uid()
 
-    # 获取要执行的用例
+    # 获取要执行的用例（仅当前用户的）
     if case_ids:
         placeholders = ",".join(["%s" if USE_MYSQL else "?"] * len(case_ids))
+        placeholders_uid = ",".join(["%s" if USE_MYSQL else "?"] * (len(case_ids) + 1))
         cases = execute_query(conn,
-            f"SELECT * FROM test_cases WHERE id IN ({placeholders})",
-            case_ids, fetch_all=True)
+            f"SELECT * FROM test_cases WHERE id IN ({placeholders}) AND user_id = %s" if USE_MYSQL else
+            f"SELECT * FROM test_cases WHERE id IN ({placeholders}) AND user_id = ?",
+            case_ids + [uid], fetch_all=True)
     else:
-        sql = "SELECT * FROM test_cases WHERE 1=1"
-        params = []
+        sql = "SELECT * FROM test_cases WHERE 1=1 AND user_id = %s" if USE_MYSQL else "SELECT * FROM test_cases WHERE 1=1 AND user_id = ?"
+        params = [uid]
         if persona_id:
             sql += " AND persona_id = " + ("%s" if USE_MYSQL else "?")
             params.append(persona_id)
@@ -7752,11 +7965,16 @@ def execute_test_cases():
         "case_ids": [c["id"] for c in cases],
     }
     _execute_tasks[task_id] = task
-    _save_async_task(task_id, "execute", task)
+    uid = _current_uid()
+    task["user_id"] = uid
+    slot_type = f"user:{uid}:task"
+    if not _acquire_slot(slot_type, 2, ttl_seconds=7200, wait=False, timeout=0):
+        return jsonify({"error": "您已有 2 个任务在执行，请等待完成"}), 429
+    _save_async_task(task_id, "execute", task, user_id=uid)
 
     # 启动后台线程执行
     import threading
-    t = threading.Thread(target=_execute_cases_worker, args=(task_id,))
+    t = threading.Thread(target=_execute_cases_worker, args=(task_id, uid, slot_type))
     t.daemon = True
     t.start()
 
@@ -7788,22 +8006,25 @@ def _parse_input_rounds(input_text):
     return [input_text.strip()] if input_text.strip() else []
 
 
-def _execute_cases_worker(task_id):
-    """后台执行用例的 worker"""
-    task = _execute_tasks.get(task_id) or _load_async_task(task_id)
+def _execute_cases_worker(task_id, user_id=None, slot_type=None):
+    """后台执行用例的 worker。user_id 隔离。"""
+    if user_id is None:
+        user_id = 1
+    task = _execute_tasks.get(task_id) or _load_async_task(task_id, user_id=user_id)
     if not task:
         return
-    _execute_tasks[task_id] = task  # 确保本地缓存有
+    _execute_tasks[task_id] = task
+    task["user_id"] = user_id
 
     try:
         conn = get_db_connection()
         case_ids = task["case_ids"]
 
         for case_id in case_ids:
-            # 获取用例详情
+            # 获取用例详情（按 user_id 隔离）
             case = execute_query(conn,
-                "SELECT * FROM test_cases WHERE id = " + ("%s" if USE_MYSQL else "?"),
-                (case_id,), fetch_one=True)
+                "SELECT * FROM test_cases WHERE id = " + ("%s" if USE_MYSQL else "?") + " AND user_id = " + ("%s" if USE_MYSQL else "?"),
+                (case_id, user_id), fetch_one=True)
             if not case:
                 continue
             case = row_to_dict(case)
@@ -7820,7 +8041,7 @@ def _execute_cases_worker(task_id):
 
                 # 逐轮发送，保存所有轮次回复
                 persona_id = case.get("persona_id") or case.get("device_id", "")
-                _p_row = execute_query(conn, f"SELECT target_api FROM personas WHERE id = {ph}", (persona_id,), fetch_one=True)
+                _p_row = execute_query(conn, f"SELECT target_api FROM personas WHERE id = {ph} AND user_id = {ph}", (persona_id, user_id), fetch_one=True)
                 _exec_target_api = (row_to_dict(_p_row) if _p_row else {}).get("target_api", "pipi") if _p_row else "pipi"
                 all_replies = []
                 has_error = False
@@ -7830,9 +8051,13 @@ def _execute_cases_worker(task_id):
                     import requests as req
                     import time as _time
                     _t0 = _time.time()
+                    headers = {"X-User-Id": str(user_id)} if user_id else {}
+                    if CLI_TOKEN:
+                        headers["X-CLI-Token"] = CLI_TOKEN
                     resp = req.post(
                         "http://127.0.0.1:8080/api/test/chat",
                         json={"persona_id": persona_id, "message": msg, "extract_facts": True},
+                        headers=headers,
                         timeout=180
                     )
                     _elapsed = _time.time() - _t0
@@ -7854,12 +8079,13 @@ def _execute_cases_worker(task_id):
                 # 合并所有轮次回复
                 actual_output = "\n".join(all_replies) if all_replies else ""
 
-                # 更新数据库
+                # 更新数据库（按 user_id 隔离）
                 if actual_output:
                     execute_query(conn,
                         "UPDATE test_cases SET actual_output = " + ("%s" if USE_MYSQL else "?") +
-                        ", executed_at = NOW(), status = 'executed' WHERE id = " + ("%s" if USE_MYSQL else "?"),
-                        (actual_output, case_id))
+                        ", executed_at = NOW(), status = 'executed' WHERE id = " + ("%s" if USE_MYSQL else "?") +
+                        " AND user_id = " + ("%s" if USE_MYSQL else "?"),
+                        (actual_output, case_id, user_id))
                     conn.commit()
                     task["executed_count"] += 1
 
@@ -7882,6 +8108,12 @@ def _execute_cases_worker(task_id):
         task["status"] = "failed"
         task["errors"].append({"case_id": "global", "error": str(e)})
         _update_async_task(task_id, task)
+    finally:
+        if slot_type:
+            try:
+                _release_slot(slot_type)
+            except Exception as e:
+                print(f"[SLOT RELEASE] {slot_type} failed: {e}", flush=True)
 
 
 def _get_unique_case_id(conn, base_id):
@@ -7963,16 +8195,18 @@ def evaluate_test_cases():
     status_filter = data.get("status", "executed")
 
     conn = get_db_connection()
+    uid = _current_uid()
 
-    # 获取要评测的用例
+    # 获取要评测的用例（仅当前用户的）
     if case_ids:
         placeholders = ",".join(["%s" if USE_MYSQL else "?"] * len(case_ids))
         cases = execute_query(conn,
-            f"SELECT * FROM test_cases WHERE id IN ({placeholders})",
-            case_ids, fetch_all=True)
+            f"SELECT * FROM test_cases WHERE id IN ({placeholders}) AND user_id = %s" if USE_MYSQL else
+            f"SELECT * FROM test_cases WHERE id IN ({placeholders}) AND user_id = ?",
+            case_ids + [uid], fetch_all=True)
     else:
-        sql = "SELECT * FROM test_cases WHERE 1=1"
-        params = []
+        sql = "SELECT * FROM test_cases WHERE 1=1 AND user_id = %s" if USE_MYSQL else "SELECT * FROM test_cases WHERE 1=1 AND user_id = ?"
+        params = [uid]
         if persona_id:
             sql += " AND persona_id = " + ("%s" if USE_MYSQL else "?")
             params.append(persona_id)
@@ -8006,10 +8240,15 @@ def evaluate_test_cases():
         "case_ids": [c["id"] for c in cases],
     }
     _evaluate_tasks[task_id] = task
-    _save_async_task(task_id, "evaluate", task)
+    uid = _current_uid()
+    task["user_id"] = uid
+    slot_type = f"user:{uid}:task"
+    if not _acquire_slot(slot_type, 2, ttl_seconds=7200, wait=False, timeout=0):
+        return jsonify({"error": "您已有 2 个任务在执行，请等待完成"}), 429
+    _save_async_task(task_id, "evaluate", task, user_id=uid)
 
     # 启动后台线程评测
-    t = threading.Thread(target=_evaluate_cases_worker, args=(task_id,))
+    t = threading.Thread(target=_evaluate_cases_worker, args=(task_id, uid, slot_type))
     t.daemon = True
     t.start()
 
@@ -8025,12 +8264,15 @@ def get_evaluate_status(task_id):
     return jsonify(task)
 
 
-def _evaluate_cases_worker(task_id):
-    """后台评测用例的 worker"""
-    task = _evaluate_tasks.get(task_id) or _load_async_task(task_id)
+def _evaluate_cases_worker(task_id, user_id=None, slot_type=None):
+    """后台评测用例的 worker。user_id 隔离。"""
+    if user_id is None:
+        user_id = 1
+    task = _evaluate_tasks.get(task_id) or _load_async_task(task_id, user_id=user_id)
     if not task:
         return
-    _evaluate_tasks[task_id] = task  # 确保本地缓存有
+    _evaluate_tasks[task_id] = task
+    task["user_id"] = user_id
 
     try:
         conn = get_db_connection()
@@ -8039,10 +8281,10 @@ def _evaluate_cases_worker(task_id):
         chat_corrections = _load_recent_corrections(eval_type="chat", limit=10)
 
         for case_id in case_ids:
-            # 获取用例详情
+            # 获取用例详情（按 user_id 隔离）
             case = execute_query(conn,
-                "SELECT * FROM test_cases WHERE id = " + ("%s" if USE_MYSQL else "?"),
-                (case_id,), fetch_one=True)
+                "SELECT * FROM test_cases WHERE id = " + ("%s" if USE_MYSQL else "?") + " AND user_id = " + ("%s" if USE_MYSQL else "?"),
+                (case_id, user_id), fetch_one=True)
             if not case:
                 continue
             case = row_to_dict(case)
@@ -8057,8 +8299,8 @@ def _evaluate_cases_worker(task_id):
                 continue
 
             try:
-                # 加载用户事实
-                user_facts = _load_user_facts(conn, case.get("persona_id")) if case.get("persona_id") else []
+                # 加载用户事实（按 user_id 隔离）
+                user_facts = _load_user_facts(conn, case.get("persona_id"), user_id=user_id) if case.get("persona_id") else []
 
                 core_result = _eval_case_core(
                     case, conn, chat_corrections=chat_corrections, user_facts=user_facts,
@@ -8096,6 +8338,12 @@ def _evaluate_cases_worker(task_id):
         task["status"] = "failed"
         task["errors"].append({"case_id": "global", "error": str(e)})
         _update_async_task(task_id, task)
+    finally:
+        if slot_type:
+            try:
+                _release_slot(slot_type)
+            except Exception as e:
+                print(f"[SLOT RELEASE] {slot_type} failed: {e}", flush=True)
 
 
 # ─── 测试报告生成 ─────────────────────────────────
@@ -8638,8 +8886,8 @@ def list_scheduled_tasks():
     limit = int(request.args.get("limit", 20))
 
     conn = get_db_connection()
-    sql = "SELECT * FROM scheduled_tasks WHERE 1=1"
-    params = []
+    sql = "SELECT * FROM scheduled_tasks WHERE 1=1 AND user_id = %s" if USE_MYSQL else "SELECT * FROM scheduled_tasks WHERE 1=1 AND user_id = ?"
+    params = [_current_uid()]
     if status:
         sql += " AND status = %s" if USE_MYSQL else " AND status = ?"
         params.append(status)
@@ -8719,13 +8967,14 @@ def create_scheduled_task():
             return jsonify({"error": "config.persona_id is required for full_flow"}), 400
 
     conn = get_db_connection()
+    uid = _current_uid()
     execute_query(conn, """
-        INSERT INTO scheduled_tasks (task_type, scheduled_at, config_json, status)
-        VALUES (%s, %s, %s, 'pending')
+        INSERT INTO scheduled_tasks (task_type, scheduled_at, config_json, status, user_id)
+        VALUES (%s, %s, %s, 'pending', %s)
     """ if USE_MYSQL else """
-        INSERT INTO scheduled_tasks (task_type, scheduled_at, config_json, status)
-        VALUES (?, ?, ?, 'pending')
-    """, (task_type, scheduled_at, json.dumps(config, ensure_ascii=False)))
+        INSERT INTO scheduled_tasks (task_type, scheduled_at, config_json, status, user_id)
+        VALUES (?, ?, ?, 'pending', ?)
+    """, (task_type, scheduled_at, json.dumps(config, ensure_ascii=False), uid))
     conn.commit()
 
     # 获取新创建的ID
@@ -8740,7 +8989,8 @@ def create_scheduled_task():
 def cancel_scheduled_task(task_id):
     """取消预约任务"""
     conn = get_db_connection()
-    row = execute_query(conn, "SELECT status FROM scheduled_tasks WHERE id = %s" if USE_MYSQL else "SELECT status FROM scheduled_tasks WHERE id = ?", (task_id,), fetch_one=True)
+    uid = _current_uid()
+    row = execute_query(conn, "SELECT status FROM scheduled_tasks WHERE id = %s AND user_id = %s" if USE_MYSQL else "SELECT status FROM scheduled_tasks WHERE id = ? AND user_id = ?", (task_id, uid), fetch_one=True)
 
     if not row:
         conn.close()
@@ -8750,7 +9000,7 @@ def cancel_scheduled_task(task_id):
         conn.close()
         return jsonify({"error": f"cannot cancel task with status: {row['status']}"}), 400
 
-    execute_query(conn, "UPDATE scheduled_tasks SET status = 'cancelled' WHERE id = %s" if USE_MYSQL else "UPDATE scheduled_tasks SET status = 'cancelled' WHERE id = ?", (task_id,))
+    execute_query(conn, "UPDATE scheduled_tasks SET status = 'cancelled' WHERE id = %s AND user_id = %s" if USE_MYSQL else "UPDATE scheduled_tasks SET status = 'cancelled' WHERE id = ? AND user_id = ?", (task_id, uid))
     conn.commit()
     conn.close()
 
@@ -8793,10 +9043,12 @@ def _run_scheduled_task(task):
                 "created_case_ids": [],  # 收集生成的用例ID
             }
             _generate_tasks[gen_task_id] = gen_task_data
-            _save_async_task(gen_task_id, "generate", gen_task_data)
+            sched_uid = task.get("user_id") or 1
+            gen_task_data["user_id"] = sched_uid
+            _save_async_task(gen_task_id, "generate", gen_task_data, user_id=sched_uid)
 
             # 同步执行
-            _generate_cases_worker(gen_task_id)
+            _generate_cases_worker(gen_task_id, user_id=sched_uid)
             result_ids.append(f"gen:{gen_task_id}")
 
             # 获取本次生成的用例ID
@@ -8808,7 +9060,8 @@ def _run_scheduled_task(task):
                 generated_case_ids = _wait_for_quality_review(
                     persona_id=config.get("persona_id"),
                     max_wait_seconds=1800,  # 最多等待30分钟
-                    check_interval=10  # 每10秒检查一次
+                    check_interval=10,  # 每10秒检查一次
+                    user_id=sched_uid
                 )
                 print(f"[FULL FLOW] Quality review completed, {len(generated_case_ids)} cases ready for execution", flush=True)
 
@@ -8817,14 +9070,15 @@ def _run_scheduled_task(task):
             import uuid
 
             conn = get_db_connection()
+            sched_uid = task.get("user_id") or 1
 
             # full_flow 模式下，只执行刚刚生成的用例
             if task_type == "full_flow" and generated_case_ids:
                 case_ids = generated_case_ids
             else:
-                # 单独执行模式，按配置查询用例（排除红队用例）
-                sql = "SELECT id FROM test_cases WHERE persona_id = %s AND (is_redteam = 0 OR is_redteam IS NULL)" if USE_MYSQL else "SELECT id FROM test_cases WHERE persona_id = ? AND (is_redteam = 0 OR is_redteam IS NULL)"
-                params = [config.get("persona_id")]
+                # 单独执行模式，按配置查询用例（排除红队用例，限定本用户）
+                sql = "SELECT id FROM test_cases WHERE persona_id = %s AND (is_redteam = 0 OR is_redteam IS NULL) AND user_id = %s" if USE_MYSQL else "SELECT id FROM test_cases WHERE persona_id = ? AND (is_redteam = 0 OR is_redteam IS NULL) AND user_id = ?"
+                params = [config.get("persona_id"), sched_uid]
                 if config.get("dimension_codes"):
                     placeholders = ",".join(["%s" if USE_MYSQL else "?"] * len(config["dimension_codes"]))
                     sql += f" AND dimension_code IN ({placeholders})"
@@ -8837,31 +9091,31 @@ def _run_scheduled_task(task):
                 task_code = f"{config.get('persona_id', 'unknown')}-{datetime.now().strftime('%Y%m%d%H%M')}"
                 task_name = config.get("name") or f"预约执行 {datetime.now().strftime('%m-%d %H:%M')}"
                 # 从 personas 表获取真正的 device_id
-                persona_row = execute_query(conn, "SELECT device_id FROM personas WHERE id = %s" if USE_MYSQL else "SELECT device_id FROM personas WHERE id = ?", (config.get("persona_id"),), fetch_one=True)
+                persona_row = execute_query(conn, "SELECT device_id FROM personas WHERE id = %s AND user_id = %s" if USE_MYSQL else "SELECT device_id FROM personas WHERE id = ? AND user_id = ?", (config.get("persona_id"), sched_uid), fetch_one=True)
                 device_id = (persona_row["device_id"] if persona_row else None) or config.get("device_id") or config.get("persona_id")
                 dimension_codes = config.get("dimension_codes") or []
 
                 target_api = config.get("target_api", "pipi")
                 cursor = execute_query(conn,
-                    """INSERT INTO test_tasks (task_id, name, persona_id, device_id, dimension_codes, case_ids, status, progress_total, target_api)
-                       VALUES (%s, %s, %s, %s, %s, %s, 'running', %s, %s)""" if USE_MYSQL else
-                    """INSERT INTO test_tasks (task_id, name, persona_id, device_id, dimension_codes, case_ids, status, progress_total, target_api)
-                       VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)""",
-                    (task_code, task_name, config.get("persona_id"), device_id, json.dumps(dimension_codes), json.dumps(case_ids), len(case_ids), target_api))
+                    """INSERT INTO test_tasks (task_id, name, persona_id, device_id, dimension_codes, case_ids, status, progress_total, target_api, user_id)
+                       VALUES (%s, %s, %s, %s, %s, %s, 'running', %s, %s, %s)""" if USE_MYSQL else
+                    """INSERT INTO test_tasks (task_id, name, persona_id, device_id, dimension_codes, case_ids, status, progress_total, target_api, user_id)
+                       VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)""",
+                    (task_code, task_name, config.get("persona_id"), device_id, json.dumps(dimension_codes), json.dumps(case_ids), len(case_ids), target_api, sched_uid))
                 conn.commit()
                 test_task_id = get_lastrowid(cursor)
 
                 # 创建 test_results 记录
                 for case_id in case_ids:
                     execute_query(conn,
-                        "INSERT INTO test_results (task_id, case_id, status, target_api) VALUES (%s, %s, 'pending', %s)" if USE_MYSQL else
-                        "INSERT INTO test_results (task_id, case_id, status, target_api) VALUES (?, ?, 'pending', ?)",
-                        (test_task_id, case_id, target_api))
+                        "INSERT INTO test_results (task_id, case_id, status, target_api, user_id) VALUES (%s, %s, 'pending', %s, %s)" if USE_MYSQL else
+                        "INSERT INTO test_results (task_id, case_id, status, target_api, user_id) VALUES (?, ?, 'pending', ?, ?)",
+                        (test_task_id, case_id, target_api, sched_uid))
                 conn.commit()
                 conn.close()
 
                 # 同步执行（复用 _execute_task_worker）
-                _execute_task_worker(test_task_id)
+                _execute_task_worker(test_task_id, user_id=sched_uid)
                 result_ids.append(f"task:{test_task_id}")
             else:
                 conn.close()
@@ -8882,23 +9136,24 @@ def _run_scheduled_task(task):
             if test_task_id:
                 conn = get_db_connection()
                 # 统计待评测数量
+                sched_uid_eval = task.get("user_id") or 1
                 eval_count = execute_query(conn,
-                    "SELECT COUNT(*) as cnt FROM test_results WHERE task_id = %s AND status = 'executed'" if USE_MYSQL else
-                    "SELECT COUNT(*) as cnt FROM test_results WHERE task_id = ? AND status = 'executed'",
-                    (test_task_id,), fetch_one=True)
+                    "SELECT COUNT(*) as cnt FROM test_results WHERE task_id = %s AND status = 'executed' AND user_id = %s" if USE_MYSQL else
+                    "SELECT COUNT(*) as cnt FROM test_results WHERE task_id = ? AND status = 'executed' AND user_id = ?",
+                    (test_task_id, sched_uid_eval), fetch_one=True)
                 eval_total = eval_count["cnt"] if eval_count else 0
 
                 if eval_total > 0:
                     # 更新状态为 evaluating
                     execute_query(conn,
-                        "UPDATE test_tasks SET status = 'evaluating', progress_done = 0, progress_total = %s WHERE id = %s" if USE_MYSQL else
-                        "UPDATE test_tasks SET status = 'evaluating', progress_done = 0, progress_total = ? WHERE id = ?",
-                        (eval_total, test_task_id))
+                        "UPDATE test_tasks SET status = 'evaluating', progress_done = 0, progress_total = %s WHERE id = %s AND user_id = %s" if USE_MYSQL else
+                        "UPDATE test_tasks SET status = 'evaluating', progress_done = 0, progress_total = ? WHERE id = ? AND user_id = ?",
+                        (eval_total, test_task_id, sched_uid_eval))
                     conn.commit()
                     conn.close()
 
                     # 同步评测
-                    _evaluate_task_worker(test_task_id)
+                    _evaluate_task_worker(test_task_id, user_id=sched_uid_eval)
                     result_ids.append(f"eval:{test_task_id}")
                 else:
                     conn.close()
@@ -9341,11 +9596,14 @@ def validate_case_rules(case_data, dimension_code, target_api="pipi"):
 
 
 
-def _wait_for_quality_review(persona_id, max_wait_seconds=1800, check_interval=10):
+def _wait_for_quality_review(persona_id, max_wait_seconds=1800, check_interval=10, user_id=None):
     """
     等待用例审核完成且无不合格用例
     返回：审核通过的用例ID列表（passed + warning）
+    user_id 隔离：scheduled_task 路径传入；路由路径走 _current_uid()。
     """
+    if user_id is None:
+        user_id = _current_uid()
     import time
     start_time = time.time()
     prev_total = 0
@@ -9355,11 +9613,11 @@ def _wait_for_quality_review(persona_id, max_wait_seconds=1800, check_interval=1
 
         conn = get_db_connection()
 
-        # 查询该用户所有用例的审核状态（排除红队用例，红队跳过审核）
+        # 查询该用户所有用例的审核状态（排除红队用例，按 user_id 隔离）
         rows = execute_query(conn,
-            "SELECT id, quality_status FROM test_cases WHERE persona_id = %s AND (is_redteam = 0 OR is_redteam IS NULL)" if USE_MYSQL else
-            "SELECT id, quality_status FROM test_cases WHERE persona_id = ? AND (is_redteam = 0 OR is_redteam IS NULL)",
-            (persona_id,), fetch_all=True)
+            "SELECT id, quality_status FROM test_cases WHERE persona_id = %s AND (is_redteam = 0 OR is_redteam IS NULL) AND user_id = %s" if USE_MYSQL else
+            "SELECT id, quality_status FROM test_cases WHERE persona_id = ? AND (is_redteam = 0 OR is_redteam IS NULL) AND user_id = ?",
+            (persona_id, user_id), fetch_all=True)
 
         total = len(rows)
 
@@ -9402,9 +9660,9 @@ def _wait_for_quality_review(persona_id, max_wait_seconds=1800, check_interval=1
                 if needs_manual > 0:
                     print(f"[FULL FLOW] {needs_manual} cases in needs_manual_review, returning passed cases anyway", flush=True)
                 passed_rows = execute_query(conn,
-                    "SELECT id FROM test_cases WHERE persona_id = %s AND quality_status IN ('passed', 'warning') AND (is_redteam = 0 OR is_redteam IS NULL)" if USE_MYSQL else
-                    "SELECT id FROM test_cases WHERE persona_id = ? AND quality_status IN ('passed', 'warning') AND (is_redteam = 0 OR is_redteam IS NULL)",
-                    (persona_id,), fetch_all=True)
+                    "SELECT id FROM test_cases WHERE persona_id = %s AND quality_status IN ('passed', 'warning') AND (is_redteam = 0 OR is_redteam IS NULL) AND user_id = %s" if USE_MYSQL else
+                    "SELECT id FROM test_cases WHERE persona_id = ? AND quality_status IN ('passed', 'warning') AND (is_redteam = 0 OR is_redteam IS NULL) AND user_id = ?",
+                    (persona_id, user_id), fetch_all=True)
                 conn.close()
 
                 return [r["id"] if isinstance(r, dict) else r[0] for r in passed_rows] if passed_rows else []
@@ -9423,9 +9681,9 @@ def _wait_for_quality_review(persona_id, max_wait_seconds=1800, check_interval=1
     # 超时后返回当前已通过的用例（排除红队用例）
     conn = get_db_connection()
     passed_rows = execute_query(conn,
-        "SELECT id FROM test_cases WHERE persona_id = %s AND quality_status IN ('passed', 'warning') AND (is_redteam = 0 OR is_redteam IS NULL)" if USE_MYSQL else
-        "SELECT id FROM test_cases WHERE persona_id = ? AND quality_status IN ('passed', 'warning') AND (is_redteam = 0 OR is_redteam IS NULL)",
-        (persona_id,), fetch_all=True)
+        "SELECT id FROM test_cases WHERE persona_id = %s AND quality_status IN ('passed', 'warning') AND (is_redteam = 0 OR is_redteam IS NULL) AND user_id = %s" if USE_MYSQL else
+        "SELECT id FROM test_cases WHERE persona_id = ? AND quality_status IN ('passed', 'warning') AND (is_redteam = 0 OR is_redteam IS NULL) AND user_id = ?",
+        (persona_id, user_id), fetch_all=True)
     conn.close()
 
     return [r["id"] if isinstance(r, dict) else r[0] for r in passed_rows] if passed_rows else []
@@ -9674,7 +9932,7 @@ def _reset_retry_count(persona_id, task_id=None):
         conn.close()
 
 
-def async_review_cases(case_ids, auto_regenerate=True, regen_depth=0):
+def async_review_cases(case_ids, auto_regenerate=True, regen_depth=0, user_id=None):
     """异步 LLM 复核用例质量，不合格自动重生成（最多2次）"""
     import threading
     def _review_worker():
@@ -9687,8 +9945,8 @@ def async_review_cases(case_ids, auto_regenerate=True, regen_depth=0):
                     continue
                 # 获取用例数据
                 row = execute_query(conn,
-                    "SELECT * FROM test_cases WHERE id = %s" if USE_MYSQL else "SELECT * FROM test_cases WHERE id = ?",
-                    (case_id,), fetch_one=True)
+                    "SELECT * FROM test_cases WHERE id = %s AND user_id = %s" if USE_MYSQL else "SELECT * FROM test_cases WHERE id = ? AND user_id = ?",
+                    (case_id, user_id), fetch_one=True)
                 if not row:
                     continue
                 case = row_to_dict(row)
@@ -9705,16 +9963,16 @@ def async_review_cases(case_ids, auto_regenerate=True, regen_depth=0):
                 persona_target_api = "pipi"
                 if persona_id:
                     fact_rows = execute_query(conn,
-                        "SELECT category, fact_key, fact_value FROM user_facts WHERE persona_id = %s AND is_active = 1 ORDER BY id DESC" if USE_MYSQL else
-                        "SELECT category, fact_key, fact_value FROM user_facts WHERE persona_id = ? AND is_active = 1 ORDER BY id DESC",
-                        (persona_id,), fetch_all=True)
+                        "SELECT category, fact_key, fact_value FROM user_facts WHERE persona_id = %s AND is_active = 1 AND user_id = %s ORDER BY id DESC" if USE_MYSQL else
+                        "SELECT category, fact_key, fact_value FROM user_facts WHERE persona_id = ? AND is_active = 1 AND user_id = ? ORDER BY id DESC",
+                        (persona_id, user_id), fetch_all=True)
                     if fact_rows:
                         user_facts = [row_to_dict(r) for r in fact_rows]
                     # 取 persona 的 target_api 以查对应玩偶人设
                     prow = execute_query(conn,
-                        "SELECT target_api FROM personas WHERE id = %s" if USE_MYSQL else
-                        "SELECT target_api FROM personas WHERE id = ?",
-                        (persona_id,), fetch_one=True)
+                        "SELECT target_api FROM personas WHERE id = %s AND user_id = %s" if USE_MYSQL else
+                        "SELECT target_api FROM personas WHERE id = ? AND user_id = ?",
+                        (persona_id, user_id), fetch_one=True)
                     if prow:
                         persona_target_api = row_to_dict(prow).get("target_api") or "pipi"
 
@@ -9724,9 +9982,9 @@ def async_review_cases(case_ids, auto_regenerate=True, regen_depth=0):
                 # 审核前置 pending：让 _wait_for_quality_review 能区分"已开始审核"vs"草稿未触达"
                 # Why: 否则审核线程刚启动还未逐条处理时，draft>0 会让轮询误判"生成未触发审核"
                 execute_query(conn,
-                    "UPDATE test_cases SET quality_status = 'pending' WHERE id = %s" if USE_MYSQL else
-                    "UPDATE test_cases SET quality_status = 'pending' WHERE id = ?",
-                    (case_id,))
+                    "UPDATE test_cases SET quality_status = 'pending' WHERE id = %s AND user_id = %s" if USE_MYSQL else
+                    "UPDATE test_cases SET quality_status = 'pending' WHERE id = ? AND user_id = ?",
+                    (case_id, user_id))
                 conn.commit()
 
                 # LLM 复核
@@ -9735,9 +9993,9 @@ def async_review_cases(case_ids, auto_regenerate=True, regen_depth=0):
 
                 # 更新数据库
                 execute_query(conn,
-                    "UPDATE test_cases SET quality_status = %s, quality_score = %s, quality_issues = %s WHERE id = %s" if USE_MYSQL else
-                    "UPDATE test_cases SET quality_status = ?, quality_score = ?, quality_issues = ? WHERE id = ?",
-                    (result["status"], result.get("score"), json.dumps(result.get("issues", []), ensure_ascii=False), case_id))
+                    "UPDATE test_cases SET quality_status = %s, quality_score = %s, quality_issues = %s WHERE id = %s AND user_id = %s" if USE_MYSQL else
+                    "UPDATE test_cases SET quality_status = ?, quality_score = ?, quality_issues = ? WHERE id = ? AND user_id = ?",
+                    (result["status"], result.get("score"), json.dumps(result.get("issues", []), ensure_ascii=False), case_id, user_id))
                 conn.commit()
                 print(f"[QUALITY REVIEW] case {case_id}: score={result.get('score')} status={result['status']}", flush=True)
 
@@ -9756,7 +10014,7 @@ def async_review_cases(case_ids, auto_regenerate=True, regen_depth=0):
 
             # 审核完成后，检查不合格用例并自动重生成
             if auto_regenerate:
-                _auto_regenerate_failed_cases(reviewed_cases, regen_depth=regen_depth)
+                _auto_regenerate_failed_cases(reviewed_cases, regen_depth=regen_depth, user_id=user_id)
 
         except Exception as e:
             print(f"[QUALITY REVIEW ERROR] {e}", flush=True)
@@ -9768,7 +10026,7 @@ def async_review_cases(case_ids, auto_regenerate=True, regen_depth=0):
     return t
 
 
-def _auto_regenerate_failed_cases(reviewed_cases, regen_depth=0):
+def _auto_regenerate_failed_cases(reviewed_cases, regen_depth=0, user_id=None):
     """自动重生成不合格用例（按 case 单条重生成，递归深度+DB计数双保险限制）
 
     改动:
@@ -9797,9 +10055,9 @@ def _auto_regenerate_failed_cases(reviewed_cases, regen_depth=0):
             print(f"[AUTO REGEN] {retry_key} exceeded limit (depth={regen_depth}, db_count={db_retry_count}), marking as needs_manual_review", flush=True)
             conn = get_db_connection()
             execute_query(conn,
-                "UPDATE test_cases SET quality_status = %s WHERE id = %s" if USE_MYSQL else
-                "UPDATE test_cases SET quality_status = ? WHERE id = ?",
-                ("needs_manual_review", c["id"]))
+                "UPDATE test_cases SET quality_status = %s WHERE id = %s AND user_id = %s" if USE_MYSQL else
+                "UPDATE test_cases SET quality_status = ? WHERE id = ? AND user_id = ?",
+                ("needs_manual_review", c["id"], user_id))
             conn.commit()
             conn.close()
             continue
@@ -9816,8 +10074,8 @@ def _auto_regenerate_failed_cases(reviewed_cases, regen_depth=0):
 
         # 取 persona 的 target_api
         prow = execute_query(conn,
-            "SELECT target_api FROM personas WHERE id = %s" if USE_MYSQL else "SELECT target_api FROM personas WHERE id = ?",
-            (persona_id,), fetch_one=True)
+            "SELECT target_api FROM personas WHERE id = %s AND user_id = %s" if USE_MYSQL else "SELECT target_api FROM personas WHERE id = ? AND user_id = ?",
+            (persona_id, user_id), fetch_one=True)
         regen_target_api = (row_to_dict(prow).get("target_api") if prow else None) or "pipi"
 
         # 获取维度信息
@@ -9829,17 +10087,17 @@ def _auto_regenerate_failed_cases(reviewed_cases, regen_depth=0):
         # 获取用户事实
         user_facts = []
         fact_rows = execute_query(conn,
-            "SELECT category, fact_key, fact_value FROM user_facts WHERE persona_id = %s AND is_active = 1 ORDER BY id DESC LIMIT 30" if USE_MYSQL else
-            "SELECT category, fact_key, fact_value FROM user_facts WHERE persona_id = ? AND is_active = 1 ORDER BY id DESC LIMIT 30",
-            (persona_id,), fetch_all=True)
+            "SELECT category, fact_key, fact_value FROM user_facts WHERE persona_id = %s AND is_active = 1 AND user_id = %s ORDER BY id DESC LIMIT 30" if USE_MYSQL else
+            "SELECT category, fact_key, fact_value FROM user_facts WHERE persona_id = ? AND is_active = 1 AND user_id = ? ORDER BY id DESC LIMIT 30",
+            (persona_id, user_id), fetch_all=True)
         if fact_rows:
             user_facts = [row_to_dict(r) for r in fact_rows]
 
         # 获取用户角色信息（从 personas 表）
         persona = None
         persona_row = execute_query(conn,
-            "SELECT * FROM personas WHERE id = %s" if USE_MYSQL else "SELECT * FROM personas WHERE id = ?",
-            (persona_id,), fetch_one=True)
+            "SELECT * FROM personas WHERE id = %s AND user_id = %s" if USE_MYSQL else "SELECT * FROM personas WHERE id = ? AND user_id = ?",
+            (persona_id, user_id), fetch_one=True)
         if persona_row:
             persona = row_to_dict(persona_row)
 
@@ -9865,10 +10123,11 @@ def _auto_regenerate_failed_cases(reviewed_cases, regen_depth=0):
             old_case_ids=old_case_ids,
             regen_depth=regen_depth,
             target_api=regen_target_api,
+            user_id=user_id,
         )
 
 
-def _regenerate_dimension_with_feedback(persona_id, dimension, toy_persona, persona, user_facts, count, issues_feedback, old_case_ids=None, regen_depth=0, target_api="pipi"):
+def _regenerate_dimension_with_feedback(persona_id, dimension, toy_persona, persona, user_facts, count, issues_feedback, old_case_ids=None, regen_depth=0, target_api="pipi", user_id=None):
     """带反馈重新生成维度用例（P1-4 进程内锁防并发，P1-5 先重生后删原子化，P1-6 递归深度传递）"""
     import threading
 
@@ -9912,7 +10171,7 @@ def _regenerate_dimension_with_feedback(persona_id, dimension, toy_persona, pers
                     final_case_id = _get_unique_case_id(conn, base_case_id)
                     case["case_id"] = final_case_id
 
-                    new_id = _save_test_case(conn, case, persona_id=persona_id, device_id=persona_id, dimension_code=dim_code)
+                    new_id = _save_test_case(conn, case, persona_id=persona_id, device_id=persona_id, dimension_code=dim_code, user_id=user_id)
                     if new_id:
                         new_case_ids.append(new_id)
 
@@ -9935,7 +10194,7 @@ def _regenerate_dimension_with_feedback(persona_id, dimension, toy_persona, pers
 
             # 触发新用例的审核（递归深度+1，P1-6 限制无限递归）
             if new_case_ids:
-                async_review_cases(new_case_ids, auto_regenerate=True, regen_depth=regen_depth + 1)
+                async_review_cases(new_case_ids, auto_regenerate=True, regen_depth=regen_depth + 1, user_id=user_id)
 
         except Exception as e:
             print(f"[AUTO REGEN ERROR] {retry_key} depth={regen_depth}: {e}", flush=True)
@@ -9955,21 +10214,22 @@ def trigger_case_review():
     data = request.get_json() or {}
     case_ids = data.get("case_ids", [])
     persona_id = data.get("persona_id")
+    uid = _current_uid()
 
     if not case_ids and persona_id:
-        # 根据 persona_id 获取所有用例（排除红队，红队跳过常规审核）
+        # 根据 persona_id 获取所有用例（排除红队，红队跳过常规审核，按 user_id 隔离）
         conn = get_db_connection()
         rows = execute_query(conn,
-            "SELECT id FROM test_cases WHERE persona_id = %s AND (is_redteam = 0 OR is_redteam IS NULL)" if USE_MYSQL else
-            "SELECT id FROM test_cases WHERE persona_id = ? AND (is_redteam = 0 OR is_redteam IS NULL)",
-            (persona_id,), fetch_all=True)
+            "SELECT id FROM test_cases WHERE persona_id = %s AND (is_redteam = 0 OR is_redteam IS NULL) AND user_id = %s" if USE_MYSQL else
+            "SELECT id FROM test_cases WHERE persona_id = ? AND (is_redteam = 0 OR is_redteam IS NULL) AND user_id = ?",
+            (persona_id, uid), fetch_all=True)
         case_ids = [r["id"] if isinstance(r, dict) else r[0] for r in rows] if rows else []
         conn.close()
 
     if not case_ids:
         return jsonify({"error": "请提供 case_ids 或 persona_id"}), 400
 
-    async_review_cases(case_ids)
+    async_review_cases(case_ids, user_id=uid)
     return jsonify({"message": f"已触发 {len(case_ids)} 条用例的异步复核", "case_count": len(case_ids)})
 
 
