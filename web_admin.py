@@ -23,7 +23,7 @@ def _tsprint(*args, **kwargs):
 
 builtins.print = _tsprint
 
-from flask import Flask, request, jsonify, send_file, redirect, make_response
+from flask import Flask, request, jsonify, send_file, redirect, make_response, g
 from flask_compress import Compress
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
