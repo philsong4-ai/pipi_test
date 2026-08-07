@@ -1,10 +1,12 @@
 """
 同步画像 md 文件到数据库
-python3 sync_personas.py
+python3 sync_personas.py [--user-id N]
+默认 --user-id 1（admin）。
 """
 import sqlite3
 import os
 import re
+import sys
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB = os.path.join(BASE_DIR, "test.db")
@@ -68,7 +70,7 @@ def parse_md(filepath):
                     data[db_key] = value
     return data
 
-def sync():
+def sync(user_id: int = 1):
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
 
@@ -79,7 +81,7 @@ def sync():
         "core_goal", "short_goal", "long_goal", "pain_points", "constraints", "risk_profile",
         "interests", "language_style", "sample_dialog", "info_sources", "decision_style",
         "relation_pace", "scene_pref", "top_expectations", "minefields",
-        "test_dimensions", "inject_strategy", "compare_with", "relation_stages",
+        "test_dimensions", "inject_strategy", "compare_with", "relation_stages", "user_id",
     ]
 
     placeholders = ", ".join([f":{f}" for f in fields])
@@ -110,6 +112,7 @@ def sync():
 
         style_map = {"小橘子": "冲动型", "芝士": "悦己型", "青橙": "品质型"}
         data["spending_style"] = style_map.get(clean_name, "")
+        data["user_id"] = user_id
 
         sql = f"INSERT OR REPLACE INTO personas ({col_names}) VALUES ({placeholders})"
         cur.execute(sql, data)
@@ -120,4 +123,13 @@ def sync():
     print(f"\n🎉 同步完成")
 
 if __name__ == "__main__":
-    sync()
+    uid = 1
+    if "--user-id" in sys.argv:
+        idx = sys.argv.index("--user-id")
+        if idx + 1 < len(sys.argv):
+            try:
+                uid = int(sys.argv[idx + 1])
+            except ValueError:
+                print(f"⚠️ 无效的 --user-id 参数：{sys.argv[idx + 1]}，使用默认 1")
+    print(f"🔄 同步画像到 user_id={uid}")
+    sync(uid)

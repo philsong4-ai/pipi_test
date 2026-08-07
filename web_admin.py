@@ -549,6 +549,57 @@ def _ensure_tables():
             print(f"[STARTUP] Respawned {len(stalled_ids)} growth workers", flush=True)
         conn2.close()
 
+        # 多用户隔离：8 张核心业务表加 user_id 列（默认 1=admin，现有数据归 admin）
+        for tbl in ['personas', 'test_tasks', 'async_tasks', 'scheduled_tasks',
+                    'test_cases', 'test_results', 'user_facts', 'chat_messages']:
+            try:
+                execute_query(conn, f"SELECT user_id FROM {tbl} LIMIT 1", fetch_one=True)
+            except Exception:
+                try:
+                    execute_query(conn,
+                        f"ALTER TABLE {tbl} ADD COLUMN user_id INT NOT NULL DEFAULT 1"
+                        if USE_MYSQL else
+                        f"ALTER TABLE {tbl} ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
+                    if USE_MYSQL:
+                        execute_query(conn, f"CREATE INDEX idx_{tbl}_user_id ON {tbl}(user_id)")
+                    else:
+                        execute_query(conn, f"CREATE INDEX idx_{tbl}_user_id ON {tbl}(user_id)")
+                    conn.commit()
+                    print(f"[STARTUP] Added {tbl}.user_id column", flush=True)
+                except Exception as e:
+                    print(f"[STARTUP] Could not add {tbl}.user_id: {e}", flush=True)
+
+        # 并发限流 slot 表（跨 worker 全局并发上限）
+        try:
+            execute_query(conn, "SELECT 1 FROM concurrency_slots LIMIT 1", fetch_one=True)
+        except Exception:
+            try:
+                execute_query(conn, """
+                    CREATE TABLE IF NOT EXISTS concurrency_slots (
+                        slot_type VARCHAR(64) NOT NULL,
+                        current_count INT NOT NULL DEFAULT 0,
+                        max_count INT NOT NULL,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        PRIMARY KEY (slot_type)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """ if USE_MYSQL else """
+                    CREATE TABLE IF NOT EXISTS concurrency_slots (
+                        slot_type TEXT NOT NULL,
+                        current_count INTEGER NOT NULL DEFAULT 0,
+                        max_count INTEGER NOT NULL,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY (slot_type)
+                    )
+                """)
+                for slot, mx in [('llm_global', 16), ('api_global', 8), ('user_task_global', 32)]:
+                    execute_query(conn,
+                        "INSERT IGNORE INTO concurrency_slots (slot_type, max_count, current_count) VALUES (?, ?, 0)",
+                        (slot, mx))
+                conn.commit()
+                print("[STARTUP] Created concurrency_slots table", flush=True)
+            except Exception as e:
+                print(f"[STARTUP] Could not create concurrency_slots: {e}", flush=True)
+
         conn.close()
         _initialized = True
         print(f"[DB] Using {'MySQL' if USE_MYSQL else 'SQLite'}", flush=True)
@@ -606,13 +657,33 @@ def _get_current_user():
 def _require_login():
     """校验登录态。未登录返回 None（已登录返回 user payload）。
     CLI bypass：若请求带 X-CLI-Token header 且等于 CLI_TOKEN，绕过校验。
+    CLI 必须显式带 X-User-Id header 指定操作的用户身份，默认 1（admin）。
     """
     user = _get_current_user()
     if user:
         return user
     if CLI_TOKEN and request.headers.get("X-CLI-Token") == CLI_TOKEN:
-        return {"user_id": 0, "sso_sub": "cli", "name": "CLI", "email": None}
+        uid_str = request.headers.get("X-User-Id", "1")
+        try:
+            uid = int(uid_str)
+        except (ValueError, TypeError):
+            uid = 1
+        return {"user_id": uid, "sso_sub": f"cli:{uid}", "name": f"CLI:{uid}", "email": None}
     return None
+
+
+def _current_uid() -> int:
+    """返回当前请求的 user_id。g.user 优先，回退 1（admin）。
+
+    handler 内调用；worker 是后台线程无 request context，需通过参数传入 user_id。
+    """
+    u = getattr(g, 'user', None)
+    if u and u.get('user_id'):
+        try:
+            return int(u['user_id'])
+        except (ValueError, TypeError):
+            pass
+    return 1
 
 
 @app.before_request
@@ -628,6 +699,7 @@ def before_request():
     user = _require_login()
     if not user:
         return jsonify({"error": "unauthorized", "login_url": "/api/auth/login"}), 401
+    g.user = user
 
 
 # ─── OIDC 路由 ───────────────────────────────────
@@ -766,30 +838,31 @@ def get_personas():
     offset = (page - 1) * per_page
 
     conn = get_db_connection()
+    uid = _current_uid()
 
     # 构建查询
     if search:
         # 搜索 id 或 name
         placeholder = "%s" if USE_MYSQL else "?"
-        count_sql = f"SELECT COUNT(*) as total FROM personas WHERE id LIKE {placeholder} OR name LIKE {placeholder}"
+        count_sql = f"SELECT COUNT(*) as total FROM personas WHERE user_id = {placeholder} AND (id LIKE {placeholder} OR name LIKE {placeholder})"
         search_param = f"%{search}%"
-        total_row = execute_query(conn, count_sql, (search_param, search_param), fetch_one=True)
+        total_row = execute_query(conn, count_sql, (uid, search_param, search_param), fetch_one=True)
         total = row_to_dict(total_row)["total"]
 
         data_sql = f"""
             SELECT * FROM personas
-            WHERE id LIKE {placeholder} OR name LIKE {placeholder}
+            WHERE user_id = {placeholder} AND (id LIKE {placeholder} OR name LIKE {placeholder})
             ORDER BY created_at DESC, id DESC
             LIMIT {placeholder} OFFSET {placeholder}
         """
-        rows = execute_query(conn, data_sql, (search_param, search_param, per_page, offset), fetch_all=True)
+        rows = execute_query(conn, data_sql, (uid, search_param, search_param, per_page, offset), fetch_all=True)
     else:
-        count_sql = "SELECT COUNT(*) as total FROM personas"
-        total_row = execute_query(conn, count_sql, fetch_one=True)
+        count_sql = "SELECT COUNT(*) as total FROM personas WHERE user_id = ?"
+        total_row = execute_query(conn, count_sql, (uid,), fetch_one=True)
         total = row_to_dict(total_row)["total"]
 
-        data_sql = "SELECT * FROM personas ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
-        rows = execute_query(conn, data_sql, (per_page, offset), fetch_all=True)
+        data_sql = "SELECT * FROM personas WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+        rows = execute_query(conn, data_sql, (uid, per_page, offset), fetch_all=True)
 
     conn.close()
 
@@ -805,7 +878,7 @@ def get_personas():
 @app.route("/api/personas/<pid>", methods=["GET"])
 def get_persona(pid):
     conn = get_db_connection()
-    row = execute_query(conn, "SELECT * FROM personas WHERE id=?", (pid,), fetch_one=True)
+    row = execute_query(conn, "SELECT * FROM personas WHERE id=? AND user_id=?", (pid, _current_uid()), fetch_one=True)
     conn.close()
     if row:
         return jsonify(row_to_dict(row))
@@ -840,7 +913,7 @@ def upsert_persona(pid=None):
         "risk_profile", "interests", "language_style", "sample_dialog",
         "info_sources", "decision_style", "relation_pace", "scene_pref",
         "top_expectations", "minefields", "test_dimensions", "inject_strategy",
-        "compare_with", "relation_stages", "target_api",
+        "compare_with", "relation_stages", "target_api", "user_id",
     ]
 
     # 如果没有 device_id，自动生成
@@ -849,8 +922,10 @@ def upsert_persona(pid=None):
         data["device_id"] = f"TEST_DEV_{int(time_module.time())}_{random.randint(1000,9999)}"
 
     conn = get_db_connection()
+    uid = _current_uid()
     kv = {f: data.get(f, "") for f in fields}
     kv["id"] = pid
+    kv["user_id"] = uid
     values = [kv[f] for f in fields]
     cols = ", ".join(fields)
     if USE_MYSQL:
@@ -901,6 +976,13 @@ def upsert_persona(pid=None):
 def delete_persona(pid):
     """删除用户及其所有关联数据"""
     conn = get_db_connection()
+    uid = _current_uid()
+
+    # 先验证 persona 归属当前用户（防越权删除他人数据）
+    row = execute_query(conn, "SELECT id FROM personas WHERE id=? AND user_id=?", (pid, uid), fetch_one=True)
+    if not row:
+        conn.close()
+        return jsonify({"error": "not found or no permission"}), 404
 
     # 先删除 growth_progress（依赖 growth_tasks）
     execute_query(conn, """
@@ -914,7 +996,7 @@ def delete_persona(pid):
     execute_query(conn, "DELETE FROM chat_feedback WHERE message_id IN (SELECT id FROM chat_messages WHERE persona_id=?)", (pid,))
     execute_query(conn, "DELETE FROM chat_messages WHERE persona_id=?", (pid,))
     execute_query(conn, "DELETE FROM user_facts WHERE persona_id=?", (pid,))
-    execute_query(conn, "DELETE FROM personas WHERE id=?", (pid,))
+    execute_query(conn, "DELETE FROM personas WHERE id=? AND user_id=?", (pid, uid))
 
     conn.commit()
     conn.close()
@@ -983,8 +1065,8 @@ def batch_create_personas():
         device_id = f"TEST_DEV_HUARONG_{timestamp}_{i+1}_{random.randint(1000,9999)}"
 
         # 创建最基本的用户画像
-        fields = ["id", "name", "device_id", "target_api"]
-        values = [persona_id, name, device_id, target_api]
+        fields = ["id", "name", "device_id", "target_api", "user_id"]
+        values = [persona_id, name, device_id, target_api, _current_uid()]
 
         if USE_MYSQL:
             ph = ", ".join(["%s"] * len(fields))
@@ -2794,12 +2876,13 @@ def _create_fact(data):
     print(f"[FACT INSERT] {category}.{fact_key}{entity_tag}({fact_type}) = {fact_value[:50]}")
 
     # 同步更新 personas 表（如果字段匹配映射，且为 permanent 类型）
+    # user_id 过滤通过子查询反查（worker 无 request context，不能调 _current_uid）
     if fact_type == "permanent":
         persona_field = PERSONA_FIELD_MAP.get((category, fact_key))
         if persona_field and persona_id:
             execute_query(conn,
-                f"UPDATE personas SET {persona_field} = ? WHERE id = ?",
-                (fact_value, persona_id))
+                f"UPDATE personas SET {persona_field} = ? WHERE id = ? AND user_id = (SELECT user_id FROM personas WHERE id = ?)",
+                (fact_value, persona_id, persona_id))
             print(f"[FACT->PERSONA] {category}.{fact_key} -> personas.{persona_field} = {fact_value}")
 
     conn.commit()
@@ -3022,8 +3105,8 @@ def batch_create_growth():
 
         # 只创建最基本的用户画像（id + name + device_id）
         # 其他用户信息全部通过对话提取存入 user_facts
-        fields = ["id", "name", "device_id", "target_api"]
-        values = [persona_id, persona_name, device_id, target_api]
+        fields = ["id", "name", "device_id", "target_api", "user_id"]
+        values = [persona_id, persona_name, device_id, target_api, _current_uid()]
 
         if USE_MYSQL:
             ph = ", ".join(["%s"] * len(fields))
@@ -3602,9 +3685,10 @@ def _generate_messages_for_missing_fields(persona_id, categories=None, template_
             messages.append(msg)
 
             # 同步写回 personas 表（保证字段持久化，后续 LLM 生成消息时有完整画像）
+            # user_id 过滤通过子查询反查（worker 无 request context）
             try:
                 conn2 = get_db_connection()
-                execute_query(conn2, f"UPDATE personas SET {field}=? WHERE id=?", (val, persona_id))
+                execute_query(conn2, f"UPDATE personas SET {field}=? WHERE id=? AND user_id = (SELECT user_id FROM personas WHERE id=?)", (val, persona_id, persona_id))
                 conn2.commit()
                 conn2.close()
             except Exception as e:
@@ -3936,7 +4020,7 @@ def _create_one_persona_async(persona_id, device_id, name, cfg):
         "core_goal", "short_goal", "long_goal", "pain_points", "constraints",
         "risk_profile", "interests", "language_style", "sample_dialog",
         "info_sources", "decision_style", "relation_pace", "scene_pref",
-        "top_expectations", "minefields", "target_api"
+        "top_expectations", "minefields", "target_api", "user_id"
     ]
     values = [
         persona_id, name, device_id,
@@ -3969,6 +4053,7 @@ def _create_one_persona_async(persona_id, device_id, name, cfg):
         profile.get("top_expectations", ""),
         profile.get("minefields", ""),
         target_api,
+        _current_uid(),
     ]
 
     if USE_MYSQL:
@@ -9449,6 +9534,77 @@ def _release_regen_lock_db(lock_key):
             conn.close()
     except Exception as e:
         print(f"[REGEN LOCK RELEASE] DB failed: {e}", flush=True)
+
+
+# ─── 全局并发限流（MySQL 表计数） ──────────────────────────────
+# 跨 worker 全局并发槽：LLM 调用 ≤16、目标 API ≤8、用户任务 ≤2/人
+# Why: _EVAL_SEMAPHORE 是进程内信号量，gunicorn 16 worker × 8 = 128 并发评测，远超设计意图；
+#      且 generate/execute 类 worker 完全无闸，burst 时打爆 LLM 代理或目标 API。
+#      用 MySQL 表做全局计数（regen_locks 模式照搬），单条 UPDATE 靠行锁原子性。
+
+def _acquire_slot(slot_type: str, max_count: int, ttl_seconds: int = 1800,
+                  wait: bool = True, timeout: int = 300) -> bool:
+    """获取并发槽。slot_type 全局（如 'llm_global'）或用户级（如 'user:3:task'）。
+
+    实现：
+    1. INSERT IGNORE 确保 slot 行存在（用户级 slot 首次使用时创建）
+    2. 清理泄漏：updated_at 超过 ttl_seconds 的行 current_count 归零（worker 崩溃未 release 兜底）
+    3. 原子 +1：UPDATE ... SET current_count = current_count + 1 WHERE current_count < max_count
+       单条 UPDATE 靠 MySQL 行锁原子性，rowcount>0 表示成功
+    4. 槽满时 sleep 2s 重试直到 timeout；wait=False 时立即返回 False
+
+    异常时打日志 + 返回 True（降级放行，不阻塞业务）。
+    """
+    import time as _t
+    deadline = _t.time() + timeout
+    while True:
+        try:
+            conn = get_db_connection()
+            try:
+                # 确保 slot 存在
+                execute_query(conn,
+                    "INSERT IGNORE INTO concurrency_slots (slot_type, max_count, current_count) VALUES (%s, %s, 0)" if USE_MYSQL else
+                    "INSERT OR IGNORE INTO concurrency_slots (slot_type, max_count, current_count) VALUES (?, ?, 0)",
+                    (slot_type, max_count))
+                # 清理泄漏（updated_at < NOW() - TTL）
+                execute_query(conn,
+                    "UPDATE concurrency_slots SET current_count = 0 WHERE slot_type = %s AND updated_at < DATE_SUB(NOW(), INTERVAL %s SECOND)" if USE_MYSQL else
+                    "UPDATE concurrency_slots SET current_count = 0 WHERE slot_type = ? AND updated_at < datetime('now', '-' || ? || ' seconds')",
+                    (slot_type, ttl_seconds))
+                # 原子 +1
+                cur = conn.cursor()
+                if USE_MYSQL:
+                    cur.execute("UPDATE concurrency_slots SET current_count = current_count + 1, updated_at = NOW() WHERE slot_type = %s AND current_count < max_count", (slot_type,))
+                else:
+                    cur.execute("UPDATE concurrency_slots SET current_count = current_count + 1, updated_at = datetime('now') WHERE slot_type = ? AND current_count < max_count", (slot_type,))
+                ok = cur.rowcount > 0
+                conn.commit()
+                if ok:
+                    return True
+            finally:
+                conn.close()
+        except Exception as e:
+            print(f"[SLOT ACQUIRE] {slot_type} DB failed, degrade to allow: {e}", flush=True)
+            return True  # 降级放行，不阻塞业务
+        if not wait or _t.time() >= deadline:
+            return False
+        _t.sleep(2)
+
+
+def _release_slot(slot_type: str):
+    """释放并发槽：current_count = GREATEST(0, current_count - 1)。"""
+    try:
+        conn = get_db_connection()
+        try:
+            execute_query(conn,
+                "UPDATE concurrency_slots SET current_count = GREATEST(0, current_count - 1) WHERE slot_type = %s" if USE_MYSQL else
+                "UPDATE concurrency_slots SET current_count = MAX(0, current_count - 1) WHERE slot_type = ?",
+                (slot_type,))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[SLOT RELEASE] {slot_type} failed: {e}", flush=True)
 
 
 def _get_retry_count(persona_id, dim_code):
