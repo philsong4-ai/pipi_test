@@ -113,7 +113,7 @@ MySQL `pipi_test`，用户 `pipi`，密码 `<DB_PASSWORD>`。代码同时兼容 
 - `user_facts`: 用户事实记忆
 - `chat_messages`: 聊天历史
 - `async_tasks`: 异步任务（生成/执行/评测），含 progress_json 和 result_json
-- `toy_persona`: 玩偶人设配置（当前仅「秋秋」）
+- `toy_persona`: 玩偶人设配置（当前仅「小米绒绒」）
 
 ## Key Patterns
 

@@ -25,12 +25,12 @@
 ```yaml
 identity:
   system_prompt_template: "你是皮皮，设备ID是{device_id}"  # build_system_prompt 用
-  default_toy_persona_text: "秋秋是一个温暖..."             # evaluate_chat_reply 默认人设
+  default_toy_persona_text: "小米绒绒是一个温暖..."             # evaluate_chat_reply 默认人设
   role_label_user: "用户"                                   # input_text 中用户角色标签
-  role_label_ai: "秋秋"                                      # input_text / 评测 prompt 中 AI 角色标签
+  role_label_ai: "小米绒绒"                                      # input_text / 评测 prompt 中 AI 角色标签
   product_category_label: "AI陪伴产品"                       # generate_test_cases system 第一行
   user_role_label_in_input: "用户"                          # input_text 中的用户标签（与 role_label_user 同义）
-  ai_role_label_in_input: "秋秋"                            # input_text 中的 AI 标签
+  ai_role_label_in_input: "小米绒绒"                            # input_text 中的 AI 标签
 ```
 
 ## prompts

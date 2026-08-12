@@ -2221,7 +2221,7 @@ def eval_score():
     请求参数 (JSON):
         reply_text: str - AI的回复文本（必填）
         user_message: str - 用户的消息（必填）
-        chat_history: list - 对话历史，格式: ["用户: xxx", "秋秋: xxx", ...]（可选）
+        chat_history: list - 对话历史，格式: ["用户: xxx", "小米绒绒: xxx", ...]（可选）
         user_facts: list - 用户事实，格式: [{"category": "pet", "fact_key": "name", "fact_value": "豆豆"}, ...]（可选）
         persona_data: dict - 用户画像，格式: {"name": "xxx", "age": "xx", ...}（可选）
 
@@ -9489,7 +9489,7 @@ def validate_case_rules(case_data, dimension_code, target_api="pipi"):
     input_text = case_data.get("input_text", "")
 
     # 1. input_text 不应包含 AI 回复
-    if "秋秋：" in input_text or "秋秋:" in input_text:
+    if "秋秋：" in input_text or "秋秋:" in input_text or "小米绒绒：" in input_text or "小米绒绒:" in input_text:
         issues.append("input_text 包含 AI 回复（应只有用户输入）")
 
     # 2. 多轮格式检查

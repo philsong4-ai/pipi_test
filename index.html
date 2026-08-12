@@ -622,7 +622,7 @@ body{background:#f5f5f7;color:#1d1d1f}
       </div>
       <div style="flex:1;text-align:center;padding:12px;background:#f5f5f7;border-radius:8px">
         <div style="font-size:20px;margin-bottom:4px">2️⃣</div>
-        <div>与秋秋对话</div>
+        <div>与小米绒绒对话</div>
       </div>
       <div style="flex:1;text-align:center;padding:12px;background:#f5f5f7;border-radius:8px">
         <div style="font-size:20px;margin-bottom:4px">3️⃣</div>
@@ -664,7 +664,7 @@ body{background:#f5f5f7;color:#1d1d1f}
   <div class="card" style="max-width:800px">
     <h3 style="font-size:14px;margin-bottom:12px">👍 回复评价模块</h3>
     <p style="font-size:13px;color:#86868b;margin-bottom:12px;line-height:1.6">
-      独立的回复质量评价系统，用于收集和分析秋秋回复的用户反馈。
+      独立的回复质量评价系统，用于收集和分析小米绒绒回复的用户反馈。
     </p>
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
       <div style="background:#e8ffe8;padding:10px;border-radius:8px;text-align:center">
@@ -1382,7 +1382,7 @@ function loadChatHistory(personaId) {
     var box = document.getElementById('chat-box');
     box.innerHTML = '';
     var list = msgs || [];
-    // 收集秋秋消息ID用于批量获取评测数据
+    // 收集小米绒绒消息ID用于批量获取评测数据
     var pipiMsgIds = [];
     for (var i = 0; i < list.length; i++) {
       if (list[i].role === 'pipi') pipiMsgIds.push(list[i].id);
@@ -1401,7 +1401,7 @@ function loadChatHistory(personaId) {
           addMsg('user', m.user || getUserName().split(' ')[0], m.text, m.created_at, m.id, null);
         } else {
           var evalData = evalDataMap[m.id] || null;
-          addMsg('pipi', '秋秋', m.text, m.created_at, m.id, m.feedback, evalData);
+          addMsg('pipi', '小米绒绒', m.text, m.created_at, m.id, m.feedback, evalData);
         }
       }
       box.scrollTop = box.scrollHeight;
@@ -1559,14 +1559,14 @@ function sendMsg() {
   inp.disabled = true;
   var senderName = chatUser === '__guest__' ? '游客' : getUserName().split(' ')[0];
   addMsg('user', senderName, t, getNow());
-  addSys('秋秋正在输入...');
+  addSys('小米绒绒正在输入...');
   var targetApi = document.getElementById('chat-endpoint').value || 'pipi';
   api('/api/chat', 'POST', { persona_id: chatUser, message: t, target_api: targetApi })
     .then(function(res) {
       var b = document.getElementById('chat-box');
       b.removeChild(b.lastChild);
       if (res.full_text) {
-        addMsg('pipi', '秋秋', res.full_text, getNow(), res.message_id, null, null);
+        addMsg('pipi', '小米绒绒', res.full_text, getNow(), res.message_id, null, null);
         // 如果评测开关开启，延迟轮询加载评测结果
         if (evalEnabled && res.message_id) {
           setTimeout(function() { loadEvalForMessage(res.message_id); }, 3000);
@@ -1577,13 +1577,13 @@ function sendMsg() {
           setTimeout(function() { loadEvalForMessage(res.message_id); }, 120000);
         }
       } else {
-        addMsg('pipi', '秋秋', res.error || '无回复', getNow(), null, null, null);
+        addMsg('pipi', '小米绒绒', res.error || '无回复', getNow(), null, null, null);
       }
     })
     .catch(function(e) {
       var b = document.getElementById('chat-box');
       b.removeChild(b.lastChild);
-      addMsg('pipi', '秋秋', '请求失败: ' + e.message, getNow());
+      addMsg('pipi', '小米绒绒', '请求失败: ' + e.message, getNow());
     })
     .then(function() { inp.disabled = false; inp.focus(); });
 }
@@ -2344,7 +2344,7 @@ function showGrowthResult(taskId) {
       html += '<div style="font-size:12px;color:#86868b">' + statusIcon + ' #' + (i+1) + '</div>';
       html += '<div style="margin:4px 0;padding:8px;background:#e8f4ff;border-radius:6px"><strong>用户:</strong> ' + (p.user_message || '') + '</div>';
       if (p.reply_text) {
-        html += '<div style="margin:4px 0;padding:8px;background:#f5f5f7;border-radius:6px"><strong>秋秋:</strong> ' + p.reply_text + '</div>';
+        html += '<div style="margin:4px 0;padding:8px;background:#f5f5f7;border-radius:6px"><strong>小米绒绒:</strong> ' + p.reply_text + '</div>';
       }
       if (p.facts_json) {
         try {
@@ -3964,7 +3964,7 @@ function showToyPersonaModal(tp) {
 
     var h = '<div style="max-width:640px">';
     h += '<div class="form-group" style="margin-bottom:12px"><label>名称</label>';
-    h += '<input type="text" id="tp-name" value="' + (tp ? (tp.name || '') : '') + '" placeholder="如：秋秋" style="width:100%;padding:8px;border:1px solid #d2d2d7;border-radius:4px"></div>';
+    h += '<input type="text" id="tp-name" value="' + (tp ? (tp.name || '') : '') + '" placeholder="如：小米绒绒" style="width:100%;padding:8px;border:1px solid #d2d2d7;border-radius:4px"></div>';
     h += '<div class="form-group" style="margin-bottom:12px"><label>绑定接口 (target_api，1 人设绑 1 API)</label>';
     h += '<select id="tp-target-api" style="width:100%;padding:8px;border:1px solid #d2d2d7;border-radius:4px">' + opts + '</select>';
     h += '</div>';
