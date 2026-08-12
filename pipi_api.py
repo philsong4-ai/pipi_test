@@ -1294,20 +1294,9 @@ def _tomorrow_date():
 
 def build_system_prompt(persona_data: Optional[Dict] = None, device_id: str = "", target_api: str = "pipi") -> str:
     """
-    构建 system prompt。优先级：
-    1. toy_persona.system_prompt_full（DB 中按 target_api 查到的完整 prompt，覆盖一切）
-    2. interface_profiles/<ta>.json 的 identity.system_prompt_template（默认回退）
+    构建 system prompt。按 target_api 从 interface_profiles/<ta>.json 的 identity.system_prompt_template 读取。
     未知 target_api 回退 pipi。OHO 等接口人设由 API 端管，system_prompt 走 profile 配置不注入皮皮身份。
     """
-    # 优先从 DB 读 toy_persona.system_prompt_full
-    try:
-        from web_admin import _get_toy_persona_by_target
-        toy = _get_toy_persona_by_target(target_api)
-        if toy and toy.get("system_prompt_full"):
-            return toy["system_prompt_full"]
-    except Exception as e:
-        print(f"[BUILD_SP] load toy_persona system_prompt_full failed: {e}", flush=True)
-
     from interface_profiles import load_profile
     profile = load_profile(target_api)
     template = profile["identity"]["system_prompt_template"]
