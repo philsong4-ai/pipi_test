@@ -394,6 +394,17 @@ def _ensure_tables():
             except Exception as e:
                 print(f"[STARTUP] Could not add test_dimensions.target_api: {e}", flush=True)
 
+        # toy_persona 加 system_prompt_full 字段（存完整 system prompt，覆盖结构化字段拼接）
+        try:
+            execute_query(conn, "SELECT system_prompt_full FROM toy_persona LIMIT 1", fetch_one=True)
+        except:
+            try:
+                execute_query(conn, "ALTER TABLE toy_persona ADD COLUMN system_prompt_full TEXT NULL")
+                conn.commit()
+                print("[STARTUP] Added toy_persona.system_prompt_full column", flush=True)
+            except Exception as e:
+                print(f"[STARTUP] Could not add toy_persona.system_prompt_full: {e}", flush=True)
+
 
         try:
             execute_query(conn, "SELECT 1 FROM sso_users LIMIT 1", fetch_one=True)
