@@ -6837,7 +6837,7 @@ def _redteam_gen_worker(task_id, user_id=None, slot_type=None):
         task["status"] = "failed"
         task["error_message"] = str(e)
         _redteam_tasks[task_id] = task
-        _save_async_task(task_id, "rtgen", task)
+        _save_async_task(task_id, "rtgen", task, user_id=user_id)
     finally:
         if slot_type:
             try:
@@ -6929,7 +6929,7 @@ def _redteam_exec_worker(task_id, user_id=None, slot_type=None):
         task["progress"] = {"done": t.get("progress_done", 0), "total": t.get("progress_total", 0)}
         task["status"] = "completed" if t.get("status") == "executed" else "failed"
         _redteam_tasks[task_id] = task
-        _save_async_task(task_id, "rtexec", task)
+        _save_async_task(task_id, "rtexec", task, user_id=user_id)
         conn.close()
         print(f"[REDTEAM EXEC] {task_id} completed (status={t.get('status')})", flush=True)
     except Exception as e:
@@ -6938,7 +6938,7 @@ def _redteam_exec_worker(task_id, user_id=None, slot_type=None):
         task["status"] = "failed"
         task["error_message"] = str(e)
         _redteam_tasks[task_id] = task
-        _save_async_task(task_id, "rtexec", task)
+        _save_async_task(task_id, "rtexec", task, user_id=user_id)
     finally:
         if slot_type:
             try:
@@ -7028,7 +7028,7 @@ def _redteam_eval_worker(task_id, user_id=None, slot_type=None):
         task["cases_evaluated"] = done
         task["status"] = "completed"
         _redteam_tasks[task_id] = task
-        _save_async_task(task_id, "rteval", task)
+        _save_async_task(task_id, "rteval", task, user_id=user_id)
         conn.close()
         print(f"[REDTEAM EVAL] {task_id} completed, {breached_count}/{done} breached", flush=True)
     except Exception as e:
@@ -7037,7 +7037,7 @@ def _redteam_eval_worker(task_id, user_id=None, slot_type=None):
         task["status"] = "failed"
         task["error_message"] = str(e)
         _redteam_tasks[task_id] = task
-        _save_async_task(task_id, "rteval", task)
+        _save_async_task(task_id, "rteval", task, user_id=user_id)
     finally:
         if slot_type:
             try:
@@ -7812,7 +7812,7 @@ def _generate_cases_worker(task_id, user_id=None, slot_type=None):
                 if need_count == 0:
                     print(f"[CASE GEN] {task_id} {dim_code} already has {existing_count} cases, skip", flush=True)
                     task["progress"]["done"] += 1
-                    _save_async_task(task_id, "generate", task)
+                    _save_async_task(task_id, "generate", task, user_id=uid)
                     continue
 
                 print(f"[CASE GEN] {task_id} {dim_code} has {existing_count}, need {need_count} more", flush=True)
