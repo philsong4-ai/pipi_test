@@ -582,16 +582,15 @@ def call_aivs_stream(
 
         proc = subprocess.run(
             ["bash", "demo/ask.sh", user_text, AIVS_DEFAULT_ENV],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             cwd=AIVS_PROJECT_DIR,
             env=env,
             timeout=timeout,
         )
 
-        stdout = proc.stdout or ""
-        stderr = proc.stderr or ""
+        stdout = (proc.stdout or b"").decode("utf-8", errors="replace")
+        stderr = (proc.stderr or b"").decode("utf-8", errors="replace")
 
         reply_lines = re.findall(r"\[回复\]\s*(.*)", stdout)
         full_text = reply_lines[-1].strip() if reply_lines else ""
