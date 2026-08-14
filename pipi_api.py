@@ -7,7 +7,9 @@ import os
 import re
 import json
 import time
+import uuid
 import unicodedata
+import subprocess
 import requests
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Optional, Any
@@ -31,6 +33,11 @@ EXTRACT_LLM_KEY = os.environ.get("EXTRACT_LLM_KEY", "")
 EXTRACT_LLM_MODEL = os.environ.get("EXTRACT_LLM_MODEL", "qwen3.6-plus")
 # 用例质量复核 使用 deepseek-v4-pro
 REVIEW_LLM_MODEL = os.environ.get("REVIEW_LLM_MODEL", "deepseek-v4-pro")
+
+# ─── AIVS 配置（小米 AIVS Java SDK 文本模式）─────────────
+AIVS_PROJECT_DIR = os.environ.get("AIVS_PROJECT_DIR", "/opt/code/aivs_java_mac")
+AIVS_JAVA_HOME = os.environ.get("AIVS_JAVA_HOME", "/usr/lib/jvm/jre-11")
+AIVS_DEFAULT_ENV = os.environ.get("AIVS_ENV", "preview")
 
 
 # ─── SSE 解析 ─────────────────────────────────────
@@ -108,18 +115,21 @@ def call_pipi_stream(
     """
     # 全局目标 API 并发闸（max=8）：跨 gunicorn worker 共享 MySQL 行锁原子计数
     # Why: burst 测试时多 worker 并发调玩偶 API 会触发上游限流/锁 IP
+    # AIVS 走单独的 aivs_global slot(max=1),不占 api_global 槽
     slot_acquired = False
-    try:
-        from web_admin import _acquire_slot, _release_slot
-        if not _acquire_slot('api_global', 8, ttl_seconds=300, wait=True, timeout=300):
-            return {
-                "full_text": "",
-                "response_time_ms": -1,
-                "error": "目标 API 并发槽已满，请稍后重试"
-            }
-        slot_acquired = True
-    except ImportError:
-        pass
+    is_aivs = (protocol or "").lower() == "aivs"
+    if not is_aivs:
+        try:
+            from web_admin import _acquire_slot, _release_slot
+            if not _acquire_slot('api_global', 8, ttl_seconds=300, wait=True, timeout=300):
+                return {
+                    "full_text": "",
+                    "response_time_ms": -1,
+                    "error": "目标 API 并发槽已满，请稍后重试"
+                }
+            slot_acquired = True
+        except ImportError:
+            pass
 
     try:
         return _call_pipi_stream_inner(messages, device_id, timeout, api_url, api_key, extra_headers, protocol, user_id)
@@ -154,6 +164,23 @@ def _call_pipi_stream_inner(messages, device_id, timeout, api_url, api_key, extr
             "response_time_ms": result.get("response_time_ms", -1),
             "ttfb_ms": result.get("ttfb_ms"),
             "record_id": result.get("record_id"),
+            "error": result.get("error"),
+        }
+    # AIVS 协议分发：subprocess 调 ask.sh 文本模式
+    if protocol and protocol.lower() == "aivs":
+        result = call_aivs_stream(
+            messages,
+            device_id=device_id,
+            timeout=timeout,
+            api_url=api_url,
+            api_key=api_key,
+            extra_headers=extra_headers,
+            user_id=user_id,
+        )
+        return {
+            "full_text": result.get("full_text", ""),
+            "response_time_ms": result.get("response_time_ms", -1),
+            "ttfb_ms": result.get("ttfb_ms"),
             "error": result.get("error"),
         }
     # 确保 system message 中有 device_id
@@ -501,6 +528,116 @@ def call_oho_chat(
 
     result["record_id"] = record_id
     return result
+
+
+# ─── AIVS 调用（小米 AIVS Java SDK 文本模式）─────────────
+
+def call_aivs_stream(
+    messages: List[Dict],
+    device_id: str = "TEST_DEV_001",
+    timeout: int = 90,
+    api_url: str = None,
+    api_key: str = None,
+    extra_headers: dict = None,
+    user_id: str = None,
+) -> Dict:
+    """
+    调用 AIVS Java SDK 文本模式:subprocess 调 /opt/code/aivs_java_mac/demo/ask.sh
+    自动从 <AIVS_DOMAIN>/v1/chat/config/token 拉凭证,发 Nlp.Request 拿回复。
+
+    返回结构对齐 call_pipi_stream: {full_text, response_time_ms, ttfb_ms, error}
+    单轮串行(AIVS demo 是单进程 JVM,不能并发),aivs_global slot max=1。
+    """
+    slot_acquired = False
+    try:
+        from web_admin import _acquire_slot, _release_slot
+        if not _acquire_slot('aivs_global', 1, ttl_seconds=300, wait=True, timeout=600):
+            return {
+                "full_text": "",
+                "response_time_ms": -1,
+                "error": "AIVS 并发槽已满(串行执行中),请稍后重试"
+            }
+        slot_acquired = True
+    except ImportError:
+        pass
+
+    start_time = time.time()
+    try:
+        user_text = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                user_text = msg.get("content", "")
+                break
+        if not user_text:
+            return {
+                "full_text": "",
+                "response_time_ms": -1,
+                "error": "messages 中无 user 消息"
+            }
+
+        env = os.environ.copy()
+        env["JAVA_HOME"] = AIVS_JAVA_HOME
+        env["LANG"] = "en_US.UTF-8"
+        env["LC_ALL"] = "en_US.UTF-8"
+
+        proc = subprocess.run(
+            ["bash", "demo/ask.sh", user_text, AIVS_DEFAULT_ENV],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            cwd=AIVS_PROJECT_DIR,
+            env=env,
+            timeout=timeout,
+        )
+
+        stdout = proc.stdout or ""
+        stderr = proc.stderr or ""
+
+        reply_lines = re.findall(r"\[回复\]\s*(.*)", stdout)
+        full_text = reply_lines[-1].strip() if reply_lines else ""
+
+        ttfb_ms = None
+        m = re.search(r"发送→首字=(\d+)ms", stdout)
+        if m:
+            ttfb_ms = int(m.group(1))
+
+        elapsed_ms = round((time.time() - start_time) * 1000, 2)
+
+        if not full_text:
+            tail = (stderr or stdout)[-500:]
+            return {
+                "full_text": "",
+                "response_time_ms": elapsed_ms,
+                "ttfb_ms": ttfb_ms,
+                "error": f"AIVS 未返回回复(returncode={proc.returncode}): {tail}"
+            }
+
+        return {
+            "full_text": full_text,
+            "response_time_ms": elapsed_ms,
+            "ttfb_ms": ttfb_ms,
+            "error": None,
+        }
+
+    except subprocess.TimeoutExpired:
+        return {
+            "full_text": "",
+            "response_time_ms": round((time.time() - start_time) * 1000, 2),
+            "error": f"AIVS timeout after {timeout}s"
+        }
+    except Exception as e:
+        return {
+            "full_text": "",
+            "response_time_ms": -1,
+            "error": str(e)
+        }
+    finally:
+        if slot_acquired:
+            try:
+                from web_admin import _release_slot
+                _release_slot('aivs_global')
+            except Exception as e:
+                print(f"[SLOT RELEASE] aivs_global failed: {e}", flush=True)
 
 
 # ─── LLM 调用（事实提取/用例生成/评测）─────────────
