@@ -2553,6 +2553,11 @@ def _build_eval_context(conn, persona_id, current_msg_id, user_id=None):
 
     today = datetime.now().strftime("%Y-%m-%d")
 
+    # 先取 persona，后续格式化历史和取玩偶人设都要用 target_api
+    persona = execute_query(conn, "SELECT * FROM personas WHERE id = ? AND user_id = ?", (persona_id, user_id), fetch_one=True)
+    persona_data = row_to_dict(persona) if persona else None
+    target_api = (persona_data or {}).get("target_api") or "pipi"
+
     # 获取当天对话
     today_msgs = execute_query(conn, """
         SELECT id, role, text, created_at FROM chat_messages
@@ -2573,7 +2578,7 @@ def _build_eval_context(conn, persona_id, current_msg_id, user_id=None):
         today_msgs = list(reversed(older_msgs)) + today_msgs
 
     # 格式化对话历史（含时间间隔标记）
-    chat_history = _format_history_with_gaps(today_msgs)
+    chat_history = _format_history_with_gaps(today_msgs, persona_data=persona_data)
 
     # 获取用户事实（过滤已遗忘的）
     facts = execute_query(conn, """
@@ -2602,12 +2607,7 @@ def _build_eval_context(conn, persona_id, current_msg_id, user_id=None):
                 "weight": current_weight
             })
 
-    # 获取用户画像
-    persona = execute_query(conn, "SELECT * FROM personas WHERE id = ? AND user_id = ?", (persona_id, user_id), fetch_one=True)
-    persona_data = row_to_dict(persona) if persona else None
-
     # 获取玩偶人设（按用户绑定的 target_api 查）
-    target_api = (persona_data or {}).get("target_api") or "pipi"
     toy_persona = _get_toy_persona_by_target(target_api)
 
     return {
@@ -2705,9 +2705,11 @@ def _get_active_facts(persona_id, include_forgotten=False):
     return result
 
 
-def _format_history_with_gaps(msgs):
+def _format_history_with_gaps(msgs, persona_data=None):
     """格式化对话历史，超过 2 小时插入时间分隔"""
     from datetime import datetime
+    target_api = (persona_data or {}).get("target_api") or "pipi"
+    ai_name = _get_toy_persona_name(target_api)
     result = []
     prev_time = None
     for m in msgs:
@@ -2716,11 +2718,11 @@ def _format_history_with_gaps(msgs):
             if prev_time and (curr_time - prev_time).total_seconds() > 7200:
                 hours = int((curr_time - prev_time).total_seconds() / 3600)
                 result.append(f"—— 间隔 {hours} 小时 ——")
-            prefix = "用户: " if m["role"] == "user" else _get_toy_persona_name(persona_data.get("target_api", "pipi")) + ": "
+            prefix = "用户: " if m["role"] == "user" else ai_name + ": "
             result.append(prefix + m["text"])
             prev_time = curr_time
         except:
-            prefix = "用户: " if m["role"] == "user" else _get_toy_persona_name(persona_data.get("target_api", "pipi")) + ": "
+            prefix = "用户: " if m["role"] == "user" else ai_name + ": "
             result.append(prefix + m["text"])
     return result
 
