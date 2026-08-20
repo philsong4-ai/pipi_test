@@ -322,6 +322,17 @@ def _ensure_tables():
             except Exception as e:
                 print(f"[STARTUP] Could not add needs_review to test_results: {e}", flush=True)
 
+        # test_results 加 dialog_ids 列：JSON 数组存多轮对话的 AIVS dialog_id
+        try:
+            execute_query(conn, "SELECT dialog_ids FROM test_results LIMIT 1", fetch_one=True)
+        except:
+            try:
+                execute_query(conn, "ALTER TABLE test_results ADD COLUMN dialog_ids TEXT")
+                conn.commit()
+                print("[STARTUP] Added dialog_ids to test_results", flush=True)
+            except Exception as e:
+                print(f"[STARTUP] Could not add dialog_ids to test_results: {e}", flush=True)
+
         # eval_detail 升级为 MEDIUMTEXT：judges_detail 含 3 个 judge 完整回复，长回复易超 TEXT 64KB 上限
         try:
             col = execute_query(conn, "SHOW COLUMNS FROM test_results LIKE 'eval_detail'", fetch_one=True)
@@ -1307,6 +1318,7 @@ def test_chat():
         "facts_extracted": facts_extracted,
         "ttfb_ms": result.get("ttfb_ms"),
         "total_ms": result.get("response_time_ms"),
+        "dialog_id": result.get("dialog_id"),
         "error": result.get("error")
     })
 
@@ -4787,6 +4799,7 @@ def _execute_task_worker(task_id, user_id=None, slot_type=None):
 
                 # 逐轮发送
                 all_replies = []
+                dialog_ids = []
                 has_error = False
                 for i, msg in enumerate(rounds):
                     import requests as req
@@ -4807,14 +4820,18 @@ def _execute_task_worker(task_id, user_id=None, slot_type=None):
                         break
                     reply = r.get("reply", "")
                     ttfb = r.get("ttfb_ms")
+                    did = r.get("dialog_id")
+                    if did:
+                        dialog_ids.append(did)
                     all_replies.append(f"【R{i+1}】{_get_toy_persona_name(target_api)}：{reply}")
-                    print(f"[TASK-EXEC] {case_code} R{i+1}: TTFB={ttfb}ms", flush=True)
+                    print(f"[TASK-EXEC] {case_code} R{i+1}: TTFB={ttfb}ms dialog_id={did or '-'}", flush=True)
 
                 if not has_error and all_replies:
                     actual_output = "\n".join(all_replies)
+                    dialog_ids_json = json.dumps(dialog_ids, ensure_ascii=False) if dialog_ids else None
                     execute_query(conn,
-                        "UPDATE test_results SET actual_output = %s, executed_at = NOW(), status = 'executed' WHERE id = %s AND user_id = %s",
-                        (actual_output, result["id"], user_id))
+                        "UPDATE test_results SET actual_output = %s, dialog_ids = %s, executed_at = NOW(), status = 'executed' WHERE id = %s AND user_id = %s",
+                        (actual_output, dialog_ids_json, result["id"], user_id))
                 else:
                     execute_query(conn, "UPDATE test_results SET status = 'error' WHERE id = %s AND user_id = %s", (result["id"], user_id))
 
@@ -10372,6 +10389,24 @@ def create_jira_issue():
     device_id = result.get("device_id", "")
     executed_at = result.get("executed_at", "")
 
+    # dialog_ids：JSON 数组（多轮对话每轮一个），格式化为 R1=xxx; R2=yyy
+    dialog_ids_raw = result.get("dialog_ids") or ""
+    dialog_ids_list = []
+    if dialog_ids_raw:
+        try:
+            parsed = json.loads(dialog_ids_raw)
+            if isinstance(parsed, list):
+                dialog_ids_list = [str(x) for x in parsed if x]
+        except (json.JSONDecodeError, TypeError):
+            pass
+    if dialog_ids_list:
+        if len(dialog_ids_list) == 1:
+            dialog_id_line = dialog_ids_list[0]
+        else:
+            dialog_id_line = "; ".join(f"R{i+1}={d}" for i, d in enumerate(dialog_ids_list))
+    else:
+        dialog_id_line = "-"
+
     summary = f"[评测失败] {case_code} - {title[:50]}" if title else f"[评测失败] {case_code}"
     description = f"""*用例信息*
 - 用例ID: {case_code}
@@ -10395,6 +10430,7 @@ def create_jira_issue():
 *来源*
 - 任务ID: {task_id}
 - DeviceID: {device_id}
+- DialogID: {dialog_id_line}
 """
 
     version = data.get("version", "").strip()

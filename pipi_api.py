@@ -181,6 +181,7 @@ def _call_pipi_stream_inner(messages, device_id, timeout, api_url, api_key, extr
             "full_text": result.get("full_text", ""),
             "response_time_ms": result.get("response_time_ms", -1),
             "ttfb_ms": result.get("ttfb_ms"),
+            "dialog_id": result.get("dialog_id"),
             "error": result.get("error"),
         }
     # 确保 system message 中有 device_id
@@ -600,6 +601,12 @@ def call_aivs_stream(
         if m:
             ttfb_ms = int(m.group(1))
 
+        # dialog_id：AIVS server 每条 JSON 事件 header.dialog_id 都一样，取第一条即可
+        dialog_id = None
+        m = re.search(r'"dialog_id"\s*:\s*"([a-f0-9]+)"', stdout)
+        if m:
+            dialog_id = m.group(1)
+
         elapsed_ms = round((time.time() - start_time) * 1000, 2)
 
         if not full_text:
@@ -608,6 +615,7 @@ def call_aivs_stream(
                 "full_text": "",
                 "response_time_ms": elapsed_ms,
                 "ttfb_ms": ttfb_ms,
+                "dialog_id": dialog_id,
                 "error": f"AIVS 未返回回复(returncode={proc.returncode}): {tail}"
             }
 
@@ -615,6 +623,7 @@ def call_aivs_stream(
             "full_text": full_text,
             "response_time_ms": elapsed_ms,
             "ttfb_ms": ttfb_ms,
+            "dialog_id": dialog_id,
             "error": None,
         }
 
