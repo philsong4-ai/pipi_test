@@ -3055,7 +3055,8 @@ def _evaluate_and_save(msg_id, persona_id, user_message, reply_text, persona_dat
         print(f"[REALTIME EVAL] {msg_id} => {eval_result.get('total_score')}", flush=True)
 
     except Exception as e:
-        print(f"[REALTIME EVAL ERROR] {msg_id}: {e}", flush=True)
+        import traceback
+        print(f"[REALTIME EVAL ERROR] {msg_id}: {e}\n{traceback.format_exc()}", flush=True)
 
 
 def _extract_and_save(persona_id, message, persona_data, user_id=None):
