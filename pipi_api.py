@@ -581,8 +581,12 @@ def call_aivs_stream(
         env["LANG"] = "en_US.UTF-8"
         env["LC_ALL"] = "en_US.UTF-8"
 
+        # ask.sh 5 位置参数: $1 INPUT_TEXT, $2 AIVS_ENV, $3 IS_STRANGER(空走 false),
+        # $4 DID(空走 env AIVS_DEVICE_ID), $5 ROLE_ID(空走 DEVICE_ID×20 公式)
+        # 用 persona_id (user_id) 作为 ROLE_ID,让不同用户走不同 AIVS 会话隔离
+        cmd = ["bash", "demo/ask.sh", user_text, AIVS_DEFAULT_ENV, "", "", user_id or ""]
         proc = subprocess.run(
-            ["bash", "demo/ask.sh", user_text, AIVS_DEFAULT_ENV],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=AIVS_PROJECT_DIR,

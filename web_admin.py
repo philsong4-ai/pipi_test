@@ -1255,7 +1255,7 @@ def test_chat():
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": message},
     ]
-    result = pipi_api.call_pipi_stream(api_messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers, protocol=_protocol)
+    result = pipi_api.call_pipi_stream(api_messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers, protocol=_protocol, user_id=persona_id)
     _ttfb = result.get("ttfb_ms")
     _total = result.get("response_time_ms")
     print(f"[TIMING] {persona_id} SE-web: TTFB={_ttfb}ms total={_total}ms", flush=True)
@@ -2358,7 +2358,7 @@ def simulate_chat():
         ]
 
         # 调用目标接口
-        result = pipi_api.call_pipi_stream(api_messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers, protocol=_protocol)
+        result = pipi_api.call_pipi_stream(api_messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers, protocol=_protocol, user_id=persona_id)
 
         reply_text = result.get("full_text", "")
         reply_id = None
@@ -2977,7 +2977,7 @@ def call_api(persona_id, message):
     ]
 
     print(f"[CALL API] persona_id={persona_id} device_id={device_id} msg={message[:50]}", flush=True)
-    result = pipi_api.call_pipi_stream(messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers, protocol=_protocol)
+    result = pipi_api.call_pipi_stream(messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers, protocol=_protocol, user_id=persona_id)
     if result.get("full_text"):
         msg_id = save_chat_msg(persona_id or "guest", "pipi", _get_toy_persona_name(target_api) if persona_id and persona_id != "__guest__" else "皮皮", result["full_text"], user_id=cur_uid)
         result["message_id"] = msg_id
@@ -4313,7 +4313,7 @@ def _growth_worker(task_id, user_id=None, slot_type=None):
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_message},
                 ]
-                result = pipi_api.call_pipi_stream(api_messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers, protocol=_protocol)
+                result = pipi_api.call_pipi_stream(api_messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers, protocol=_protocol, user_id=persona_id)
                 reply_text = result.get("full_text", "")
 
                 # 3. 保存玩偶回复
