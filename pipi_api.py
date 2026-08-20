@@ -1864,71 +1864,113 @@ def _parse_test_case_raw_text(result_text: str, memory_check: Dict = None) -> Di
 def _run_judges_test_case(system_prompt: str, user_prompt: str, judges: List[Dict],
                            timeout: int = 60, max_tokens: int = 8192,
                            memory_check: Dict = None) -> Dict:
-    """多评测员顺序调用 + 聚合"""
+    """多评测员顺序调用 + 聚合。
+
+    - timeout 重试 1 次（5s 间隔），其他异常/parse_failed/no_response 不重试
+    - 聚合前剔除异常 judge（error_kind 非空），全部异常时退化用全部
+    - judges_detail 保留全部 judge 透传 error_kind；额外记 judges_valid_count
+    """
     judges_detail = []
     results = []
     for j in judges:
-        try:
-            result_text = call_llm_simple(
-                system_prompt, user_prompt,
-                timeout=timeout,
-                model=j.get("model"),
-                temperature=j.get("temperature", 0),
-                max_tokens=max_tokens,
-            )
-            parsed = _parse_test_case_raw_text(result_text, memory_check)
-            if not parsed:
-                parsed = {
-                    "score": 0, "deduction_reason": f"无法解析: {(result_text or '')[:100]}",
-                    "status": "failed", "eval_points_check": {}, "failure_flags_triggered": [],
-                    "deduction_tags": [], "deduction_breakdown": [],
-                    "memory_objective_check": memory_check or {},
-                    "error_kind": "parse_failed",
-                }
-            print(f"[EVAL JUDGE] model={j.get('model')} score={parsed.get('score')}", flush=True)
-        except Exception as e:
+        parsed = None
+        last_err_kind = None
+        last_err_msg = ""
+        for attempt in (1, 2):
+            try:
+                result_text = call_llm_simple(
+                    system_prompt, user_prompt,
+                    timeout=timeout,
+                    model=j.get("model"),
+                    temperature=j.get("temperature", 0),
+                    max_tokens=max_tokens,
+                )
+                if not result_text:
+                    parsed = {
+                        "score": 0, "deduction_reason": "评测LLM无响应", "status": "failed",
+                        "eval_points_check": {}, "failure_flags_triggered": [],
+                        "deduction_tags": [], "deduction_breakdown": [],
+                        "memory_objective_check": memory_check or {},
+                        "error_kind": "no_response",
+                    }
+                    print(f"[EVAL JUDGE] model={j.get('model')} attempt={attempt} no_response", flush=True)
+                    break  # no_response 不重试
+                parsed = _parse_test_case_raw_text(result_text, memory_check)
+                if not parsed:
+                    parsed = {
+                        "score": 0, "deduction_reason": f"无法解析: {(result_text or '')[:100]}",
+                        "status": "failed", "eval_points_check": {}, "failure_flags_triggered": [],
+                        "deduction_tags": [], "deduction_breakdown": [],
+                        "memory_objective_check": memory_check or {},
+                        "error_kind": "parse_failed",
+                    }
+                    print(f"[EVAL JUDGE] model={j.get('model')} attempt={attempt} parse_failed", flush=True)
+                    break  # parse_failed 不重试
+                print(f"[EVAL JUDGE] model={j.get('model')} attempt={attempt} score={parsed.get('score')}", flush=True)
+                break  # 成功就出循环
+            except Exception as e:
+                err_str = str(e)
+                is_timeout = "Timeout" in err_str or "timed out" in err_str.lower()
+                last_err_kind = "timeout" if is_timeout else "exception"
+                last_err_msg = err_str
+                print(f"[EVAL JUDGE] model={j.get('model')} attempt={attempt} {last_err_kind}: {e}", flush=True)
+                # 仅 timeout 第 1 次失败时重试 1 次；其他异常直接落盘
+                if attempt == 1 and is_timeout:
+                    time.sleep(5)
+                    continue
+                break
+        if parsed is None:
             parsed = {
-                "score": 0, "deduction_reason": f"评测异常: {str(e)}", "status": "failed",
+                "score": 0, "deduction_reason": f"评测异常: {last_err_msg}", "status": "failed",
                 "eval_points_check": {}, "failure_flags_triggered": [],
                 "deduction_tags": [], "deduction_breakdown": [],
                 "memory_objective_check": memory_check or {},
-                "error_kind": "exception",
+                "error_kind": last_err_kind or "exception",
             }
-            print(f"[EVAL JUDGE] model={j.get('model')} error: {e}", flush=True)
-        judges_detail.append({
+        judge_entry = {
             "model": j.get("model"),
             "temperature": j.get("temperature", 0),
             "score": parsed.get("score"),
             "deduction_tags": parsed.get("deduction_tags", []),
             "deduction_reason": (parsed.get("deduction_reason") or "")[:200],
-        })
+        }
+        if parsed.get("error_kind"):
+            judge_entry["error_kind"] = parsed["error_kind"]
+        judges_detail.append(judge_entry)
         results.append(parsed)
 
-    scores = [r.get("score", 0) for r in results]
-    mean = round(sum(scores) / len(scores))
+    # 异常 judge 剔除：聚合只在 valid_results 上算；judges_detail 仍保留全部
+    valid_results = [r for r in results if not r.get("error_kind")]
+    if not valid_results:
+        valid_results = results
+        print(f"[EVAL ENSEMBLE] 所有 judge 都异常，降级使用全部 {len(results)} 条", flush=True)
+    scores = [r.get("score", 0) for r in valid_results]
+    mean = round(sum(scores) / len(scores)) if scores else 0
     # 方差（样本标准差）
     if len(scores) > 1:
         avg = sum(scores) / len(scores)
         std = round(float(sum((s - avg) ** 2 for s in scores) / (len(scores) - 1)) ** 0.5, 2)
     else:
         std = 0.0
-    # 选分数最接近 mean 的 judge 作为 median
+    # 选分数最接近 mean 的 judge 作为 median（在 valid_results 中找）
     median_idx = min(range(len(scores)), key=lambda i: abs(scores[i] - mean))
-    median = results[median_idx]
+    median = valid_results[median_idx]
     aggregated = dict(median)
     aggregated["score"] = mean
     aggregated["status"] = "passed" if mean >= 6 else "failed"
     aggregated["judges_detail"] = judges_detail
     aggregated["judges_std"] = std
+    aggregated["judges_valid_count"] = len([r for r in results if not r.get("error_kind")])
+    aggregated["judges_total_count"] = len(results)
     aggregated["memory_objective_check"] = memory_check or {}
-    # tags 并集去重保序
+    # tags 并集去重保序（仅 valid_results）
     all_tags = []
-    for r in results:
+    for r in valid_results:
         for t in r.get("deduction_tags", []):
             if t not in all_tags:
                 all_tags.append(t)
     aggregated["deduction_tags"] = all_tags
-    print(f"[EVAL ENSEMBLE] judges={len(judges)} scores={scores} mean={mean} std={std}", flush=True)
+    print(f"[EVAL ENSEMBLE] judges={len(results)} valid={len(valid_results)} scores={scores} mean={mean} std={std}", flush=True)
     return aggregated
 
 
@@ -2280,26 +2322,52 @@ def _parse_chat_eval_raw_text(result_text: str, memory_check: Dict = None) -> Di
 def _run_judges_chat_reply(system_prompt: str, user_prompt: str, judges: List[Dict],
                              timeout: int = 90, max_tokens: int = 8192,
                              memory_check: Dict = None) -> Dict:
-    """多评测员顺序调用 + 聚合（chat 4 维度分别聚合）"""
+    """多评测员顺序调用 + 聚合（chat 4 维度分别聚合）。
+
+    - timeout 重试 1 次（5s 间隔），其他异常/parse_failed/no_response 不重试
+    - 聚合前剔除异常 judge（error_kind 非空），全部异常时退化用全部
+    - judges_detail 保留全部 judge 透传 error_kind；额外记 judges_valid_count
+    """
     judges_detail = []
     results = []
     for j in judges:
-        try:
-            result_text = call_llm_simple(
-                system_prompt, user_prompt,
-                timeout=timeout,
-                model=j.get("model"),
-                temperature=j.get("temperature", 0),
-                max_tokens=max_tokens,
-            )
-            parsed = _parse_chat_eval_raw_text(result_text, memory_check)
-            if not parsed:
-                parsed = _default_eval_result(f"无法解析: {(result_text or '')[:100]}", memory_check=memory_check, error_kind="parse_failed")
-            print(f"[CHAT EVAL JUDGE] model={j.get('model')} total={parsed.get('total_score')}", flush=True)
-        except Exception as e:
-            parsed = _default_eval_result(f"评测异常: {str(e)}", memory_check=memory_check, error_kind="exception")
-            print(f"[CHAT EVAL JUDGE] model={j.get('model')} error: {e}", flush=True)
-        judges_detail.append({
+        parsed = None
+        last_err_kind = None
+        last_err_msg = ""
+        for attempt in (1, 2):
+            try:
+                result_text = call_llm_simple(
+                    system_prompt, user_prompt,
+                    timeout=timeout,
+                    model=j.get("model"),
+                    temperature=j.get("temperature", 0),
+                    max_tokens=max_tokens,
+                )
+                if not result_text:
+                    parsed = _default_eval_result("LLM无响应", memory_check=memory_check, error_kind="no_response")
+                    print(f"[CHAT EVAL JUDGE] model={j.get('model')} attempt={attempt} no_response", flush=True)
+                    break
+                parsed = _parse_chat_eval_raw_text(result_text, memory_check)
+                if not parsed:
+                    parsed = _default_eval_result(f"无法解析: {(result_text or '')[:100]}", memory_check=memory_check, error_kind="parse_failed")
+                    print(f"[CHAT EVAL JUDGE] model={j.get('model')} attempt={attempt} parse_failed", flush=True)
+                    break
+                print(f"[CHAT EVAL JUDGE] model={j.get('model')} attempt={attempt} total={parsed.get('total_score')}", flush=True)
+                break
+            except Exception as e:
+                err_str = str(e)
+                is_timeout = "Timeout" in err_str or "timed out" in err_str.lower()
+                last_err_kind = "timeout" if is_timeout else "exception"
+                last_err_msg = err_str
+                print(f"[CHAT EVAL JUDGE] model={j.get('model')} attempt={attempt} {last_err_kind}: {e}", flush=True)
+                if attempt == 1 and is_timeout:
+                    time.sleep(5)
+                    continue
+                break
+        if parsed is None:
+            parsed = _default_eval_result(f"评测异常: {last_err_msg}", memory_check=memory_check, error_kind=last_err_kind or "exception")
+
+        judge_entry = {
             "model": j.get("model"),
             "temperature": j.get("temperature", 0),
             "scores": {
@@ -2315,32 +2383,41 @@ def _run_judges_chat_reply(system_prompt: str, user_prompt: str, judges: List[Di
                 "quality": parsed.get("quality_tags", []),
                 "persona": parsed.get("persona_tags", []),
             },
-        })
+        }
+        if parsed.get("error_kind"):
+            judge_entry["error_kind"] = parsed["error_kind"]
+        judges_detail.append(judge_entry)
         results.append(parsed)
 
-    # 每维度取均值
+    # 异常 judge 剔除
+    valid_results = [r for r in results if not r.get("error_kind")]
+    if not valid_results:
+        valid_results = results
+        print(f"[CHAT EVAL ENSEMBLE] 所有 judge 都异常，降级使用全部 {len(results)} 条", flush=True)
+
+    # 每维度取均值（仅在 valid_results 上算）
     aggregated = {}
     for dim in ["memory", "emotion", "quality", "persona"]:
-        s_list = [r.get(f"{dim}_score", 5) for r in results]
+        s_list = [r.get(f"{dim}_score", 5) for r in valid_results]
         mean_s = round(sum(s_list) / len(s_list)) if s_list else 5
         aggregated[f"{dim}_score"] = mean_s
         # tags 并集
         all_tags = []
-        for r in results:
+        for r in valid_results:
             for t in r.get(f"{dim}_tags", []):
                 if t not in all_tags:
                     all_tags.append(t)
         aggregated[f"{dim}_tags"] = all_tags
         # breakdown 取分数最接近均值的 judge
         idx = min(range(len(s_list)), key=lambda i: abs(s_list[i] - mean_s))
-        aggregated[f"{dim}_deduction_breakdown"] = results[idx].get(f"{dim}_deduction_breakdown", [])
-        aggregated[f"{dim}_reason"] = results[idx].get(f"{dim}_reason", "")
+        aggregated[f"{dim}_deduction_breakdown"] = valid_results[idx].get(f"{dim}_deduction_breakdown", [])
+        aggregated[f"{dim}_reason"] = valid_results[idx].get(f"{dim}_reason", "")
 
     # 总分 = 4 维度聚合得分的均值（与单 judge 内部算法对齐）
     dim_means = [aggregated.get(f"{dim}_score", 5) for dim in ["memory", "emotion", "quality", "persona"]]
     aggregated["total_score"] = round(sum(dim_means) / len(dim_means), 1) if dim_means else 5.0
     # 总分方差（基于各 judge 自己的 total_score）
-    total_scores = [r.get("total_score", 5.0) for r in results]
+    total_scores = [r.get("total_score", 5.0) for r in valid_results]
     if len(total_scores) > 1:
         avg = sum(total_scores) / len(total_scores)
         std = round(float(sum((s - avg) ** 2 for s in total_scores) / (len(total_scores) - 1)) ** 0.5, 2)
@@ -2348,8 +2425,10 @@ def _run_judges_chat_reply(system_prompt: str, user_prompt: str, judges: List[Di
         std = 0.0
     aggregated["judges_detail"] = judges_detail
     aggregated["judges_std"] = std
+    aggregated["judges_valid_count"] = len([r for r in results if not r.get("error_kind")])
+    aggregated["judges_total_count"] = len(results)
     aggregated["memory_objective_check"] = memory_check or {}
-    print(f"[CHAT EVAL ENSEMBLE] judges={len(judges)} totals={total_scores} mean={aggregated['total_score']} std={std}", flush=True)
+    print(f"[CHAT EVAL ENSEMBLE] judges={len(results)} valid={len(valid_results)} totals={total_scores} mean={aggregated['total_score']} std={std}", flush=True)
     return aggregated
 
 

@@ -2119,11 +2119,14 @@ def eval_stats_judge_bias():
             if not isinstance(judges, list) or len(judges) < 1:
                 continue
             dim = r.get("dimension_code") or "未知"
-            scores = [float(j.get("score") or 0) for j in judges if j.get("score") is not None]
+            # 异常 judge（error_kind 非空，如 timeout/exception/parse_failed/no_response）
+            # 不计入 case_mean 与 per-judge 偏差，避免把 LLM 调用失败的 0 分当作 model 系统性偏移
+            valid_judges = [j for j in judges if not j.get("error_kind")]
+            scores = [float(j.get("score") or 0) for j in valid_judges if j.get("score") is not None]
             if not scores:
                 continue
             case_mean = sum(scores) / len(scores)
-            for j in judges:
+            for j in valid_judges:
                 model = (j.get("model") or "unknown").split("/")[-1]
                 s = j.get("score")
                 if s is None:

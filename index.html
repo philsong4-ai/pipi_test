@@ -2547,9 +2547,11 @@ function loadStatsDisagreement(personaId) {
     var tbody = document.getElementById('disagreement-tbody');
     tbody.innerHTML = '';
     (data.high_disagreement_cases || []).forEach(function(c) {
+      var _ekMap = {timeout:'超时', no_response:'无响应', parse_failed:'解析失败', exception:'异常'};
       var judges = (c.judges_detail || []).map(function(j) {
         var m = (j.model || '').split('/').pop();
-        return m + ':' + j.score;
+        var ek = j.error_kind ? '<span style="color:#ff3b30">[' + (_ekMap[j.error_kind]||j.error_kind) + ']</span>' : '';
+        return m + ':' + j.score + ek;
       }).join(' / ');
       var viewBtn = c.case_db_id ? '<button onclick="viewDisagreementCase(' + c.result_id + ', ' + c.case_db_id + ')" style="padding:2px 8px;background:#0071e3;color:#fff;border:none;border-radius:4px;font-size:11px;cursor:pointer">查看</button>' : '-';
       var tr = '<tr style="border-bottom:1px solid #eee">' +
@@ -5044,11 +5046,18 @@ function _showEvalDetailV2(c, result) {
       content += '</div>';
     }
     if (ed.judges_detail && ed.judges_detail.length > 0) {
-      content += '<p style="margin-top:12px"><b>多评测员明细</b> <span style="font-size:11px;color:#86868b">std=' + (ed.judges_std || 0) + '</span></p>';
+      var _ekMap = {timeout:'超时', no_response:'无响应', parse_failed:'解析失败', exception:'异常'};
+      var _validCount = ed.judges_valid_count != null ? ed.judges_valid_count : ed.judges_detail.filter(function(j){return !j.error_kind;}).length;
+      var _totalCount = ed.judges_total_count != null ? ed.judges_total_count : ed.judges_detail.length;
+      var _validHint = _validCount < _totalCount ? ' · <span style="color:#ff9500">有效 ' + _validCount + '/' + _totalCount + '</span>' : '';
+      content += '<p style="margin-top:12px"><b>多评测员明细</b> <span style="font-size:11px;color:#86868b">std=' + (ed.judges_std || 0) + _validHint + '</span></p>';
       content += '<div style="background:#f5f5f7;padding:8px;border-radius:4px;font-size:12px">';
-      content += '<table style="width:100%;border-collapse:collapse"><thead><tr style="border-bottom:2px solid #d2d2d7"><th style="text-align:left;padding:4px">模型</th><th style="text-align:center;padding:4px">温度</th><th style="text-align:center;padding:4px">分数</th><th style="text-align:left;padding:4px">标签</th></tr></thead><tbody>';
+      content += '<table style="width:100%;border-collapse:collapse"><thead><tr style="border-bottom:2px solid #d2d2d7"><th style="text-align:left;padding:4px">模型</th><th style="text-align:center;padding:4px">温度</th><th style="text-align:center;padding:4px">状态</th><th style="text-align:center;padding:4px">分数</th><th style="text-align:left;padding:4px">标签</th></tr></thead><tbody>';
       ed.judges_detail.forEach(function(j) {
-        content += '<tr style="border-bottom:1px solid #eee"><td style="padding:4px">' + escapeHtml(j.model||'-') + '</td><td style="text-align:center;padding:4px">' + (j.temperature !== undefined ? j.temperature : '-') + '</td><td style="text-align:center;padding:4px;font-weight:600">' + (j.score !== undefined ? j.score : '-') + '</td><td style="padding:4px;font-size:11px">' + (j.deduction_tags||[]).join('、') + '</td></tr>';
+        var _ek = j.error_kind || '';
+        var _status = _ek ? '<span style="color:#ff3b30;font-weight:600" title="' + escapeHtml((j.deduction_reason||'')) + '">' + (_ekMap[_ek]||_ek) + '</span>' : '<span style="color:#34c759">✓</span>';
+        var _rowStyle = _ek ? 'border-bottom:1px solid #eee;background:#fff5f5' : 'border-bottom:1px solid #eee';
+        content += '<tr style="' + _rowStyle + '"><td style="padding:4px">' + escapeHtml(j.model||'-') + '</td><td style="text-align:center;padding:4px">' + (j.temperature !== undefined ? j.temperature : '-') + '</td><td style="text-align:center;padding:4px">' + _status + '</td><td style="text-align:center;padding:4px;font-weight:600">' + (j.score !== undefined ? j.score : '-') + '</td><td style="padding:4px;font-size:11px">' + (j.deduction_tags||[]).join('、') + '</td></tr>';
       });
       content += '</tbody></table>';
       content += '</div>';
@@ -5770,11 +5779,18 @@ function _showResultDetail(c, result) {
       content += '</div>';
     }
     if (ed.judges_detail && ed.judges_detail.length > 0) {
-      content += '<p style="margin-top:12px"><b>多评测员明细</b> <span style="font-size:11px;color:#86868b">std=' + (ed.judges_std || 0) + '</span></p>';
+      var _ekMap = {timeout:'超时', no_response:'无响应', parse_failed:'解析失败', exception:'异常'};
+      var _validCount = ed.judges_valid_count != null ? ed.judges_valid_count : ed.judges_detail.filter(function(j){return !j.error_kind;}).length;
+      var _totalCount = ed.judges_total_count != null ? ed.judges_total_count : ed.judges_detail.length;
+      var _validHint = _validCount < _totalCount ? ' · <span style="color:#ff9500">有效 ' + _validCount + '/' + _totalCount + '</span>' : '';
+      content += '<p style="margin-top:12px"><b>多评测员明细</b> <span style="font-size:11px;color:#86868b">std=' + (ed.judges_std || 0) + _validHint + '</span></p>';
       content += '<div style="background:#f5f5f7;padding:8px;border-radius:4px;font-size:12px">';
-      content += '<table style="width:100%;border-collapse:collapse"><thead><tr style="border-bottom:2px solid #d2d2d7"><th style="text-align:left;padding:4px">模型</th><th style="text-align:center;padding:4px">温度</th><th style="text-align:center;padding:4px">分数</th><th style="text-align:left;padding:4px">标签</th></tr></thead><tbody>';
+      content += '<table style="width:100%;border-collapse:collapse"><thead><tr style="border-bottom:2px solid #d2d2d7"><th style="text-align:left;padding:4px">模型</th><th style="text-align:center;padding:4px">温度</th><th style="text-align:center;padding:4px">状态</th><th style="text-align:center;padding:4px">分数</th><th style="text-align:left;padding:4px">标签</th></tr></thead><tbody>';
       ed.judges_detail.forEach(function(j) {
-        content += '<tr style="border-bottom:1px solid #eee"><td style="padding:4px">' + escapeHtml(j.model||'-') + '</td><td style="text-align:center;padding:4px">' + (j.temperature !== undefined ? j.temperature : '-') + '</td><td style="text-align:center;padding:4px;font-weight:600">' + (j.score !== undefined ? j.score : '-') + '</td><td style="padding:4px;font-size:11px">' + (j.deduction_tags||[]).join('、') + '</td></tr>';
+        var _ek = j.error_kind || '';
+        var _status = _ek ? '<span style="color:#ff3b30;font-weight:600" title="' + escapeHtml((j.deduction_reason||'')) + '">' + (_ekMap[_ek]||_ek) + '</span>' : '<span style="color:#34c759">✓</span>';
+        var _rowStyle = _ek ? 'border-bottom:1px solid #eee;background:#fff5f5' : 'border-bottom:1px solid #eee';
+        content += '<tr style="' + _rowStyle + '"><td style="padding:4px">' + escapeHtml(j.model||'-') + '</td><td style="text-align:center;padding:4px">' + (j.temperature !== undefined ? j.temperature : '-') + '</td><td style="text-align:center;padding:4px">' + _status + '</td><td style="text-align:center;padding:4px;font-weight:600">' + (j.score !== undefined ? j.score : '-') + '</td><td style="padding:4px;font-size:11px">' + (j.deduction_tags||[]).join('、') + '</td></tr>';
       });
       content += '</tbody></table>';
       content += '</div>';
