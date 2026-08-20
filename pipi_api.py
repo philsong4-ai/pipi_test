@@ -605,9 +605,9 @@ def call_aivs_stream(
         if m:
             ttfb_ms = int(m.group(1))
 
-        # dialog_id：AIVS server 每条 JSON 事件 header.dialog_id 都一样，取第一条即可
+        # dialog_id：ask.sh 输出 [dialog_id] hex 格式（兜底从原始 JSON 事件流抓）
         dialog_id = None
-        m = re.search(r'"dialog_id"\s*:\s*"([a-f0-9]+)"', stdout)
+        m = re.search(r'\[dialog_id\]\s+([a-f0-9]+)', stdout)
         if m:
             dialog_id = m.group(1)
 
