@@ -333,6 +333,30 @@ def _ensure_tables():
             except Exception as e:
                 print(f"[STARTUP] Could not add dialog_ids to test_results: {e}", flush=True)
 
+        # test_results 加 ttfb_ms / total_ms 列：JSON 数组存多轮耗时
+        for col in ("ttfb_ms", "total_ms"):
+            try:
+                execute_query(conn, f"SELECT {col} FROM test_results LIMIT 1", fetch_one=True)
+            except:
+                try:
+                    execute_query(conn, f"ALTER TABLE test_results ADD COLUMN {col} TEXT")
+                    conn.commit()
+                    print(f"[STARTUP] Added {col} to test_results", flush=True)
+                except Exception as e:
+                    print(f"[STARTUP] Could not add {col} to test_results: {e}", flush=True)
+
+        # chat_messages 加 ttfb_ms / total_ms 列：实时聊天场景的耗时记录（单轮，INT）
+        for col in ("ttfb_ms", "total_ms"):
+            try:
+                execute_query(conn, f"SELECT {col} FROM chat_messages LIMIT 1", fetch_one=True)
+            except:
+                try:
+                    execute_query(conn, f"ALTER TABLE chat_messages ADD COLUMN {col} INT")
+                    conn.commit()
+                    print(f"[STARTUP] Added {col} to chat_messages", flush=True)
+                except Exception as e:
+                    print(f"[STARTUP] Could not add {col} to chat_messages: {e}", flush=True)
+
         # eval_detail 升级为 MEDIUMTEXT：judges_detail 含 3 个 judge 完整回复，长回复易超 TEXT 64KB 上限
         try:
             col = execute_query(conn, "SHOW COLUMNS FROM test_results LIKE 'eval_detail'", fetch_one=True)
@@ -1265,7 +1289,8 @@ def test_chat():
     facts_extracted = []
 
     if reply_text:
-        reply_id = save_chat_msg(persona_id, "pipi", _get_toy_persona_name(target_api), reply_text)
+        reply_id = save_chat_msg(persona_id, "pipi", _get_toy_persona_name(target_api), reply_text,
+                                ttfb_ms=result.get("ttfb_ms"), total_ms=result.get("response_time_ms"))
 
         # 事实提取
         if extract_facts:
@@ -2365,7 +2390,8 @@ def simulate_chat():
         eval_result = None
 
         if reply_text:
-            reply_id = save_chat_msg(persona_id, "pipi", _get_toy_persona_name(target_api), reply_text, user_id=uid)
+            reply_id = save_chat_msg(persona_id, "pipi", _get_toy_persona_name(target_api), reply_text, user_id=uid,
+                                    ttfb_ms=result.get("ttfb_ms"), total_ms=result.get("response_time_ms"))
 
             # 先提取事实（同步），确保评测时有最新事实
             try:
@@ -2934,13 +2960,13 @@ def _create_fact(data, user_id=None):
     conn.close()
 
 
-def save_chat_msg(persona_id, role, user_name, text, user_id=None):
+def save_chat_msg(persona_id, role, user_name, text, user_id=None, ttfb_ms=None, total_ms=None):
     if user_id is None:
         user_id = _current_uid()
     conn = get_db_connection()
     cur = execute_query(conn,
-        "INSERT INTO chat_messages (persona_id, role, user_name, text, user_id) VALUES (?,?,?,?,?)",
-        (persona_id, role, user_name, text, user_id))
+        "INSERT INTO chat_messages (persona_id, role, user_name, text, user_id, ttfb_ms, total_ms) VALUES (?,?,?,?,?,?,?)",
+        (persona_id, role, user_name, text, user_id, ttfb_ms, total_ms))
     msg_id = get_lastrowid(cur)
     conn.commit()
     conn.close()
@@ -2979,7 +3005,8 @@ def call_api(persona_id, message):
     print(f"[CALL API] persona_id={persona_id} device_id={device_id} msg={message[:50]}", flush=True)
     result = pipi_api.call_pipi_stream(messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers, protocol=_protocol, user_id=persona_id)
     if result.get("full_text"):
-        msg_id = save_chat_msg(persona_id or "guest", "pipi", _get_toy_persona_name(target_api) if persona_id and persona_id != "__guest__" else "皮皮", result["full_text"], user_id=cur_uid)
+        msg_id = save_chat_msg(persona_id or "guest", "pipi", _get_toy_persona_name(target_api) if persona_id and persona_id != "__guest__" else "皮皮", result["full_text"], user_id=cur_uid,
+                               ttfb_ms=result.get("ttfb_ms"), total_ms=result.get("response_time_ms"))
         result["message_id"] = msg_id
 
         # 实时评测（如果开关开启）
@@ -4318,7 +4345,8 @@ def _growth_worker(task_id, user_id=None, slot_type=None):
 
                 # 3. 保存玩偶回复
                 if reply_text:
-                    save_chat_msg(persona_id, "pipi", _get_toy_persona_name(target_api), reply_text, user_id=user_id)
+                    save_chat_msg(persona_id, "pipi", _get_toy_persona_name(target_api), reply_text, user_id=user_id,
+                                  ttfb_ms=result.get("ttfb_ms"), total_ms=result.get("response_time_ms"))
 
                 # 4. 同步提取事实（准确度优先）
                 extracted_facts = []
@@ -4800,6 +4828,8 @@ def _execute_task_worker(task_id, user_id=None, slot_type=None):
                 # 逐轮发送
                 all_replies = []
                 dialog_ids = []
+                ttfb_list = []
+                total_list = []
                 has_error = False
                 for i, msg in enumerate(rounds):
                     import requests as req
@@ -4820,18 +4850,25 @@ def _execute_task_worker(task_id, user_id=None, slot_type=None):
                         break
                     reply = r.get("reply", "")
                     ttfb = r.get("ttfb_ms")
+                    total = r.get("total_ms")
                     did = r.get("dialog_id")
                     if did:
                         dialog_ids.append(did)
+                    if ttfb is not None:
+                        ttfb_list.append(ttfb)
+                    if total is not None:
+                        total_list.append(total)
                     all_replies.append(f"【R{i+1}】{_get_toy_persona_name(target_api)}：{reply}")
-                    print(f"[TASK-EXEC] {case_code} R{i+1}: TTFB={ttfb}ms dialog_id={did or '-'}", flush=True)
+                    print(f"[TASK-EXEC] {case_code} R{i+1}: TTFB={ttfb}ms total={total}ms dialog_id={did or '-'}", flush=True)
 
                 if not has_error and all_replies:
                     actual_output = "\n".join(all_replies)
                     dialog_ids_json = json.dumps(dialog_ids, ensure_ascii=False) if dialog_ids else None
+                    ttfb_json = json.dumps(ttfb_list, ensure_ascii=False) if ttfb_list else None
+                    total_json = json.dumps(total_list, ensure_ascii=False) if total_list else None
                     execute_query(conn,
-                        "UPDATE test_results SET actual_output = %s, dialog_ids = %s, executed_at = NOW(), status = 'executed' WHERE id = %s AND user_id = %s",
-                        (actual_output, dialog_ids_json, result["id"], user_id))
+                        "UPDATE test_results SET actual_output = %s, dialog_ids = %s, ttfb_ms = %s, total_ms = %s, executed_at = NOW(), status = 'executed' WHERE id = %s AND user_id = %s",
+                        (actual_output, dialog_ids_json, ttfb_json, total_json, result["id"], user_id))
                 else:
                     execute_query(conn, "UPDATE test_results SET status = 'error' WHERE id = %s AND user_id = %s", (result["id"], user_id))
 
