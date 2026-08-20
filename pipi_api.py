@@ -601,7 +601,7 @@ def call_aivs_stream(
         full_text = reply_lines[-1].strip() if reply_lines else ""
 
         ttfb_ms = None
-        m = re.search(r"发送→首字=(\d+)ms", stdout)
+        m = re.search(r"\[首token耗时\]\s*(\d+)ms", stdout)
         if m:
             ttfb_ms = int(m.group(1))
 
