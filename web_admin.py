@@ -2361,7 +2361,7 @@ def simulate_chat():
     persona_data = row_to_dict(row)
     device_id = persona_data.get("device_id", persona_id)
     name = persona_data.get("name", persona_id)
-    target_api = persona_data.get("target_api", "pipi")
+    target_api = persona_data.get("target_api") or "pipi"
     api_url, api_key, api_headers, _protocol = get_api_config_by_code(target_api)
 
     conversations = []
@@ -2995,7 +2995,7 @@ def call_api(persona_id, message):
         persona_data = row_to_dict(row)
         device_id = persona_data["device_id"]
         name = persona_data["name"]
-        target_api = persona_data.get("target_api", "pipi")
+        target_api = persona_data.get("target_api") or "pipi"
         api_url, api_key, api_headers, _protocol = get_api_config_by_code(target_api)
 
     system_prompt = pipi_api.build_system_prompt(persona_data, device_id, target_api=target_api)
@@ -4336,7 +4336,7 @@ def _growth_worker(task_id, user_id=None, slot_type=None):
                 save_chat_msg(persona_id, "user", name, user_message, user_id=user_id)
 
                 # 2. 调用玩偶接口
-                target_api = persona_data.get("target_api", "pipi")
+                target_api = persona_data.get("target_api") or "pipi"
                 api_url, api_key, api_headers, _protocol = get_api_config_by_code(target_api)
                 system_prompt = pipi_api.build_system_prompt(persona_data, device_id, target_api=target_api)
                 api_messages = [
