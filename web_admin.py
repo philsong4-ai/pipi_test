@@ -1613,25 +1613,38 @@ def get_memory_stats(persona_id):
 def get_eval_config():
     conn = get_db_connection()
     row = execute_query(conn, "SELECT value FROM eval_config WHERE `key`='auto_eval_enabled'", fetch_one=True)
+    inj_row = execute_query(conn, "SELECT value FROM eval_config WHERE `key`='inject_corrections'", fetch_one=True)
     conn.close()
     enabled = row["value"] == 'true' if row else False
-    return jsonify({"auto_eval_enabled": enabled})
+    inject = inj_row["value"] == 'true' if inj_row else False
+    return jsonify({"auto_eval_enabled": enabled, "inject_corrections": inject})
 
 
 @app.route("/api/eval/config", methods=["POST"])
 def set_eval_config():
     data = request.get_json() or {}
-    enabled = data.get("auto_eval_enabled", False)
     conn = get_db_connection()
-    if USE_MYSQL:
-        execute_query(conn, "REPLACE INTO eval_config (`key`, value) VALUES ('auto_eval_enabled', %s)",
-                     ('true' if enabled else 'false',))
-    else:
-        execute_query(conn, "INSERT OR REPLACE INTO eval_config (key, value) VALUES ('auto_eval_enabled', ?)",
-                     ('true' if enabled else 'false',))
+    if "auto_eval_enabled" in data:
+        enabled = data.get("auto_eval_enabled", False)
+        if USE_MYSQL:
+            execute_query(conn, "REPLACE INTO eval_config (`key`, value) VALUES ('auto_eval_enabled', %s)",
+                         ('true' if enabled else 'false',))
+        else:
+            execute_query(conn, "INSERT OR REPLACE INTO eval_config (key, value) VALUES ('auto_eval_enabled', ?)",
+                         ('true' if enabled else 'false',))
+    if "inject_corrections" in data:
+        inject = data.get("inject_corrections", False)
+        if USE_MYSQL:
+            execute_query(conn, "REPLACE INTO eval_config (`key`, value) VALUES ('inject_corrections', %s)",
+                         ('true' if inject else 'false',))
+        else:
+            execute_query(conn, "INSERT OR REPLACE INTO eval_config (key, value) VALUES ('inject_corrections', ?)",
+                         ('true' if inject else 'false',))
     conn.commit()
     conn.close()
-    return jsonify({"ok": True, "auto_eval_enabled": enabled})
+    return jsonify({"ok": True,
+                    "auto_eval_enabled": data.get("auto_eval_enabled"),
+                    "inject_corrections": data.get("inject_corrections")})
 
 
 # ─── LLM 模型配置 API ───────────────────────────────
@@ -2793,7 +2806,13 @@ def _save_correction(conn, eval_type, ref_id, dimension_code, user_input, ai_rep
 
 
 def _load_recent_corrections(eval_type, dimension_code=None, limit=20):
-    """加载最近的 N 条人工纠正记录，用于 few-shot 注入"""
+    """加载最近的 N 条人工纠正记录，用于 few-shot 注入。
+    受 eval_config.inject_corrections 开关控制，默认关闭（不注入）。
+    """
+    # 开关默认 false：不自动注入人工纠正到下次评测 prompt
+    if not _is_inject_corrections_enabled():
+        return []
+
     conn = get_db_connection()
     ph = "%s" if USE_MYSQL else "?"
 
@@ -2818,6 +2837,17 @@ def _load_recent_corrections(eval_type, dimension_code=None, limit=20):
 
     conn.close()
     return [row_to_dict(r) for r in rows] if rows else []
+
+
+def _is_inject_corrections_enabled():
+    """检查「人工纠正注入下次评测」开关是否开启，默认关闭"""
+    conn = get_db_connection()
+    row = execute_query(conn, "SELECT value FROM eval_config WHERE `key`='inject_corrections'", fetch_one=True)
+    conn.close()
+    return bool(row) and row["value"] == "true"
+
+
+
 
 
 def is_eval_enabled():

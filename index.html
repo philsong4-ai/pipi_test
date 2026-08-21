@@ -770,6 +770,11 @@ body{background:#f5f5f7;color:#1d1d1f}
         </select>
       </div>
       <div style="display:flex;align-items:center;gap:6px;margin-left:12px">
+        <label style="font-size:12px;color:#86868b;white-space:nowrap" title="开启后,人工纠正的案例会作为 few-shot 自动注入到下次评测的 LLM prompt">纠正注入</label>
+        <input type="checkbox" id="inject-corrections-switch" onchange="toggleInjectCorrections()">
+        <span id="inject-corrections-status" style="font-size:11px;color:#aeaeb2"></span>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;margin-left:12px">
         <label style="font-size:12px;color:#86868b;white-space:nowrap">自动评测</label>
         <input type="checkbox" id="eval-switch" onchange="toggleEvalSwitch()">
         <span id="eval-status" style="font-size:11px;color:#aeaeb2"></span>
@@ -1675,6 +1680,7 @@ function deleteComment(msgId) {
 
 // ─── 自动评测功能 ─────────────────────────────────
 var evalEnabled = false;
+var injectCorrectionsEnabled = false;
 
 function loadEvalConfig() {
   api('/api/eval/config').then(function(d) {
@@ -1682,6 +1688,10 @@ function loadEvalConfig() {
     document.getElementById('eval-switch').checked = evalEnabled;
     document.getElementById('eval-status').textContent = evalEnabled ? '已开启' : '已关闭';
     document.getElementById('eval-status').style.color = evalEnabled ? '#34c759' : '#aeaeb2';
+    injectCorrectionsEnabled = d.inject_corrections || false;
+    document.getElementById('inject-corrections-switch').checked = injectCorrectionsEnabled;
+    document.getElementById('inject-corrections-status').textContent = injectCorrectionsEnabled ? '已开启' : '已关闭';
+    document.getElementById('inject-corrections-status').style.color = injectCorrectionsEnabled ? '#34c759' : '#aeaeb2';
   });
 }
 
@@ -1691,6 +1701,15 @@ function toggleEvalSwitch() {
     evalEnabled = d.auto_eval_enabled;
     document.getElementById('eval-status').textContent = evalEnabled ? '已开启' : '已关闭';
     document.getElementById('eval-status').style.color = evalEnabled ? '#34c759' : '#aeaeb2';
+  });
+}
+
+function toggleInjectCorrections() {
+  var checked = document.getElementById('inject-corrections-switch').checked;
+  api('/api/eval/config', 'POST', { inject_corrections: checked }).then(function(d) {
+    injectCorrectionsEnabled = d.inject_corrections;
+    document.getElementById('inject-corrections-status').textContent = injectCorrectionsEnabled ? '已开启' : '已关闭';
+    document.getElementById('inject-corrections-status').style.color = injectCorrectionsEnabled ? '#34c759' : '#aeaeb2';
   });
 }
 
