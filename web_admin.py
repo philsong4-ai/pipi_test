@@ -639,6 +639,35 @@ def _ensure_tables():
             except Exception as e:
                 print(f"[STARTUP] Could not create concurrency_slots: {e}", flush=True)
 
+        # personas 表新增 15 列：生活背景/情绪/作息扩展/家庭关系
+        # LLM 已生成这些字段，但之前只在内存里用于生成对话后丢弃
+        for _col, _sql_type in [
+            ("childhood_memory", "TEXT"),
+            ("life_milestone", "TEXT"),
+            ("recent_worry", "TEXT"),
+            ("important_person", "TEXT"),
+            ("recent_mood", "TEXT"),
+            ("stress_trigger", "TEXT"),
+            ("comfort_seeker", "TEXT"),
+            ("daily_routine", "TEXT"),
+            ("sleep_habit", "TEXT"),
+            ("weekend_plan", "TEXT"),
+            ("nighttime_routine", "TEXT"),
+            ("birthday", "VARCHAR(20)"),
+            ("mbti", "VARCHAR(10)"),
+            ("family_atmosphere", "TEXT"),
+            ("colleague_relationship", "TEXT"),
+        ]:
+            try:
+                execute_query(conn, f"SELECT {_col} FROM personas LIMIT 1", fetch_one=True)
+            except:
+                try:
+                    execute_query(conn, f"ALTER TABLE personas ADD COLUMN {_col} {_sql_type}")
+                    conn.commit()
+                    print(f"[STARTUP] Added {_col} to personas", flush=True)
+                except Exception as e:
+                    print(f"[STARTUP] Could not add {_col} to personas: {e}", flush=True)
+
         conn.close()
         _initialized = True
         print(f"[DB] Using {'MySQL' if USE_MYSQL else 'SQLite'}", flush=True)
@@ -953,6 +982,11 @@ def upsert_persona(pid=None):
         "info_sources", "decision_style", "relation_pace", "scene_pref",
         "top_expectations", "minefields", "test_dimensions", "inject_strategy",
         "compare_with", "relation_stages", "target_api", "user_id",
+        # 新增 15 维（生活背景/情绪/作息扩展/家庭关系）
+        "childhood_memory", "life_milestone", "recent_worry", "important_person",
+        "recent_mood", "stress_trigger", "comfort_seeker",
+        "daily_routine", "sleep_habit", "weekend_plan", "nighttime_routine",
+        "birthday", "mbti", "family_atmosphere", "colleague_relationship",
     ]
 
     # 如果没有 device_id，自动生成
@@ -4269,7 +4303,12 @@ def _create_one_persona_async(persona_id, device_id, name, cfg, user_id=None):
         "core_goal", "short_goal", "long_goal", "pain_points", "constraints",
         "risk_profile", "interests", "language_style", "sample_dialog",
         "info_sources", "decision_style", "relation_pace", "scene_pref",
-        "top_expectations", "minefields", "target_api", "user_id"
+        "top_expectations", "minefields", "target_api", "user_id",
+        # 新增 15 维（生活背景/情绪/作息扩展/家庭关系）
+        "childhood_memory", "life_milestone", "recent_worry", "important_person",
+        "recent_mood", "stress_trigger", "comfort_seeker",
+        "daily_routine", "sleep_habit", "weekend_plan", "nighttime_routine",
+        "birthday", "mbti", "family_atmosphere", "colleague_relationship",
     ]
     values = [
         persona_id, name, device_id,
@@ -4303,6 +4342,21 @@ def _create_one_persona_async(persona_id, device_id, name, cfg, user_id=None):
         profile.get("minefields", ""),
         target_api,
         user_id,
+        profile.get("childhood_memory", ""),
+        profile.get("life_milestone", ""),
+        profile.get("recent_worry", ""),
+        profile.get("important_person", ""),
+        profile.get("recent_mood", ""),
+        profile.get("stress_trigger", ""),
+        profile.get("comfort_seeker", ""),
+        profile.get("daily_routine", ""),
+        profile.get("sleep_habit", ""),
+        profile.get("weekend_plan", ""),
+        profile.get("nighttime_routine", ""),
+        profile.get("birthday", ""),
+        profile.get("mbti", ""),
+        profile.get("family_atmosphere", ""),
+        profile.get("colleague_relationship", ""),
     ]
 
     if USE_MYSQL:
