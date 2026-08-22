@@ -3128,6 +3128,7 @@ def _evaluate_and_save(msg_id, persona_id, user_message, reply_text, persona_dat
 def _extract_and_save(persona_id, message, persona_data, user_id=None):
     if user_id is None:
         user_id = _current_uid()
+    target_api = (persona_data or {}).get("target_api") or "pipi"
     try:
         conn = get_db_connection()
         fact_rows = execute_query(conn,
