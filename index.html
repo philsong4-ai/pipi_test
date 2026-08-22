@@ -74,6 +74,7 @@ body{background:#f5f5f7;color:#1d1d1f}
 .msg-time{font-size:10px;color:#aeaeb2;margin:2px 0}
 .chat-msg.user .msg-time{text-align:right}
 .chat-msg.pipi .msg-time{text-align:left}
+.msg-dialog-id{font-size:10px;color:#aeaeb2;font-family:monospace;margin:4px 0 2px 0;word-break:break-all}
 .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;background:#e8e8ed;color:#86868b;margin-left:6px}
 .emotion-positive{color:#34c759}.emotion-negative{color:#ff3b30}.emotion-neutral{color:#86868b}
 .feedback-row{display:flex;gap:8px;align-items:center;margin-top:6px}
@@ -1422,9 +1423,13 @@ function addSys(t) {
   b.scrollTop = b.scrollHeight;
 }
 
-function addMsg(role, name, text, ts, msgId, feedback, evalData) {
+function addMsg(role, name, text, ts, msgId, feedback, evalData, dialogId) {
   var b = document.getElementById('chat-box');
   var timeHtml = ts ? '<div class="msg-time">' + formatTime(ts) + '</div>' : '';
+  var dialogIdHtml = '';
+  if (role === 'pipi' && dialogId) {
+    dialogIdHtml = '<div class="msg-dialog-id" title="AIVS dialog_id">dialog: ' + escapeHtml(dialogId) + '</div>';
+  }
   var feedbackHtml = '';
   if (role === 'pipi' && msgId) {
     var likeActive = feedback && feedback.type === 'like' ? ' active' : '';
@@ -1446,7 +1451,7 @@ function addMsg(role, name, text, ts, msgId, feedback, evalData) {
       feedbackHtml += '<div class="feedback-comment" id="fb-comment-' + msgId + '">📝 ' + displayComment + ' <span class="comment-actions"><a href="#" onclick="editComment(' + msgId + ',\'' + editComment + '\');return false">编辑</a> | <a href="#" onclick="deleteComment(' + msgId + ');return false">删除</a></span></div>';
     }
   }
-  b.innerHTML += '<div class="chat-msg ' + role + '">' + timeHtml + '<div class="sender">' + name + '</div><div class="bubble">' + text.replace(/\n/g, '<br>') + '</div>' + feedbackHtml + '</div>';
+  b.innerHTML += '<div class="chat-msg ' + role + '">' + timeHtml + '<div class="sender">' + name + '</div><div class="bubble">' + text.replace(/\n/g, '<br>') + '</div>' + dialogIdHtml + feedbackHtml + '</div>';
   b.scrollTop = b.scrollHeight;
 }
 
@@ -1571,7 +1576,7 @@ function sendMsg() {
       var b = document.getElementById('chat-box');
       b.removeChild(b.lastChild);
       if (res.full_text) {
-        addMsg('pipi', '小米绒绒', res.full_text, getNow(), res.message_id, null, null);
+        addMsg('pipi', '小米绒绒', res.full_text, getNow(), res.message_id, null, null, res.dialog_id);
         // 如果评测开关开启，延迟轮询加载评测结果
         if (evalEnabled && res.message_id) {
           setTimeout(function() { loadEvalForMessage(res.message_id); }, 3000);
@@ -1582,7 +1587,7 @@ function sendMsg() {
           setTimeout(function() { loadEvalForMessage(res.message_id); }, 120000);
         }
       } else {
-        addMsg('pipi', '小米绒绒', res.error || '无回复', getNow(), null, null, null);
+        addMsg('pipi', '小米绒绒', res.error || '无回复', getNow(), null, null, null, res.dialog_id);
       }
     })
     .catch(function(e) {
