@@ -653,8 +653,8 @@ def _ensure_tables():
             ("sleep_habit", "TEXT"),
             ("weekend_plan", "TEXT"),
             ("nighttime_routine", "TEXT"),
-            ("birthday", "VARCHAR(20)"),
-            ("mbti", "VARCHAR(10)"),
+            ("birthday", "VARCHAR(50)"),
+            ("mbti", "VARCHAR(50)"),
             ("family_atmosphere", "TEXT"),
             ("colleague_relationship", "TEXT"),
         ]:
