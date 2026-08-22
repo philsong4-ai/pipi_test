@@ -2219,7 +2219,7 @@ function refreshGrowthTasks() {
     }
     var speedNames = {fast: '快速', normal: '正常', slow: '慢速'};
     var html = '<table style="width:100%;font-size:13px;border-collapse:collapse">';
-    html += '<tr style="background:#f5f5f7"><th style="padding:8px;text-align:left">ID</th><th>用户ID</th><th>用户名</th><th>速度</th><th>状态</th><th>进度</th><th>事实数</th><th>耗时</th><th>操作</th></tr>';
+    html += '<tr style="background:#f5f5f7"><th style="padding:8px;text-align:left">ID</th><th>用户ID</th><th>用户名</th><th>状态</th><th>进度</th><th>事实数</th><th>创建时间</th><th>操作</th></tr>';
     tasks.forEach(function(t) {
       // 有进度的 pending 任务实际上是中断的，不是普通等待中
       var displayStatus = t.status;
@@ -2228,23 +2228,21 @@ function refreshGrowthTasks() {
       }
       var statusColor = displayStatus === 'completed' ? '#34c759' : (displayStatus === 'running' ? '#0071e3' : (displayStatus === 'failed' ? '#ff3b30' : (displayStatus === 'interrupted' ? '#ff9500' : '#86868b')));
       var statusText = {pending: '等待中', running: '运行中', completed: '已完成', failed: '失败', interrupted: '已中断'}[displayStatus] || t.status;
-      var duration = '-';
-      if (t.started_at) {
-        var start = new Date(t.started_at);
-        var end = t.completed_at ? new Date(t.completed_at) : new Date();
-        var secs = Math.round((end - start) / 1000);
-        duration = secs < 60 ? secs + 's' : Math.floor(secs/60) + 'm' + (secs%60) + 's';
-      }
       var progress = t.total_messages > 0 ? Math.round(t.completed_messages * 100 / t.total_messages) : 0;
+      var createdAtText = '-';
+      if (t.created_at) {
+        var d = new Date(t.created_at);
+        var pad = function(n){return n<10?'0'+n:''+n;};
+        createdAtText = d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+      }
       html += '<tr style="border-bottom:1px solid #e8e8ed">';
       html += '<td style="padding:8px">' + t.id + '</td>';
       html += '<td style="padding:8px;font-size:11px;font-family:monospace">' + escapeHtml(t.persona_id) + '</td>';
       html += '<td style="padding:8px">' + escapeHtml(t.persona_name || '-') + '</td>';
-      html += '<td style="padding:8px">' + (speedNames[t.speed] || t.speed) + '</td>';
       html += '<td style="padding:8px;color:' + statusColor + '">' + statusText + '</td>';
       html += '<td style="padding:8px">' + t.completed_messages + '/' + t.total_messages + ' (' + progress + '%)</td>';
       html += '<td style="padding:8px">' + (t.facts_extracted || 0) + '</td>';
-      html += '<td style="padding:8px">' + duration + '</td>';
+      html += '<td style="padding:8px;font-size:11px;font-family:monospace">' + createdAtText + '</td>';
       html += '<td style="padding:8px">';
       if (t.status === 'pending' || t.status === 'failed') {
         html += '<button class="btn btn-primary btn-sm" onclick="retryTask(' + t.id + ')" style="margin-right:4px">执行</button>';
