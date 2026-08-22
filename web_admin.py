@@ -212,6 +212,15 @@ def _ensure_tables():
         conn = get_db_connection()
         execute_query(conn, "SELECT 1 FROM personas LIMIT 1", fetch_one=True)
 
+        # 启动时清理 aivs_global 槽:上次崩溃可能有 worker 被 SIGKILL,
+        # finally 块未执行导致槽泄漏,current_count 卡在 1,所有 AIVS 请求被锁死
+        try:
+            execute_query(conn,
+                "UPDATE concurrency_slots SET current_count=0, updated_at=NOW() WHERE slot_type='aivs_global' AND current_count>0")
+            conn.commit()
+        except Exception as e:
+            print(f"[STARTUP] Could not reset aivs_global slot: {e}", flush=True)
+
         # 检查并添加 persona_score 和 persona_reason 列（如果不存在）
         try:
             execute_query(conn, "SELECT persona_score FROM auto_evaluation LIMIT 1", fetch_one=True)

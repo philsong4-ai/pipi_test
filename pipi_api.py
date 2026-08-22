@@ -95,7 +95,7 @@ def parse_sse_buffer(buffer: str) -> tuple:
 def call_pipi_stream(
     messages: List[Dict],
     device_id: str = "TEST_DEV_001",
-    timeout: int = 30,
+    timeout: int = 60,
     api_url: str = None,
     api_key: str = None,
     extra_headers: dict = None,
@@ -632,6 +632,14 @@ def call_aivs_stream(
         }
 
     except subprocess.TimeoutExpired:
+        # ask.sh 用 disown 把 Java 子进程脱离作业控制,subprocess 杀 bash
+        # 后 Java 会变孤儿继续跑(PPID=1),且不释放 aivs_global 槽。
+        # 这里显式 pkill 清理残留 Java,避免槽泄漏 + 504 连锁。
+        try:
+            subprocess.run(["pkill", "-9", "-f", "com.example.AivsDemo"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        except Exception:
+            pass
         return {
             "full_text": "",
             "response_time_ms": round((time.time() - start_time) * 1000, 2),
