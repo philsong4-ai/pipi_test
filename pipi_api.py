@@ -794,7 +794,12 @@ def generate_persona_messages(profile: Dict, categories: List[str] = None, custo
               "pet_age", "pet_trait", "favorite_drink", "favorite_food", "spicy_preference",
               "current_hobby", "learning", "favorite_singer", "best_friend", "stress_relief",
               "work_time", "lunch_habit", "commute", "income_range", "spending_style",
-              "interests", "core_goal", "short_goal", "pain_points", "minefields"]:
+              "interests", "core_goal", "short_goal", "pain_points", "minefields",
+              # 新增生活背景/情绪/事件/关系字段
+              "childhood_memory", "life_milestone", "recent_worry", "recent_mood",
+              "important_person", "daily_routine", "sleep_habit", "weekend_plan",
+              "birthday", "mbti", "family_atmosphere", "colleague_relationship",
+              "nighttime_routine", "stress_trigger", "comfort_seeker", "stress_trigger"]:
         v = profile.get(k)
         if v:
             profile_lines.append(f"{k}: {v}")
@@ -805,12 +810,20 @@ def generate_persona_messages(profile: Dict, categories: List[str] = None, custo
 
 要覆盖的信息类别：{", ".join(categories)}
 
-生成 15-20 条该用户会对AI陪伴玩偶说的消息。要求：
-- 每条独立、自然、口语化
-- 严格基于画像字段，不要编造未给出的信息
-- 同一字段值用不同句式表达（例如年龄既可以说"我今年X岁"也可以说"过了X岁生日了"）
-- 覆盖所有指定类别
-- 返回纯 JSON 数组，如 ["msg1", "msg2", ...]"""
+生成 18-25 条该用户会对AI陪伴玩偶说的消息。要求：
+- 每条独立、自然、口语化,8-35字为主
+- 严格基于画像字段,不要编造未给出的信息
+- 同一字段值用不同句式+不同场景+不同情绪表达
+- 覆盖所有指定类别,每个 category 至少 3 条
+- 轮换以下变化维度,避免趋同：
+  * 场景:早高峰通勤、午休吃饭、下午摸鱼、下班路上、睡前、周末上午、周末晚上
+  * 情绪:开心分享、吐槽抱怨、求助迷茫、闲聊无聊、疲惫瘫倒
+  * 起因:主动报喜/吐槽、回应玩偶问候、因事想起某事、刷到某内容触发、突然关心玩偶
+  * 人称变化:主语用"我"、省略主语直接动词开头、用"你猜"反问起头、用"对了""哎""话说"切换话题
+  * 信息粒度:有的消息只讲一个点、有的串联两三个相关事实
+  * 句式:陈述句、感叹句、反问句、省略号结尾的犹豫、hh/lol/哈哈 等口语词
+- 涉及具体字段值(如 occupation/favorite_food)时,拆出关键名词重组句子,不要照搬整句
+- 返回纯 JSON 数组,如 ["msg1", "msg2", ...]"""
 
     try:
         result = None
