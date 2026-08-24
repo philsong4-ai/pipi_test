@@ -66,6 +66,20 @@ body{background:#f5f5f7;color:#1d1d1f}
 .chat-msg.pipi{text-align:left}.chat-msg.pipi .bubble{background:#e8e8ed;color:#1d1d1f;border-bottom-left-radius:4px}
 .chat-msg.system{text-align:center;font-size:11px;color:#aeaeb2;margin:8px 0}
 .chat-input{display:flex;gap:8px}.chat-input input{flex:1;padding:10px 14px;border:1px solid #d2d2d7;border-radius:8px;font-size:13px}
+.chat-search-bar{display:flex;gap:8px;align-items:center;margin:8px 0 4px 0}
+.chat-search-bar input{flex:1;padding:7px 12px;border:1px solid #d2d2d7;border-radius:8px;font-size:13px}
+.chat-search-bar input:focus{border-color:#0071e3;outline:none}
+.chat-search-bar .chat-search-info{font-size:11px;color:#86868b;white-space:nowrap}
+.chat-search-results{border:1px solid #d2d2d7;border-radius:8px;background:#fff;max-height:200px;overflow-y:auto;margin-bottom:8px;display:none}
+.chat-search-results .empty{padding:16px;text-align:center;color:#aeaeb2;font-size:12px}
+.chat-search-item{padding:8px 12px;border-bottom:1px solid #f0f0f0;cursor:pointer;font-size:12px;line-height:1.5}
+.chat-search-item:last-child{border-bottom:none}
+.chat-search-item:hover{background:#f5f5f7}
+.chat-search-item .csi-meta{font-size:10px;color:#aeaeb2;margin-bottom:2px}
+.chat-search-item .csi-text{color:#1d1d1f;word-break:break-word}
+.chat-search-item mark,.chat-msg .bubble mark{background:#ffe066;color:inherit;padding:0 1px;border-radius:2px}
+.chat-msg.highlight-flash .bubble{animation:flash-highlight 1.6s ease-out}
+@keyframes flash-highlight{0%{box-shadow:0 0 0 0 rgba(255,224,102,0.9)}100%{box-shadow:0 0 0 0 rgba(255,224,102,0)}}
 .chat-input input:focus{border-color:#0071e3;outline:none}
 .user-select{width:100%;padding:10px;border:1px solid #d2d2d7;border-radius:8px;font-size:13px;margin-bottom:12px}
 .toolbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
@@ -781,6 +795,13 @@ body{background:#f5f5f7;color:#1d1d1f}
         <span id="eval-status" style="font-size:11px;color:#aeaeb2"></span>
       </div>
     </div>
+    <div class="chat-search-bar">
+      <input id="chat-search-input" placeholder="搜索当前用户聊天记录... 回车搜索" onkeydown="if(event.key==='Enter')searchChatKeyword()">
+      <button class="btn btn-secondary" onclick="searchChatKeyword()">🔍 搜索</button>
+      <button class="btn btn-sm btn-secondary" onclick="clearChatSearch()">清除</button>
+      <span id="chat-search-info" class="chat-search-info"></span>
+    </div>
+    <div id="chat-search-results" class="chat-search-results"></div>
     <div id="chat-box" class="chat-box"></div>
     <div class="chat-input">
       <input id="chat-input" placeholder="输入消息，回车发送..." onkeydown="if(event.key==='Enter')sendMsg()">
@@ -1356,12 +1377,129 @@ function onUserChange() {
   chatUser = document.getElementById('chat-user').value;
   var box = document.getElementById('chat-box');
   box.innerHTML = '';
+  clearChatSearch();
   if (chatUser === '__guest__') {
     addSys('当前为游客模式，聊天记录不保存');
   } else if (chatUser) {
     addSys('已切换至 ' + getUserName());
     loadChatHistory(chatUser);
   }
+}
+
+function searchChatKeyword() {
+  var input = document.getElementById('chat-search-input');
+  var kw = (input.value || '').trim();
+  var info = document.getElementById('chat-search-info');
+  var resultsBox = document.getElementById('chat-search-results');
+
+  if (!chatUser || chatUser === '__guest__') {
+    info.textContent = '请先选择用户';
+    resultsBox.style.display = 'none';
+    resultsBox.innerHTML = '';
+    return;
+  }
+  var list = chatHistories[chatUser] || [];
+  if (!list.length) {
+    info.textContent = '该用户暂无聊天记录';
+    resultsBox.style.display = 'block';
+    resultsBox.innerHTML = '<div class="empty">该用户暂无聊天记录</div>';
+    return;
+  }
+  if (!kw) {
+    clearChatSearch();
+    return;
+  }
+  var kwLower = kw.toLowerCase();
+  var matches = [];
+  for (var i = 0; i < list.length; i++) {
+    var m = list[i];
+    if (!m.text) continue;
+    if (m.text.toLowerCase().indexOf(kwLower) !== -1) {
+      matches.push(m);
+    }
+  }
+  info.textContent = '匹配 ' + matches.length + ' 条';
+  resultsBox.style.display = 'block';
+  if (!matches.length) {
+    resultsBox.innerHTML = '<div class="empty">未匹配到关键词</div>';
+    return;
+  }
+  var html = '';
+  for (var i = 0; i < matches.length; i++) {
+    var m = matches[i];
+    var role = m.role === 'user' ? '用户' : '玩偶';
+    var roleColor = m.role === 'user' ? '#0071e3' : '#1d1d1f';
+    var text = escapeHtml(m.text).replace(/\n/g, '<br>');
+    // 高亮关键词（大小写不敏感）
+    var kwEsc = escapeHtml(kw);
+    var re = new RegExp(kwEsc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+    text = text.replace(re, function(s) {
+      return '<mark>' + s + '</mark>';
+    });
+    var ts = m.created_at ? formatTime(m.created_at) : '';
+    html += '<div class="chat-search-item" onclick="scrollToMsg(' + m.id + ')">'
+      + '<div class="csi-meta"><span style="color:' + roleColor + ';font-weight:600">' + role + '</span> · ' + escapeHtml(ts) + '</div>'
+      + '<div class="csi-text">' + text + '</div>'
+      + '</div>';
+  }
+  resultsBox.innerHTML = html;
+
+  // 同时在 chat-box 内联高亮
+  highlightChatBoxInline(kw);
+}
+
+function highlightChatBoxInline(kw) {
+  var kwEsc = escapeHtml(kw);
+  var re = new RegExp(kwEsc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+  var bubbles = document.querySelectorAll('#chat-box .bubble');
+  for (var i = 0; i < bubbles.length; i++) {
+    var b = bubbles[i];
+    if (b.dataset.origHtml === undefined) {
+      b.dataset.origHtml = b.innerHTML;
+    }
+    var orig = b.dataset.origHtml;
+    // 在已转义的 HTML 上做大小写不敏感替换（保留 <br> 等）
+    var newText = orig.replace(re, function(s) {
+      return '<mark>' + s + '</mark>';
+    });
+    b.innerHTML = newText;
+  }
+}
+
+function clearChatSearch() {
+  var input = document.getElementById('chat-search-input');
+  var info = document.getElementById('chat-search-info');
+  var resultsBox = document.getElementById('chat-search-results');
+  if (input) input.value = '';
+  if (info) info.textContent = '';
+  if (resultsBox) {
+    resultsBox.style.display = 'none';
+    resultsBox.innerHTML = '';
+  }
+  // 还原 chat-box 内的 <mark> 高亮
+  var bubbles = document.querySelectorAll('#chat-box .bubble');
+  for (var i = 0; i < bubbles.length; i++) {
+    if (bubbles[i].dataset.origHtml !== undefined) {
+      bubbles[i].innerHTML = bubbles[i].dataset.origHtml;
+      delete bubbles[i].dataset.origHtml;
+    }
+  }
+}
+
+function scrollToMsg(msgId) {
+  var box = document.getElementById('chat-box');
+  var target = document.querySelector('#chat-box .chat-msg[data-msg-id="' + msgId + '"]');
+  if (!target) return;
+  // 计算 target 在 box 内的偏移
+  var offsetTop = 0;
+  var node = target;
+  while (node && node !== box) {
+    offsetTop += node.offsetTop;
+    node = node.offsetParent;
+  }
+  box.scrollTop = offsetTop - 60;
+  target.classList.add('highlight-flash');
+  setTimeout(function() { target.classList.remove('highlight-flash'); }, 1700);
 }
 
 function startChatWith(personaId) {
@@ -1451,7 +1589,7 @@ function addMsg(role, name, text, ts, msgId, feedback, evalData, dialogId) {
       feedbackHtml += '<div class="feedback-comment" id="fb-comment-' + msgId + '">📝 ' + displayComment + ' <span class="comment-actions"><a href="#" onclick="editComment(' + msgId + ',\'' + editComment + '\');return false">编辑</a> | <a href="#" onclick="deleteComment(' + msgId + ');return false">删除</a></span></div>';
     }
   }
-  b.innerHTML += '<div class="chat-msg ' + role + '">' + timeHtml + '<div class="sender">' + name + '</div><div class="bubble">' + text.replace(/\n/g, '<br>') + '</div>' + dialogIdHtml + feedbackHtml + '</div>';
+  b.innerHTML += '<div class="chat-msg ' + role + '" data-msg-id="' + (msgId || '') + '">' + timeHtml + '<div class="sender">' + name + '</div><div class="bubble">' + text.replace(/\n/g, '<br>') + '</div>' + dialogIdHtml + feedbackHtml + '</div>';
   b.scrollTop = b.scrollHeight;
 }
 
@@ -2416,7 +2554,7 @@ document.querySelectorAll('.nav-item').forEach(function(btn) {
       loadEvalStats();
     }
     if (btn.dataset.tab === 'test-report') {
-      loadReportPersonas();
+      if (document.getElementById('report-task')) loadEvalTaskSelect();
     }
     if (btn.dataset.tab === 'scheduled') {
       loadScheduledTasks();
@@ -5579,6 +5717,7 @@ function loadEvalTaskSelect() {
     .then(r => r.json())
     .then(tasks => {
       var sel = document.getElementById('eval-task');
+      if (!sel) return;
       sel.innerHTML = '<option value="">请选择任务</option>';
       tasks.filter(function(t) { return t.status === 'executed' || t.status === 'completed'; }).forEach(function(t) {
         var opt = document.createElement('option');
