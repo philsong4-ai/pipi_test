@@ -123,6 +123,17 @@ app = Flask(__name__)
 Compress(app)
 
 
+# datetime 序列化为本地时间字符串（无时区后缀），避免前端 new Date() 误判为 UTC 再 +8
+class _LocalJSONEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, (datetime.datetime, datetime.date, datetime.time)):
+            return o.strftime("%Y-%m-%d %H:%M:%S")
+        return super().default(o)
+
+
+app.json_encoder = _LocalJSONEncoder
+
+
 def get_api_url_by_code(api_code: str) -> str:
     """根据接口代码获取 API URL，找不到返回 None"""
     if not api_code:
