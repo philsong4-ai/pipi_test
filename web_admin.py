@@ -124,10 +124,16 @@ Compress(app)
 
 
 # datetime 序列化为本地时间字符串（无时区后缀），避免前端 new Date() 误判为 UTC 再 +8
+# Decimal（MySQL SUM/AVG 等聚合结果）转 int 或 float，避免 JSON 序列化失败
+import decimal
+
+
 class _LocalJSONEncoder(json.JSONEncoder):
     def default(self, o):
         if isinstance(o, (datetime.datetime, datetime.date, datetime.time)):
             return o.strftime("%Y-%m-%d %H:%M:%S")
+        if isinstance(o, decimal.Decimal):
+            return int(o) if o == o.to_integral_value() else float(o)
         return super().default(o)
 
 
