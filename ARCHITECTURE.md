@@ -42,7 +42,7 @@
             ▼                          ▼          ▼
    ┌────────────────┐         ┌──────────────┐  ┌─────────────┐
    │ 玩偶 API (SSE) │         │ LLM 代理      │  │ Jira Server  │
-   │ api.superhexa  │         │ litellm.hexa  │  │ <JIRA_DOMAIN>│
+   │ <DOLL_API>    │         │ <LLM_PROXY>   │  │ <JIRA_DOMAIN>│
    └────────────────┘         └──────────────┘  └─────────────┘
 ```
 
