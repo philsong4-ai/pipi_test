@@ -594,6 +594,164 @@ def _ensure_tables():
             except Exception as e:
                 print(f"[STARTUP] Could not create regen_locks: {e}", flush=True)
 
+        # 创建 fixed_test_cases 表（固定垂类知识用例，独立维护独立执行）
+        try:
+            execute_query(conn, "SELECT 1 FROM fixed_test_cases LIMIT 1", fetch_one=True)
+        except:
+            try:
+                if USE_MYSQL:
+                    execute_query(conn, """
+                        CREATE TABLE IF NOT EXISTS fixed_test_cases (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            case_id VARCHAR(64) NOT NULL UNIQUE,
+                            domain VARCHAR(32) NOT NULL COMMENT 'poem/math/story/trivia',
+                            sub_domain VARCHAR(64) DEFAULT NULL,
+                            title VARCHAR(200) NOT NULL,
+                            input_text TEXT NOT NULL,
+                            expected_output TEXT NOT NULL,
+                            evaluation_points TEXT,
+                            failure_flags TEXT,
+                            priority VARCHAR(4) DEFAULT 'P1',
+                            status VARCHAR(16) DEFAULT 'active',
+                            user_id INT,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            INDEX idx_domain (domain),
+                            INDEX idx_status (status),
+                            INDEX idx_user (user_id)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """)
+                else:
+                    execute_query(conn, """
+                        CREATE TABLE IF NOT EXISTS fixed_test_cases (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            case_id TEXT NOT NULL UNIQUE,
+                            domain TEXT NOT NULL,
+                            sub_domain TEXT,
+                            title TEXT NOT NULL,
+                            input_text TEXT NOT NULL,
+                            expected_output TEXT NOT NULL,
+                            evaluation_points TEXT,
+                            failure_flags TEXT,
+                            priority TEXT DEFAULT 'P1',
+                            status TEXT DEFAULT 'active',
+                            user_id INTEGER,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+                conn.commit()
+                print("[STARTUP] Created fixed_test_cases table", flush=True)
+            except Exception as e:
+                print(f"[STARTUP] Could not create fixed_test_cases: {e}", flush=True)
+
+        # 创建 fixed_test_tasks 表（固定用例测试任务）
+        try:
+            execute_query(conn, "SELECT 1 FROM fixed_test_tasks LIMIT 1", fetch_one=True)
+        except:
+            try:
+                if USE_MYSQL:
+                    execute_query(conn, """
+                        CREATE TABLE IF NOT EXISTS fixed_test_tasks (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            task_id VARCHAR(32) NOT NULL UNIQUE,
+                            name VARCHAR(200),
+                            device_id VARCHAR(100),
+                            target_api VARCHAR(32) DEFAULT 'pipi',
+                            case_ids JSON,
+                            status VARCHAR(20) DEFAULT 'pending',
+                            progress_total INT DEFAULT 0,
+                            progress_done INT DEFAULT 0,
+                            user_id INT,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            started_at TIMESTAMP NULL,
+                            completed_at TIMESTAMP NULL,
+                            error_message TEXT,
+                            INDEX idx_status (status),
+                            INDEX idx_user (user_id)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """)
+                else:
+                    execute_query(conn, """
+                        CREATE TABLE IF NOT EXISTS fixed_test_tasks (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            task_id TEXT NOT NULL UNIQUE,
+                            name TEXT,
+                            device_id TEXT,
+                            target_api TEXT DEFAULT 'pipi',
+                            case_ids TEXT,
+                            status TEXT DEFAULT 'pending',
+                            progress_total INTEGER DEFAULT 0,
+                            progress_done INTEGER DEFAULT 0,
+                            user_id INTEGER,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            started_at TIMESTAMP NULL,
+                            completed_at TIMESTAMP NULL,
+                            error_message TEXT
+                        )
+                    """)
+                conn.commit()
+                print("[STARTUP] Created fixed_test_tasks table", flush=True)
+            except Exception as e:
+                print(f"[STARTUP] Could not create fixed_test_tasks: {e}", flush=True)
+
+        # 创建 fixed_test_results 表（固定用例执行 + 评测结果）
+        try:
+            execute_query(conn, "SELECT 1 FROM fixed_test_results LIMIT 1", fetch_one=True)
+        except:
+            try:
+                if USE_MYSQL:
+                    execute_query(conn, """
+                        CREATE TABLE IF NOT EXISTS fixed_test_results (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            task_id INT NOT NULL,
+                            case_id INT NOT NULL,
+                            status VARCHAR(20) DEFAULT 'pending',
+                            actual_output TEXT,
+                            dialog_ids JSON,
+                            ttfb_ms INT,
+                            total_ms INT,
+                            score DECIMAL(5,2),
+                            deduction_reason TEXT,
+                            eval_detail TEXT,
+                            needs_review TINYINT DEFAULT 0,
+                            human_score INT,
+                            human_note TEXT,
+                            target_api VARCHAR(32) DEFAULT 'pipi',
+                            user_id INT,
+                            executed_at TIMESTAMP NULL,
+                            INDEX idx_task (task_id),
+                            INDEX idx_case (case_id),
+                            INDEX idx_user (user_id)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """)
+                else:
+                    execute_query(conn, """
+                        CREATE TABLE IF NOT EXISTS fixed_test_results (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            task_id INTEGER NOT NULL,
+                            case_id INTEGER NOT NULL,
+                            status TEXT DEFAULT 'pending',
+                            actual_output TEXT,
+                            dialog_ids TEXT,
+                            ttfb_ms INTEGER,
+                            total_ms INTEGER,
+                            score REAL,
+                            deduction_reason TEXT,
+                            eval_detail TEXT,
+                            needs_review INTEGER DEFAULT 0,
+                            human_score INTEGER,
+                            human_note TEXT,
+                            target_api TEXT DEFAULT 'pipi',
+                            user_id INTEGER,
+                            executed_at TIMESTAMP NULL
+                        )
+                    """)
+                conn.commit()
+                print("[STARTUP] Created fixed_test_results table", flush=True)
+            except Exception as e:
+                print(f"[STARTUP] Could not create fixed_test_results: {e}", flush=True)
+
         # 服务启动时恢复被中断的任务：重新拉起 worker
         conn2 = get_db_connection()
         stalled = execute_query(conn2,
@@ -5315,6 +5473,12 @@ def _eval_case_core(result_row: Dict, conn, chat_corrections: List[Dict] = None,
             ", eval_detail = " + ("%s" if USE_MYSQL else "?") +
             " WHERE id = " + ("%s" if USE_MYSQL else "?"),
             (score, reason, status, eval_detail, result_row["id"]))
+    elif target_table == "fixed_test_results":
+        ph = "%s" if USE_MYSQL else "?"
+        execute_query(conn,
+            f"UPDATE fixed_test_results SET score = {ph}, deduction_reason = {ph}, "
+            f"status = {ph}, eval_detail = {ph} WHERE id = {ph}",
+            (score, reason, status, eval_detail, result_row["id"]))
     else:
         execute_query(conn,
             "UPDATE test_results SET score = %s, deduction_reason = %s, status = %s, eval_detail = %s WHERE id = %s",
@@ -7020,6 +7184,695 @@ def delete_test_case(case_id):
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
+
+
+# ─── 固定垂类知识用例模块（独立维护独立执行，复用 evaluate_test_case 评测）──────────
+
+_FIXED_DOMAINS = ["poem", "math", "story", "trivia"]
+_FIXED_DIM_CODE = "G1"  # 虚拟维度 code，评测时从 pipi.json 的 dimension_review_checklist.G1 取硬规则
+
+
+def _get_unique_fixed_case_id(conn, domain: str) -> str:
+    """生成形如 FIXED-POEM-01 的唯一 case_id（参考 _get_unique_case_id 范式）。"""
+    prefix = f"FIXED-{domain.upper()}-"
+    if USE_MYSQL:
+        row = execute_query(conn,
+            "SELECT case_id FROM fixed_test_cases WHERE case_id LIKE %s ORDER BY case_id DESC LIMIT 1",
+            (prefix + "%",), fetch_one=True)
+    else:
+        row = execute_query(conn,
+            "SELECT case_id FROM fixed_test_cases WHERE case_id LIKE ? ORDER BY case_id DESC LIMIT 1",
+            (prefix + "%",), fetch_one=True)
+    seq = 1
+    if row:
+        existing = row_to_dict(row).get("case_id", "")
+        try:
+            seq = int(existing.rsplit("-", 1)[-1]) + 1
+        except (ValueError, IndexError):
+            seq = 1
+    return f"{prefix}{seq:02d}"
+
+
+def _save_fixed_case(conn, case_data: dict, user_id: int) -> int:
+    """共享 INSERT 固定用例。返回新 id。"""
+    domain = (case_data.get("domain") or "").strip().lower()
+    if domain not in _FIXED_DOMAINS:
+        raise ValueError(f"invalid domain: {domain} (allowed: {_FIXED_DOMAINS})")
+    case_id = (case_data.get("case_id") or "").strip()
+    if not case_id:
+        case_id = _get_unique_fixed_case_id(conn, domain)
+    title = (case_data.get("title") or "").strip()
+    input_text = (case_data.get("input_text") or "").strip()
+    expected_output = (case_data.get("expected_output") or "").strip()
+    if not title or not input_text or not expected_output:
+        raise ValueError("title / input_text / expected_output required")
+    sub_domain = (case_data.get("sub_domain") or "").strip() or None
+    evaluation_points = (case_data.get("evaluation_points") or "").strip()
+    failure_flags = (case_data.get("failure_flags") or "").strip()
+    priority = (case_data.get("priority") or "P1").strip()
+    status = (case_data.get("status") or "active").strip()
+
+    if USE_MYSQL:
+        execute_query(conn,
+            "INSERT INTO fixed_test_cases (case_id, domain, sub_domain, title, input_text, expected_output, "
+            "evaluation_points, failure_flags, priority, status, user_id) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (case_id, domain, sub_domain, title, input_text, expected_output,
+             evaluation_points, failure_flags, priority, status, user_id))
+        row = execute_query(conn, "SELECT LAST_INSERT_ID() AS id", fetch_one=True)
+    else:
+        cur = execute_query(conn,
+            "INSERT INTO fixed_test_cases (case_id, domain, sub_domain, title, input_text, expected_output, "
+            "evaluation_points, failure_flags, priority, status, user_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (case_id, domain, sub_domain, title, input_text, expected_output,
+             evaluation_points, failure_flags, priority, status, user_id))
+        row = {"id": cur.lastrowid}
+    conn.commit()
+    return int(row["id"])
+
+
+@app.route("/api/fixed_cases", methods=["GET"])
+def list_fixed_cases():
+    """列出固定用例。支持 domain / status / keyword 过滤 + 分页。"""
+    domain = request.args.get("domain", "")
+    status = request.args.get("status", "active")
+    keyword = request.args.get("keyword", "")
+    page = max(1, int(request.args.get("page", 1)))
+    limit = min(100, int(request.args.get("limit", 20)))
+    offset = (page - 1) * limit
+    uid = _current_uid()
+
+    where = ["user_id = ?"]
+    params = [uid]
+    if domain:
+        where.append("domain = ?")
+        params.append(domain)
+    if status:
+        where.append("status = ?")
+        params.append(status)
+    if keyword:
+        where.append("(title LIKE ? OR input_text LIKE ? OR expected_output LIKE ? OR case_id LIKE ?)")
+        kw = f"%{keyword}%"
+        params.extend([kw, kw, kw, kw])
+    where_sql = " AND ".join(where)
+
+    conn = get_db_connection()
+    count_row = execute_query(conn, f"SELECT COUNT(*) AS cnt FROM fixed_test_cases WHERE {where_sql}", params, fetch_one=True)
+    total = row_to_dict(count_row)["cnt"] if count_row else 0
+    rows = execute_query(conn,
+        f"SELECT * FROM fixed_test_cases WHERE {where_sql} ORDER BY id DESC LIMIT ? OFFSET ?",
+        params + [limit, offset], fetch_all=True)
+    conn.close()
+    return jsonify({"items": [row_to_dict(r) for r in rows], "total": total, "page": page, "limit": limit})
+
+
+@app.route("/api/fixed_cases/<int:case_id>", methods=["GET"])
+def get_fixed_case(case_id):
+    conn = get_db_connection()
+    row = execute_query(conn, "SELECT * FROM fixed_test_cases WHERE id = ? AND user_id = ?",
+                        (case_id, _current_uid()), fetch_one=True)
+    conn.close()
+    if not row:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(row_to_dict(row))
+
+
+@app.route("/api/fixed_cases", methods=["POST"])
+def create_fixed_case():
+    data = request.get_json() or {}
+    uid = _current_uid()
+    try:
+        conn = get_db_connection()
+        cid = _save_fixed_case(conn, data, uid)
+        conn.close()
+        return jsonify({"id": cid, "ok": True}), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/fixed_cases/batch", methods=["POST"])
+def create_fixed_cases_batch():
+    """批量导入固定用例（JSON 数组）。项目首个手动批量导入入口。"""
+    items = request.get_json() or []
+    if not isinstance(items, list):
+        return jsonify({"error": "expected JSON array"}), 400
+    uid = _current_uid()
+    conn = get_db_connection()
+    created_ids = []
+    errors = []
+    for idx, item in enumerate(items):
+        try:
+            cid = _save_fixed_case(conn, item, uid)
+            created_ids.append(cid)
+        except Exception as e:
+            errors.append({"index": idx, "case_id": item.get("case_id", ""), "error": str(e)})
+    conn.close()
+    return jsonify({"created": len(created_ids), "ids": created_ids, "errors": errors}), 201
+
+
+@app.route("/api/fixed_cases/<int:case_id>", methods=["PUT"])
+def update_fixed_case(case_id):
+    data = request.get_json() or {}
+    uid = _current_uid()
+    allowed = ["case_id", "domain", "sub_domain", "title", "input_text",
+               "expected_output", "evaluation_points", "failure_flags",
+               "priority", "status"]
+    sets = []
+    params = []
+    for k in allowed:
+        if k in data:
+            sets.append(f"{k} = ?")
+            params.append(data[k])
+    if not sets:
+        return jsonify({"error": "no fields to update"}), 400
+    sets.append("updated_at = NOW()" if USE_MYSQL else "updated_at = CURRENT_TIMESTAMP")
+    params.append(case_id)
+    params.append(uid)
+    conn = get_db_connection()
+    execute_query(conn, f"UPDATE fixed_test_cases SET {', '.join(sets)} WHERE id = ? AND user_id = ?", params)
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/fixed_cases/<int:case_id>", methods=["DELETE"])
+def delete_fixed_case(case_id):
+    conn = get_db_connection()
+    execute_query(conn, "DELETE FROM fixed_test_cases WHERE id = ? AND user_id = ?",
+                  (case_id, _current_uid()))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+_fixed_gen_tasks = {}
+
+
+@app.route("/api/fixed_cases/generate", methods=["POST"])
+def generate_fixed_cases():
+    """LLM 辅助批量生成固定用例。body: {domain, count, difficulty, sub_domain?}"""
+    data = request.get_json() or {}
+    domain = (data.get("domain") or "").strip().lower()
+    if domain not in _FIXED_DOMAINS:
+        return jsonify({"error": f"invalid domain: {domain}"}), 400
+    count = min(20, max(1, int(data.get("count", 5))))
+    difficulty = (data.get("difficulty") or "medium").strip()
+    sub_domain = (data.get("sub_domain") or "").strip()
+
+    uid = _current_uid()
+    slot_type = f"user:{uid}:fixedgen"
+    if not _acquire_slot(slot_type, 2, ttl_seconds=3600, wait=False, timeout=0):
+        return jsonify({"error": "您已有任务在执行，请等待完成"}), 429
+
+    import uuid
+    task_id = uuid.uuid4().hex[:8]
+    task = {
+        "task_id": task_id, "status": "pending", "user_id": uid,
+        "domain": domain, "count": count, "difficulty": difficulty,
+        "sub_domain": sub_domain,
+        "progress": {"total": count, "done": 0, "current": domain},
+        "created_case_ids": [], "errors": [],
+    }
+    _fixed_gen_tasks[task_id] = task
+    _save_async_task(task_id, "fixed_gen", task, user_id=uid)
+
+    t = threading.Thread(target=_generate_fixed_cases_worker,
+                         args=(task_id, uid, slot_type), daemon=True)
+    t.start()
+    return jsonify({"task_id": task_id, "status": "pending"})
+
+
+@app.route("/api/fixed_cases/generate/<task_id>", methods=["GET"])
+def get_fixed_gen_status(task_id):
+    task = _fixed_gen_tasks.get(task_id) or _load_async_task(task_id, user_id=_current_uid())
+    if not task:
+        return jsonify({"error": "task not found"}), 404
+    return jsonify(task)
+
+
+def _generate_fixed_cases_worker(task_id, user_id=None, slot_type=None):
+    """LLM 辅助生成固定用例 worker。"""
+    if user_id is None:
+        user_id = 1
+    task = _fixed_gen_tasks.get(task_id) or _load_async_task(task_id, user_id=user_id)
+    if not task:
+        return
+    try:
+        task["status"] = "running"
+        task["user_id"] = user_id
+        _save_async_task(task_id, "fixed_gen", task, user_id=user_id)
+
+        domain = task.get("domain", "poem")
+        count = int(task.get("count", 5))
+        difficulty = task.get("difficulty", "medium")
+        sub_domain = task.get("sub_domain", "")
+        target_api = task.get("target_api", "pipi")
+
+        import pipi_api
+        llm_config = get_llm_config()
+        cfg = llm_config.get("fixed_case_gen") or llm_config.get("case_gen") or {}
+
+        cases = pipi_api.generate_fixed_cases(
+            domain=domain, count=count, difficulty=difficulty,
+            sub_domain=sub_domain, target_api=target_api, **cfg,
+        )
+        if not cases:
+            task["status"] = "failed"
+            task["error_message"] = "LLM 返回空结果"
+            _save_async_task(task_id, "fixed_gen", task, user_id=user_id)
+            return
+
+        conn = get_db_connection()
+        created = []
+        for idx, case in enumerate(cases):
+            try:
+                # 强制覆盖 case_id 前缀，避免 LLM 给错
+                case["case_id"] = _get_unique_fixed_case_id(conn, domain)
+                case["domain"] = domain
+                if sub_domain and not case.get("sub_domain"):
+                    case["sub_domain"] = sub_domain
+                rid = _save_fixed_case(conn, case, user_id)
+                created.append(rid)
+                task["progress"]["done"] = idx + 1
+                task["created_case_ids"] = created
+                _fixed_gen_tasks[task_id] = task
+                _save_async_task(task_id, "fixed_gen", task, user_id=user_id)
+            except Exception as e:
+                task.setdefault("errors", []).append({"case_id": case.get("case_id", ""), "error": str(e)})
+        conn.close()
+
+        task["status"] = "completed"
+        task["cases_created"] = len(created)
+        _fixed_gen_tasks[task_id] = task
+        _save_async_task(task_id, "fixed_gen", task, user_id=user_id)
+        print(f"[FIXED GEN] {task_id} completed, +{len(created)} cases", flush=True)
+    except Exception as e:
+        import traceback
+        print(f"[FIXED GEN FATAL] {task_id}: {e}\n{traceback.format_exc()}", flush=True)
+        task["status"] = "failed"
+        task["error_message"] = str(e)
+        _fixed_gen_tasks[task_id] = task
+        _save_async_task(task_id, "fixed_gen", task, user_id=user_id)
+    finally:
+        if slot_type:
+            try:
+                _release_slot(slot_type)
+            except Exception as e:
+                print(f"[SLOT RELEASE] {slot_type} failed: {e}", flush=True)
+
+
+@app.route("/api/fixed_tasks", methods=["POST"])
+def create_fixed_task():
+    """创建固定用例测试任务。body: {name, device_id, case_ids, target_api?}"""
+    import uuid
+    data = request.get_json() or {}
+    uid = _current_uid()
+    device_id = (data.get("device_id") or "").strip()
+    case_ids = data.get("case_ids") or []
+    if not device_id or not case_ids:
+        return jsonify({"error": "device_id and case_ids required"}), 400
+    name = (data.get("name") or f"fixed-{device_id[:8]}").strip()
+    target_api = (data.get("target_api") or "pipi").strip()
+    task_id_str = uuid.uuid4().hex[:8]
+
+    conn = get_db_connection()
+    if USE_MYSQL:
+        execute_query(conn,
+            "INSERT INTO fixed_test_tasks (task_id, name, device_id, target_api, case_ids, status, progress_total, progress_done, user_id) "
+            "VALUES (%s, %s, %s, %s, %s, 'pending', %s, 0, %s)",
+            (task_id_str, name, device_id, target_api, json.dumps(case_ids), len(case_ids), uid))
+        row = execute_query(conn, "SELECT LAST_INSERT_ID() AS id", fetch_one=True)
+        new_id = int(row["id"])
+    else:
+        cur = execute_query(conn,
+            "INSERT INTO fixed_test_tasks (task_id, name, device_id, target_api, case_ids, status, progress_total, progress_done, user_id) "
+            "VALUES (?, ?, ?, ?, ?, 'pending', ?, 0, ?)",
+            (task_id_str, name, device_id, target_api, json.dumps(case_ids), len(case_ids), uid))
+        new_id = cur.lastrowid
+
+    # 批量预创建 fixed_test_results pending 行
+    for cid in case_ids:
+        execute_query(conn,
+            "INSERT INTO fixed_test_results (task_id, case_id, status, target_api, user_id) "
+            "VALUES (?, ?, 'pending', ?, ?)",
+            (new_id, cid, target_api, uid))
+    conn.commit()
+    conn.close()
+    return jsonify({"id": new_id, "task_id": task_id_str, "status": "pending"})
+
+
+@app.route("/api/fixed_tasks/<int:task_id>/execute", methods=["POST"])
+def execute_fixed_task(task_id):
+    uid = _current_uid()
+    conn = get_db_connection()
+    row = execute_query(conn, "SELECT * FROM fixed_test_tasks WHERE id = ? AND user_id = ?",
+                        (task_id, uid), fetch_one=True)
+    if not row:
+        conn.close()
+        return jsonify({"error": "task not found"}), 404
+    row = row_to_dict(row)
+    if row["status"] not in ("pending", "failed"):
+        conn.close()
+        return jsonify({"error": f"task status is {row['status']}, cannot execute"}), 400
+
+    slot_type = f"user:{uid}:fixedtask"
+    if not _acquire_slot(slot_type, 2, ttl_seconds=7200, wait=False, timeout=0):
+        conn.close()
+        return jsonify({"error": "您已有 2 个任务在执行，请等待完成"}), 429
+
+    if USE_MYSQL:
+        execute_query(conn, "UPDATE fixed_test_tasks SET status = 'running', started_at = NOW() WHERE id = %s AND user_id = %s",
+                     (task_id, uid))
+    else:
+        execute_query(conn, "UPDATE fixed_test_tasks SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?",
+                     (task_id, uid))
+    conn.commit()
+    conn.close()
+
+    t = threading.Thread(target=_execute_fixed_task_worker, args=(task_id, uid, slot_type), daemon=True)
+    t.start()
+    return jsonify({"status": "running", "task_id": task_id})
+
+
+@app.route("/api/fixed_tasks/<int:task_id>", methods=["GET"])
+def get_fixed_task_status(task_id):
+    uid = _current_uid()
+    conn = get_db_connection()
+    row = execute_query(conn, "SELECT * FROM fixed_test_tasks WHERE id = ? AND user_id = ?",
+                        (task_id, uid), fetch_one=True)
+    conn.close()
+    if not row:
+        return jsonify({"error": "task not found"}), 404
+    return jsonify(row_to_dict(row))
+
+
+def _execute_fixed_task_worker(task_id, user_id=None, slot_type=None):
+    """执行固定用例 worker：逐条调玩偶 API，写回 fixed_test_results。"""
+    if user_id is None:
+        user_id = 1
+    try:
+        conn = get_db_connection()
+        task = execute_query(conn, "SELECT * FROM fixed_test_tasks WHERE id = ? AND user_id = ?",
+                             (task_id, user_id), fetch_one=True)
+        if not task:
+            return
+        task = row_to_dict(task)
+        device_id = task.get("device_id", "")
+        target_api = task.get("target_api", "pipi")
+        case_ids = json.loads(task["case_ids"]) if task.get("case_ids") else []
+
+        results = execute_query(conn,
+            "SELECT r.id, r.case_id, c.case_id AS case_code, c.input_text, c.expected_output, c.title "
+            "FROM fixed_test_results r JOIN fixed_test_cases c ON r.case_id = c.id "
+            "WHERE r.task_id = ? AND r.user_id = ? ORDER BY c.id",
+            (task_id, user_id), fetch_all=True)
+        results = [row_to_dict(r) for r in results]
+        done = 0
+
+        for r in results:
+            case_code = r.get("case_code", "")
+            try:
+                rounds = _parse_input_rounds(r.get("input_text", ""))
+                if not rounds:
+                    execute_query(conn, "UPDATE fixed_test_results SET status = 'error' WHERE id = ?", (r["id"],))
+                    continue
+
+                import requests as req
+                import time as _time
+                all_replies = []
+                dialog_ids = []
+                ttfb_list = []
+                total_list = []
+                has_error = False
+
+                for i, msg in enumerate(rounds):
+                    _t0 = _time.time()
+                    headers = {"X-User-Id": str(user_id)} if user_id else {}
+                    if CLI_TOKEN:
+                        headers["X-CLI-Token"] = CLI_TOKEN
+                    resp = req.post(
+                        "http://127.0.0.1:8080/api/test/chat",
+                        json={"persona_id": device_id, "message": msg, "extract_facts": False},
+                        headers=headers, timeout=180,
+                    )
+                    _elapsed = _time.time() - _t0
+                    result = resp.json()
+                    if result.get("error"):
+                        has_error = True
+                        break
+                    reply = result.get("reply", "")
+                    all_replies.append(f"【R{i+1}】{_get_toy_persona_name(target_api)}：{reply}")
+                    if result.get("dialog_id"):
+                        dialog_ids.append(result["dialog_id"])
+                    if result.get("ttfb_ms") is not None:
+                        ttfb_list.append(result["ttfb_ms"])
+                    if result.get("total_ms") is not None:
+                        total_list.append(result["total_ms"])
+
+                if has_error or not all_replies:
+                    execute_query(conn, "UPDATE fixed_test_results SET status = 'error' WHERE id = ?", (r["id"],))
+                else:
+                    actual_output = "\n".join(all_replies)
+                    dialog_ids_json = json.dumps(dialog_ids, ensure_ascii=False) if dialog_ids else None
+                    ttfb_json = json.dumps(ttfb_list, ensure_ascii=False) if ttfb_list else None
+                    total_json = json.dumps(total_list, ensure_ascii=False) if total_list else None
+                    if USE_MYSQL:
+                        execute_query(conn,
+                            "UPDATE fixed_test_results SET actual_output = %s, dialog_ids = %s, ttfb_ms = %s, total_ms = %s, "
+                            "executed_at = NOW(), status = 'executed' WHERE id = %s",
+                            (actual_output, dialog_ids_json, ttfb_json, total_json, r["id"]))
+                    else:
+                        execute_query(conn,
+                            "UPDATE fixed_test_results SET actual_output = ?, dialog_ids = ?, ttfb_ms = ?, total_ms = ?, "
+                            "executed_at = CURRENT_TIMESTAMP, status = 'executed' WHERE id = ?",
+                            (actual_output, dialog_ids_json, ttfb_json, total_json, r["id"]))
+                    done += 1
+                    print(f"[FIXED-EXEC] {case_code} done, replies={len(all_replies)}", flush=True)
+            except Exception as e:
+                print(f"[FIXED-EXEC ERROR] {case_code}: {e}", flush=True)
+                execute_query(conn, "UPDATE fixed_test_results SET status = 'error' WHERE id = ?", (r["id"],))
+
+            execute_query(conn, "UPDATE fixed_test_tasks SET progress_done = ? WHERE id = ? AND user_id = ?",
+                         (done, task_id, user_id))
+            conn.commit()
+
+        if USE_MYSQL:
+            execute_query(conn, "UPDATE fixed_test_tasks SET status = 'executed', completed_at = NOW(), progress_done = ? WHERE id = ? AND user_id = ?",
+                         (done, task_id, user_id))
+        else:
+            execute_query(conn, "UPDATE fixed_test_tasks SET status = 'executed', completed_at = CURRENT_TIMESTAMP, progress_done = ? WHERE id = ? AND user_id = ?",
+                         (done, task_id, user_id))
+        conn.commit()
+        conn.close()
+        print(f"[FIXED-EXEC] task {task_id} completed (executed={done})", flush=True)
+    except Exception as e:
+        import traceback
+        print(f"[FIXED-EXEC FATAL] {task_id}: {e}\n{traceback.format_exc()}", flush=True)
+        try:
+            conn = get_db_connection()
+            execute_query(conn, "UPDATE fixed_test_tasks SET status = 'failed', error_message = ? WHERE id = ? AND user_id = ?",
+                         (str(e), task_id, user_id))
+            conn.commit()
+            conn.close()
+        except:
+            pass
+    finally:
+        if slot_type:
+            try:
+                _release_slot(slot_type)
+            except Exception as e:
+                print(f"[SLOT RELEASE] {slot_type} failed: {e}", flush=True)
+
+
+@app.route("/api/fixed_tasks/<int:task_id>/evaluate", methods=["POST"])
+def evaluate_fixed_task(task_id):
+    uid = _current_uid()
+    conn = get_db_connection()
+    row = execute_query(conn, "SELECT * FROM fixed_test_tasks WHERE id = ? AND user_id = ?",
+                        (task_id, uid), fetch_one=True)
+    if not row:
+        conn.close()
+        return jsonify({"error": "task not found"}), 404
+    row = row_to_dict(row)
+    if row["status"] != "executed":
+        conn.close()
+        return jsonify({"error": f"task status is {row['status']}, need executed"}), 400
+
+    slot_type = f"user:{uid}:fixedeval"
+    if not _acquire_slot(slot_type, 2, ttl_seconds=7200, wait=False, timeout=0):
+        conn.close()
+        return jsonify({"error": "您已有 2 个任务在执行，请等待完成"}), 429
+
+    execute_query(conn, "UPDATE fixed_test_tasks SET status = 'evaluating' WHERE id = ? AND user_id = ?",
+                 (task_id, uid))
+    conn.commit()
+    conn.close()
+
+    t = threading.Thread(target=_evaluate_fixed_task_worker, args=(task_id, uid, slot_type), daemon=True)
+    t.start()
+    return jsonify({"status": "evaluating", "task_id": task_id})
+
+
+def _evaluate_fixed_task_worker(task_id, user_id=None, slot_type=None):
+    """评测固定用例 worker。复用 _eval_case_core，target_table='fixed_test_results'。"""
+    if user_id is None:
+        user_id = 1
+    try:
+        conn = get_db_connection()
+        results = execute_query(conn,
+            "SELECT r.id, r.actual_output, c.case_id AS case_code, c.title, c.input_text, c.expected_output, "
+            "c.evaluation_points, c.failure_flags, c.domain, r.target_api "
+            "FROM fixed_test_results r JOIN fixed_test_cases c ON r.case_id = c.id "
+            "WHERE r.task_id = ? AND r.status = 'executed' AND r.user_id = ? ORDER BY c.id",
+            (task_id, user_id), fetch_all=True)
+        results = [row_to_dict(r) for r in results]
+
+        # G1 维度信息（从 pipi.json 读，不走 test_dimensions 表，避免依赖 DB seed）
+        from interface_profiles import load_profile
+        profile = load_profile("pipi")
+        g1_dim = next((d for d in profile.get("dimensions", []) if d.get("code") == "G1"), {})
+        dim_info = {
+            "dimension_code": "G1",
+            "dimension_name": g1_dim.get("name", "垂类知识"),
+            "test_points": g1_dim.get("test_points", ""),
+        }
+
+        chat_corrections = _load_recent_corrections(eval_type="chat", limit=10)
+        # 固定用例纠正走 fixed_case 类型，但默认表内只存 test_case 类型，先兼容空列表
+        fixed_corrections = _load_recent_corrections(eval_type="fixed_case", dimension_code="G1", limit=10)
+        combined = (chat_corrections or []) + (fixed_corrections or [])
+
+        done = 0
+        passed = 0
+        failed = 0
+        for r in results:
+            # 注入 dimension_code 让 _eval_case_core 能加载对应硬规则
+            r["dimension_code"] = "G1"
+            r["test_point"] = r.get("domain", "")  # 占位，eval 不严格依赖
+            try:
+                outcome = _eval_case_core(
+                    r, conn, chat_corrections=combined,
+                    user_facts=[], retry_on_error=True,
+                    target_table="fixed_test_results",
+                )
+                if outcome.get("success"):
+                    done += 1
+                    score = outcome.get("score")
+                    if score is not None and float(score) >= 6:
+                        passed += 1
+                    else:
+                        failed += 1
+                else:
+                    failed += 1
+            except Exception as e:
+                print(f"[FIXED-EVAL ERROR] {r.get('case_code', '')}: {e}", flush=True)
+                failed += 1
+            execute_query(conn, "UPDATE fixed_test_tasks SET progress_done = ? WHERE id = ? AND user_id = ?",
+                         (done, task_id, user_id))
+            conn.commit()
+
+        if USE_MYSQL:
+            execute_query(conn, "UPDATE fixed_test_tasks SET status = 'evaluated', completed_at = NOW(), progress_done = ? WHERE id = ? AND user_id = ?",
+                         (done, task_id, user_id))
+        else:
+            execute_query(conn, "UPDATE fixed_test_tasks SET status = 'evaluated', completed_at = CURRENT_TIMESTAMP, progress_done = ? WHERE id = ? AND user_id = ?",
+                         (done, task_id, user_id))
+        conn.commit()
+        conn.close()
+        print(f"[FIXED-EVAL] task {task_id} done (passed={passed}, failed={failed})", flush=True)
+    except Exception as e:
+        import traceback
+        print(f"[FIXED-EVAL FATAL] {task_id}: {e}\n{traceback.format_exc()}", flush=True)
+        try:
+            conn = get_db_connection()
+            execute_query(conn, "UPDATE fixed_test_tasks SET status = 'failed', error_message = ? WHERE id = ? AND user_id = ?",
+                         (str(e), task_id, user_id))
+            conn.commit()
+            conn.close()
+        except:
+            pass
+    finally:
+        if slot_type:
+            try:
+                _release_slot(slot_type)
+            except Exception as e:
+                print(f"[SLOT RELEASE] {slot_type} failed: {e}", flush=True)
+
+
+@app.route("/api/fixed_tasks/<int:task_id>/results", methods=["GET"])
+def list_fixed_results(task_id):
+    uid = _current_uid()
+    conn = get_db_connection()
+    rows = execute_query(conn,
+        "SELECT r.*, c.case_id AS case_code, c.title, c.domain, c.sub_domain, c.input_text, c.expected_output, "
+        "c.evaluation_points, c.failure_flags "
+        "FROM fixed_test_results r JOIN fixed_test_cases c ON r.case_id = c.id "
+        "WHERE r.task_id = ? AND r.user_id = ? ORDER BY c.id",
+        (task_id, uid), fetch_all=True)
+    conn.close()
+    return jsonify([row_to_dict(r) for r in rows])
+
+
+@app.route("/api/fixed_results/<int:result_id>/correct", methods=["POST"])
+def correct_fixed_result(result_id):
+    """人工纠正固定用例评测分数。body: {human_score, human_note}"""
+    data = request.get_json() or {}
+    human_score = data.get("human_score")
+    human_note = (data.get("human_note") or "").strip()
+    if human_score is None or int(human_score) < 1 or int(human_score) > 10:
+        return jsonify({"error": "human_score (1-10) required"}), 400
+    human_score = int(human_score)
+    uid = _current_uid()
+
+    conn = get_db_connection()
+    row = execute_query(conn, "SELECT * FROM fixed_test_results WHERE id = ? AND user_id = ?",
+                       (result_id, uid), fetch_one=True)
+    if not row:
+        conn.close()
+        return jsonify({"error": "result not found"}), 404
+    row = row_to_dict(row)
+
+    execute_query(conn, "UPDATE fixed_test_results SET human_score = ?, human_note = ? WHERE id = ? AND user_id = ?",
+                 (human_score, human_note, result_id, uid))
+    conn.commit()
+
+    # 同步写入 eval_corrections（few-shot 注入用），eval_type='fixed_case'
+    if human_note:
+        _save_correction(
+            conn, eval_type="fixed_case", ref_id=str(result_id),
+            dimension_code="G1",
+            user_input=row.get("input_text") or "",
+            ai_reply=row.get("actual_output") or "",
+            auto_score=float(row.get("score") or 0),
+            human_score=human_score, correction_reason=human_note,
+        )
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/fixed_results/stats", methods=["GET"])
+def fixed_results_stats():
+    """按 domain 聚合统计固定用例评测结果。"""
+    uid = _current_uid()
+    domain = request.args.get("domain", "")
+    conn = get_db_connection()
+    where = "r.user_id = ?"
+    params = [uid]
+    if domain:
+        where += " AND c.domain = ?"
+        params.append(domain)
+    rows = execute_query(conn,
+        f"SELECT c.domain, c.sub_domain, COUNT(*) AS total, "
+        f"AVG(COALESCE(r.human_score, r.score)) AS avg_score, "
+        f"SUM(CASE WHEN COALESCE(r.human_score, r.score) >= 6 THEN 1 ELSE 0 END) AS passed, "
+        f"SUM(CASE WHEN COALESCE(r.human_score, r.score) < 6 THEN 1 ELSE 0 END) AS failed "
+        f"FROM fixed_test_results r JOIN fixed_test_cases c ON r.case_id = c.id "
+        f"WHERE r.status = 'evaluated' AND {where} "
+        f"GROUP BY c.domain, c.sub_domain ORDER BY c.domain, c.sub_domain",
+        params, fetch_all=True)
+    conn.close()
+    return jsonify([row_to_dict(r) for r in rows])
 
 
 # ─── 红队测试模块（完全独立：生成/执行/裁判，只攻 5 个 P0 维度）─────────────────

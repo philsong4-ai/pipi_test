@@ -131,6 +131,7 @@ body{background:#f5f5f7;color:#1d1d1f}
     <a class="nav-item" data-tab="eval-stats">评测统计</a>
     <div class="nav-divider"></div>
     <a class="nav-item" data-tab="test-generate">用例生成</a>
+    <a class="nav-item" data-tab="fixed-cases">固定用例</a>
     <a class="nav-item" data-tab="test-manage">执行与评测</a>
     <a class="nav-item" data-tab="test-report">测试报告</a>
     <a class="nav-item" data-tab="scheduled">预约任务</a>
@@ -340,6 +341,50 @@ body{background:#f5f5f7;color:#1d1d1f}
         <div style="color:#aeaeb2">加载中...</div>
       </div>
     </div>
+  </div>
+</div>
+<!-- 固定用例（垂类知识一问一答） -->
+<div id="panel-fixed-cases" class="panel">
+  <div class="card">
+    <h3 style="font-size:16px;margin-bottom:8px">固定用例（垂类知识）</h3>
+    <p style="color:#86868b;font-size:13px;margin:0 0 16px 0">预先人工编写、独立维护、可重复执行的垂类知识一问一答用例（背古诗 / 数学问题 / 讲故事 / 常识问答）。复用评测链路，走虚拟维度 G1。</p>
+
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+      <label style="font-size:13px;color:#86868b">域:</label>
+      <select id="fixed-filter-domain" onchange="loadFixedCases()" style="padding:6px 10px;border:1px solid #d2d2d7;border-radius:6px;font-size:13px">
+        <option value="">全部</option>
+        <option value="poem">古诗</option>
+        <option value="math">数学</option>
+        <option value="story">故事</option>
+        <option value="trivia">常识</option>
+      </select>
+      <input id="fixed-filter-keyword" placeholder="关键词搜索" onkeyup="if(event.key==='Enter')loadFixedCases()" style="padding:6px 10px;border:1px solid #d2d2d7;border-radius:6px;font-size:13px;min-width:180px">
+      <button class="btn" onclick="loadFixedCases()" style="background:#fafafa">刷新</button>
+      <button class="btn btn-primary" onclick="showFixedCaseModal()">+ 新建</button>
+      <button class="btn" onclick="document.getElementById('fixed-batch-input').click()" style="background:#fafafa">批量导入</button>
+      <input type="file" id="fixed-batch-input" accept=".json" style="display:none" onchange="batchImportFixedCases(this)">
+      <button class="btn" onclick="showFixedGenModal()" style="background:#34c759;border-color:#34c759;color:#fff">LLM 生成</button>
+    </div>
+
+    <div id="fixed-cases-list" style="max-height:480px;overflow-y:auto;border:1px solid #d2d2d7;border-radius:6px">
+      <div style="color:#aeaeb2;text-align:center;padding:40px;font-size:13px">加载中...</div>
+    </div>
+    <div id="fixed-cases-pagination" style="margin-top:8px;display:flex;justify-content:space-between;align-items:center;font-size:13px;color:#86868b"></div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <h3 style="font-size:16px;margin-bottom:8px">固定用例任务</h3>
+    <p style="color:#86868b;font-size:13px;margin:0 0 12px 0">选好上面的用例（复选框），输入 device_id（=persona_id），一键执行 + 评测。</p>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+      <label style="font-size:13px;color:#86868b">device_id:</label>
+      <input id="fixed-task-device" placeholder="persona_id（如 auto_xxx）" style="padding:6px 10px;border:1px solid #d2d2d7;border-radius:6px;font-size:13px;min-width:240px">
+      <button class="btn btn-primary" onclick="startFixedTask()" style="background:#0071e3;border-color:#0071e3">① 创建任务</button>
+      <button class="btn btn-primary" onclick="executeFixedTask()" style="background:#ff9500;border-color:#ff9500">② 执行</button>
+      <button class="btn btn-primary" onclick="evaluateFixedTask()" style="background:#af52c4;border-color:#af52c4">③ 评测</button>
+      <button class="btn" onclick="loadFixedResults()" style="background:#fafafa">查看结果</button>
+    </div>
+    <div id="fixed-task-status" style="font-size:12px;color:#86868b;margin-bottom:12px;padding:8px 12px;background:#fafafa;border-radius:6px;min-height:20px">先创建任务</div>
+    <div id="fixed-results-list" style="max-height:500px;overflow-y:auto;border:1px solid #d2d2d7;border-radius:6px;display:none"></div>
   </div>
 </div>
 <!-- 用例执行页面 -->
@@ -844,7 +889,10 @@ function switchTab(tabName) {
 }
 
 document.querySelectorAll('.nav-item').forEach(function(btn) {
-  btn.addEventListener('click', function() { switchTab(btn.dataset.tab); });
+  btn.addEventListener('click', function() {
+    switchTab(btn.dataset.tab);
+    if (btn.dataset.tab === 'fixed-cases') loadFixedCases();
+  });
 });
 
 function api(path, method, body) {
@@ -3067,6 +3115,325 @@ function loadTestPersonas() {
       });
     });
   loadEndpointOptions('gen-endpoint', 'pipi');
+}
+
+// ─── 固定用例（垂类知识） ─────────────────────────────
+var fixedCasePage = 1;
+var fixedCurrentTaskId = null;
+var fixedGenPollTimer = null;
+
+function _fixedTruncate(s, n) { s = s || ''; return s.length > n ? s.slice(0, n) + '…' : s; }
+function _fixedToast(msg) { alert(msg); }
+function _fixedOpenModal(html, width) {
+  var box = document.getElementById('modal-box');
+  box.style.width = width || '600px';
+  box.innerHTML = html;
+  document.getElementById('modal-bg').style.display = 'flex';
+}
+
+
+function loadFixedCases() {
+  var domain = document.getElementById('fixed-filter-domain') ? document.getElementById('fixed-filter-domain').value : '';
+  var keyword = document.getElementById('fixed-filter-keyword') ? document.getElementById('fixed-filter-keyword').value : '';
+  var url = '/api/fixed_cases?page=' + fixedCasePage + '&limit=20';
+  if (domain) url += '&domain=' + encodeURIComponent(domain);
+  if (keyword) url += '&keyword=' + encodeURIComponent(keyword);
+  fetch(url)
+    .then(r => r.json())
+    .then(data => {
+      var list = document.getElementById('fixed-cases-list');
+      var items = data.items || [];
+      if (items.length === 0) {
+        list.innerHTML = '<div style="color:#aeaeb2;font-size:13px;padding:20px;text-align:center">暂无固定用例，点「+ 新建」或「LLM 生成」</div>';
+      } else {
+        list.innerHTML = items.map(function(c) {
+          var scoreBadge = c.score != null ? '<span style="color:#0071e3;margin-left:6px">分数 ' + c.score + '</span>' : '';
+          return '<div style="padding:10px 12px;border-bottom:1px solid #f0f0f2;font-size:13px">' +
+            '<div style="display:flex;justify-content:space-between;align-items:start">' +
+              '<div style="flex:1">' +
+                '<label style="display:inline-flex;align-items:start;gap:6px;cursor:pointer">' +
+                  '<input type="checkbox" class="fixed-case-checkbox" value="' + c.id + '" style="margin-top:3px">' +
+                  '<div>' +
+                    '<div style="font-weight:500">' + escapeHtml(c.case_id) + ' · ' + escapeHtml(c.title) + ' ' +
+                      '<span style="color:#86868b;font-size:11px">[' + c.domain + (c.sub_domain ? '/' + escapeHtml(c.sub_domain) : '') + ']</span>' +
+                      '<span style="color:#86868b;font-size:11px;margin-left:4px">' + (c.priority || 'P1') + '</span>' +
+                      scoreBadge +
+                    '</div>' +
+                    '<div style="color:#86868b;font-size:12px;margin-top:4px">问：' + escapeHtml(_fixedTruncate(c.input_text, 80)) + '</div>' +
+                    '<div style="color:#86868b;font-size:12px">答：' + escapeHtml(_fixedTruncate(c.expected_output, 80)) + '</div>' +
+                  '</div>' +
+                '</label>' +
+              '</div>' +
+              '<div>' +
+                '<button class="btn btn-sm" onclick="showFixedCaseModal(' + c.id + ')" style="background:#fafafa;margin-right:4px">编辑</button>' +
+                '<button class="btn btn-sm" onclick="deleteFixedCase(' + c.id + ')" style="background:#fafafa;color:#ff3b30">删</button>' +
+              '</div>' +
+            '</div>' +
+          '</div>';
+        }).join('');
+      }
+      var pag = document.getElementById('fixed-cases-pagination');
+      pag.innerHTML = '<div>共 ' + data.total + ' 条</div><div>' +
+        '<button class="btn btn-sm" onclick="fixedCasePage--;loadFixedCases()" ' + (fixedCasePage<=1?'disabled':'') + ' style="background:#fafafa">上一页</button> ' +
+        '<span>第 ' + data.page + ' 页</span> ' +
+        '<button class="btn btn-sm" onclick="fixedCasePage++;loadFixedCases()" ' + (items.length<20?'disabled':'') + ' style="background:#fafafa">下一页</button>' +
+      '</div>';
+    })
+    .catch(err => _fixedToast('加载失败: ' + err));
+}
+
+function showFixedCaseModal(id) {
+  var isNew = !id;
+  var data = isNew ? {domain:'poem', priority:'P1', input_text:'【R1】用户：', expected_output:''} : null;
+  var loadPromise = isNew ? Promise.resolve(null) : fetch('/api/fixed_cases/' + id).then(r=>r.json());
+  loadPromise.then(c => {
+    if (c) data = c;
+    var html = '<div style="padding:16px">' +
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">' +
+        '<div><label style="font-size:12px;color:#86868b">domain</label><select id="fc-domain" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px">' +
+          ['poem','math','story','trivia'].map(d=>'<option value="'+d+'"'+(data.domain===d?' selected':'')+'>'+d+'</option>').join('') +
+        '</select></div>' +
+        '<div><label style="font-size:12px;color:#86868b">sub_domain</label><input id="fc-sub" value="' + escapeHtml(data.sub_domain||'') + '" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px"></div>' +
+        '<div><label style="font-size:12px;color:#86868b">case_id（留空自动）</label><input id="fc-cid" value="' + escapeHtml(data.case_id||'') + '" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px"></div>' +
+        '<div><label style="font-size:12px;color:#86868b">priority</label><select id="fc-priority" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px">' +
+          ['P0','P1','P2'].map(p=>'<option value="'+p+'"'+(data.priority===p?' selected':'')+'>'+p+'</option>').join('') +
+        '</select></div>' +
+      '</div>' +
+      '<div style="margin-bottom:8px"><label style="font-size:12px;color:#86868b">title</label><input id="fc-title" value="' + escapeHtml(data.title||'') + '" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px"></div>' +
+      '<div style="margin-bottom:8px"><label style="font-size:12px;color:#86868b">input_text（多轮用 【R1】用户：xxx 格式）</label><textarea id="fc-input" rows="3" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px;font-family:monospace">' + escapeHtml(data.input_text||'') + '</textarea></div>' +
+      '<div style="margin-bottom:8px"><label style="font-size:12px;color:#86868b">expected_output（标准答案）</label><textarea id="fc-expected" rows="3" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px;font-family:monospace">' + escapeHtml(data.expected_output||'') + '</textarea></div>' +
+      '<div style="margin-bottom:8px"><label style="font-size:12px;color:#86868b">evaluation_points（空格分隔，每条≤10字）</label><input id="fc-eval" value="' + escapeHtml(data.evaluation_points||'') + '" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px"></div>' +
+      '<div style="margin-bottom:12px"><label style="font-size:12px;color:#86868b">failure_flags（逗号分隔，每条≤6字）</label><input id="fc-flags" value="' + escapeHtml(data.failure_flags||'') + '" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px"></div>' +
+      '<div style="display:flex;gap:8px;justify-content:flex-end">' +
+        '<button class="btn" onclick="closeModal()" style="background:#fafafa">取消</button>' +
+        '<button class="btn btn-primary" onclick="saveFixedCase(' + (id||'null') + ')">保存</button>' +
+      '</div>' +
+    '</div>';
+    _fixedOpenModal(html, '600px');
+  });
+}
+
+function saveFixedCase(id) {
+  var payload = {
+    case_id: document.getElementById('fc-cid').value.trim(),
+    domain: document.getElementById('fc-domain').value,
+    sub_domain: document.getElementById('fc-sub').value.trim(),
+    title: document.getElementById('fc-title').value.trim(),
+    input_text: document.getElementById('fc-input').value,
+    expected_output: document.getElementById('fc-expected').value,
+    evaluation_points: document.getElementById('fc-eval').value.trim(),
+    failure_flags: document.getElementById('fc-flags').value.trim(),
+    priority: document.getElementById('fc-priority').value,
+  };
+  if (!payload.title || !payload.input_text || !payload.expected_output) {
+    _fixedToast('title / input_text / expected_output 必填'); return;
+  }
+  var method = id ? 'PUT' : 'POST';
+  var url = id ? '/api/fixed_cases/' + id : '/api/fixed_cases';
+  fetch(url, {method: method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload)})
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) { _fixedToast(d.error); return; }
+      closeModal(); loadFixedCases(); _fixedToast('已保存');
+    })
+    .catch(e => _fixedToast('保存失败: ' + e));
+}
+
+function deleteFixedCase(id) {
+  if (!confirm('删除该固定用例？')) return;
+  fetch('/api/fixed_cases/' + id, {method: 'DELETE'})
+    .then(r=>r.json())
+    .then(d=>{ if(d.error) _fixedToast(d.error); else { loadFixedCases(); _fixedToast('已删除'); } })
+    .catch(e=>_fixedToast('删除失败: '+e));
+}
+
+function batchImportFixedCases(input) {
+  var file = input.files[0];
+  if (!file) return;
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      var items = JSON.parse(e.target.result);
+      if (!Array.isArray(items)) { _fixedToast('文件须为 JSON 数组'); return; }
+      fetch('/api/fixed_cases/batch', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(items)})
+        .then(r=>r.json())
+        .then(d=>{
+          if (d.error) { _fixedToast(d.error); return; }
+          _fixedToast('已导入 ' + d.created + ' 条；失败 ' + (d.errors||[]).length + ' 条');
+          loadFixedCases();
+        });
+    } catch(err) { _fixedToast('JSON 解析失败: ' + err); }
+  };
+  reader.readAsText(file);
+  input.value = '';
+}
+
+function showFixedGenModal() {
+  var html = '<div style="padding:16px">' +
+    '<div style="margin-bottom:8px"><label style="font-size:12px;color:#86868b">domain</label><select id="fcg-domain" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px">' +
+      ['poem','math','story','trivia'].map(d=>'<option value="'+d+'">'+d+'</option>').join('') +
+    '</select></div>' +
+    '<div style="margin-bottom:8px"><label style="font-size:12px;color:#86868b">sub_domain（可选）</label><input id="fcg-sub" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px"></div>' +
+    '<div style="margin-bottom:8px"><label style="font-size:12px;color:#86868b">count（1-20）</label><input id="fcg-count" type="number" value="5" min="1" max="20" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px"></div>' +
+    '<div style="margin-bottom:12px"><label style="font-size:12px;color:#86868b">difficulty</label><select id="fcg-diff" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px">' +
+      ['easy','medium','hard'].map(d=>'<option value="'+d+'"'+(d==='medium'?' selected':'')+'>'+d+'</option>').join('') +
+    '</select></div>' +
+    '<div style="display:flex;gap:8px;justify-content:flex-end">' +
+      '<button class="btn" onclick="closeModal()" style="background:#fafafa">取消</button>' +
+      '<button class="btn btn-primary" onclick="startFixedGen()">开始生成</button>' +
+    '</div>' +
+  '</div>';
+  _fixedOpenModal(html, '480px');
+}
+
+function startFixedGen() {
+  var payload = {
+    domain: document.getElementById('fcg-domain').value,
+    sub_domain: document.getElementById('fcg-sub').value.trim(),
+    count: parseInt(document.getElementById('fcg-count').value || '5'),
+    difficulty: document.getElementById('fcg-diff').value,
+  };
+  fetch('/api/fixed_cases/generate', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)})
+    .then(r=>r.json())
+    .then(d=>{
+      if (d.error) { _fixedToast(d.error); return; }
+      closeModal();
+      _fixedToast('已开始生成，task_id=' + d.task_id);
+      pollFixedGenStatus(d.task_id);
+    });
+}
+
+function pollFixedGenStatus(taskId) {
+  if (fixedGenPollTimer) clearInterval(fixedGenPollTimer);
+  var update = function() {
+    fetch('/api/fixed_cases/generate/' + taskId).then(r=>r.json()).then(t=>{
+      var statusEl = document.getElementById('fixed-task-status');
+      if (!statusEl) { clearInterval(fixedGenPollTimer); return; }
+      var done = (t.progress && t.progress.done) || 0;
+      var total = (t.progress && t.progress.total) || 0;
+      statusEl.innerHTML = '生成中 ' + done + '/' + total + ' (status=' + t.status + ')';
+      if (t.status === 'completed' || t.status === 'failed') {
+        clearInterval(fixedGenPollTimer); fixedGenPollTimer = null;
+        if (t.status === 'completed') { loadFixedCases(); _fixedToast('生成完成，新增 ' + (t.cases_created||0) + ' 条'); }
+        else _fixedToast('生成失败: ' + (t.error_message||''));
+      }
+    }).catch(()=>{});
+  };
+  update();
+  fixedGenPollTimer = setInterval(update, 2000);
+}
+
+function toggleAllFixedCases(checked) {
+  document.querySelectorAll('.fixed-case-checkbox').forEach(cb => cb.checked = checked);
+}
+
+function getSelectedFixedCases() {
+  return Array.from(document.querySelectorAll('.fixed-case-checkbox:checked')).map(cb => parseInt(cb.value));
+}
+
+function startFixedTask() {
+  var caseIds = getSelectedFixedCases();
+  var deviceId = document.getElementById('fixed-task-device').value.trim();
+  if (!caseIds.length) { _fixedToast('请先勾选用例'); return; }
+  if (!deviceId) { _fixedToast('请输入 device_id'); return; }
+  fetch('/api/fixed_tasks', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({device_id: deviceId, case_ids: caseIds})})
+    .then(r=>r.json())
+    .then(d=>{
+      if (d.error) { _fixedToast(d.error); return; }
+      fixedCurrentTaskId = d.id;
+      document.getElementById('fixed-task-status').innerHTML = '已创建任务 #' + d.id + '，可点执行';
+      _fixedToast('已创建任务');
+    });
+}
+
+function executeFixedTask() {
+  if (!fixedCurrentTaskId) { _fixedToast('请先创建任务'); return; }
+  fetch('/api/fixed_tasks/' + fixedCurrentTaskId + '/execute', {method:'POST'})
+    .then(r=>r.json())
+    .then(d=>{
+      if (d.error) { _fixedToast(d.error); return; }
+      pollFixedTaskStatus();
+    });
+}
+
+function evaluateFixedTask() {
+  if (!fixedCurrentTaskId) { _fixedToast('请先创建并执行任务'); return; }
+  fetch('/api/fixed_tasks/' + fixedCurrentTaskId + '/evaluate', {method:'POST'})
+    .then(r=>r.json())
+    .then(d=>{
+      if (d.error) { _fixedToast(d.error); return; }
+      pollFixedTaskStatus();
+    });
+}
+
+var _fixedTaskPollTimer = null;
+function pollFixedTaskStatus() {
+  if (_fixedTaskPollTimer) clearInterval(_fixedTaskPollTimer);
+  var update = function() {
+    if (!fixedCurrentTaskId) { clearInterval(_fixedTaskPollTimer); return; }
+    fetch('/api/fixed_tasks/' + fixedCurrentTaskId).then(r=>r.json()).then(t=>{
+      var el = document.getElementById('fixed-task-status');
+      if (!el) { clearInterval(_fixedTaskPollTimer); return; }
+      el.innerHTML = 'status=' + t.status + ' progress=' + t.progress_done + '/' + t.progress_total +
+        (t.error_message ? ' <span style="color:#ff3b30">' + escapeHtml(t.error_message) + '</span>' : '');
+      if (['executed','evaluated','failed'].includes(t.status)) {
+        clearInterval(_fixedTaskPollTimer); _fixedTaskPollTimer = null;
+        if (t.status === 'executed' || t.status === 'evaluated') loadFixedResults();
+      }
+    });
+  };
+  update();
+  _fixedTaskPollTimer = setInterval(update, 2000);
+}
+
+function loadFixedResults() {
+  if (!fixedCurrentTaskId) { _fixedToast('请先创建任务'); return; }
+  fetch('/api/fixed_tasks/' + fixedCurrentTaskId + '/results')
+    .then(r=>r.json())
+    .then(items=>{
+      var list = document.getElementById('fixed-results-list');
+      list.style.display = 'block';
+      if (!items.length) { list.innerHTML = '<div style="color:#aeaeb2;padding:20px;text-align:center">无结果</div>'; return; }
+      list.innerHTML = items.map(function(r) {
+        var score = r.human_score != null ? r.human_score : (r.score != null ? parseFloat(r.score).toFixed(1) : '-');
+        var scoreColor = (score === '-' || score === null) ? '#86868b' : (parseFloat(score) >= 6 ? '#34c759' : '#ff3b30');
+        return '<div style="padding:10px 12px;border-bottom:1px solid #f0f0f2;font-size:13px">' +
+          '<div style="display:flex;justify-content:space-between">' +
+            '<div style="flex:1">' +
+              '<div style="font-weight:500">' + escapeHtml(r.case_code) + ' · ' + escapeHtml(r.title||'') + '</div>' +
+              '<div style="color:#86868b;font-size:12px">问：' + escapeHtml(_fixedTruncate(r.input_text||'', 80)) + '</div>' +
+              '<div style="color:#86868b;font-size:12px">玩偶答：' + escapeHtml(_fixedTruncate(r.actual_output||'', 100)) + '</div>' +
+              '<div style="color:#86868b;font-size:12px">标准：' + escapeHtml(_fixedTruncate(r.expected_output||'', 80)) + '</div>' +
+              (r.deduction_reason ? '<div style="color:#ff9500;font-size:12px">扣分：' + escapeHtml(_fixedTruncate(r.deduction_reason, 120)) + '</div>' : '') +
+            '</div>' +
+            '<div style="text-align:right">' +
+              '<div style="font-size:18px;font-weight:600;color:' + scoreColor + '">' + score + '</div>' +
+              (r.status === 'evaluated' ? '<button class="btn btn-sm" onclick="correctFixedResult(' + r.id + ')" style="background:#fafafa;margin-top:4px">人工纠正</button>' : '') +
+            '</div>' +
+          '</div>' +
+        '</div>';
+      }).join('');
+    });
+}
+
+function correctFixedResult(id) {
+  var score = prompt('人工分数（1-10）：', '8');
+  if (score === null) return;
+  var note = prompt('纠正说明（必填，留空则不写入纠正库）：', '');
+  fetch('/api/fixed_results/' + id + '/correct', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({human_score: parseInt(score), human_note: note || ''})})
+    .then(r=>r.json())
+    .then(d=>{
+      if (d.error) _fixedToast(d.error);
+      else { _fixedToast('已纠正'); loadFixedResults(); }
+    });
+}
+
+function loadFixedCasesIfNeeded() {
+  if (document.getElementById('panel-fixed-cases') && document.getElementById('panel-fixed-cases').classList.contains('active')) {
+    loadFixedCases();
+  }
 }
 
 function loadTestCases() {

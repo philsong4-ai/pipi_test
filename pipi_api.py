@@ -1104,6 +1104,96 @@ def generate_test_cases(
                 return []
 
 
+def generate_fixed_cases(
+    domain: str,
+    count: int = 5,
+    difficulty: str = "medium",
+    sub_domain: str = "",
+    model: str = None,
+    temperature: float = None,
+    max_tokens: int = None,
+    timeout: int = 180,
+    target_api: str = "pipi",
+) -> List[Dict]:
+    """
+    LLM 辅助批量生成固定垂类知识用例。
+
+    参数:
+        domain: 知识域英文小写（poem / math / story / trivia）
+        count: 生成数量
+        difficulty: 难度档位 easy / medium / hard
+        sub_domain: 可选子类限定（如"唐诗""寓言"）
+    返回:
+        用例列表 [{"case_id", "domain", "sub_domain", "title", "input_text", "expected_output", ...}]
+    """
+    from interface_profiles import load_profile
+    profile = load_profile(target_api)
+    fixed_prompts = profile.get("prompts", {}).get("generate_fixed_cases")
+    if not fixed_prompts:
+        fixed_prompts = load_profile("pipi")["prompts"]["generate_fixed_cases"]
+
+    domain_names = {
+        "poem": "古诗",
+        "math": "数学",
+        "story": "故事",
+        "trivia": "常识",
+    }
+    domain_name = domain_names.get(domain, domain)
+    domain_upper = domain.upper()
+
+    domain_hints = {
+        "poem": "覆盖唐诗/宋词/现代诗；必背名篇 + 中等 + 长篇混合",
+        "math": "覆盖四则运算/方程/几何/概率/趣味数学",
+        "story": "覆盖寓言/童话/历史故事/民间故事",
+        "trivia": "覆盖地理/历史/科学/生活常识",
+    }
+    domain_hint_text = domain_hints.get(domain, "")
+    if sub_domain:
+        domain_hint_text = f"限定 sub_domain={sub_domain}。" + domain_hint_text
+
+    system_prompt = fixed_prompts["system"]
+    user_prompt = fixed_prompts["user"].format(
+        domain=domain,
+        domain_name=domain_name,
+        domain_upper=domain_upper,
+        count=count,
+        difficulty=difficulty,
+        domain_hint=domain_hint_text,
+    )
+
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            result_text = call_llm_simple(
+                system_prompt, user_prompt,
+                timeout=timeout, model=model,
+                temperature=temperature, max_tokens=max_tokens,
+            )
+            json_match = re.search(r'\[[\s\S]*\]', result_text)
+            if json_match:
+                cases = json.loads(json_match.group())
+                # 补全 case_id 前缀
+                for i, case in enumerate(cases):
+                    if not case.get("case_id"):
+                        case["case_id"] = f"FIXED-{domain_upper}-{i+1:02d}"
+                    case.setdefault("domain", domain)
+                return cases
+            if attempt < max_retries - 1:
+                print(f"[FIXED GEN] domain={domain} JSON parse failed, retry {attempt+1}/{max_retries-1}", flush=True)
+                time.sleep(3 * (attempt + 1))
+            else:
+                print(f"[FIXED GEN] domain={domain} JSON parse failed after {max_retries} attempts", flush=True)
+                return []
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"[FIXED GEN] domain={domain} error: {e}, retry {attempt+1}/{max_retries-1}", flush=True)
+                time.sleep(3 * (attempt + 1))
+            else:
+                print(f"[FIXED GEN] domain={domain} error after {max_retries} attempts: {e}", flush=True)
+                return []
+    return []
+
+
 def generate_test_cases_with_feedback(
     dimension: Dict,
     toy_persona: Dict,

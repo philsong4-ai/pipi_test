@@ -31,12 +31,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | 用户成长 (growth) | 模拟长期对话，验证记忆形成 |
 | 测试用例管理 (test_cases) | CRUD + LLM 生成 + 质量复核 |
 | 测试任务 (test_tasks) | 异步执行/评测 + 进度追踪 + 人工纠正 |
+| 固定垂类用例 (fixed_test_cases) | 独立维护独立执行的垂类知识一问一答用例（古诗/数学/故事/常识），人工 + LLM 辅助批量生成 |
 | 测试报告 (test_report) | HTML/Excel 报告生成 |
 | 预约任务 (scheduled_tasks) | 定时执行 + 调度器循环 |
 | API 接口配置 (api_endpoints) | 动态管理外部 API URL/Key |
 | Jira 集成 | 评测失败 → 创建 Jira Bug |
 | 用例质量校验 (review) | LLM 复核用例是否符合维度要求 + 自动重生成不合格用例 |
-| LLM 配置 (llm/config) | 7 个调用场景独立配置 model / temperature / max_tokens / timeout |
+| LLM 配置 (llm/config) | 8 个调用场景独立配置 model / temperature / max_tokens / timeout |
 
 ### pipi_api.py — API 调用层（~1500行）
 
@@ -45,6 +46,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **LLM 调用**: `call_extract_llm()` / `call_llm_simple()` — 用例生成、事实提取、评测评分
 - **评测入口**: `evaluate_chat_reply()` / `evaluate_test_case()` — 调用 LLM 打分，均支持 `corrections` 参数注入 few-shot 案例
 - **用例生成**: `generate_test_cases()` / `generate_test_cases_with_feedback()` — LLM 生成+反馈修正
+- **固定用例生成**: `generate_fixed_cases()` — 按 domain（poem/math/story/trivia）批量 LLM 生成垂类知识一问一答用例，含 difficulty 档位
 - **用例复核**: `review_case_quality()` — 检查用例是否符合测试维度
 - **事实提取**: `extract_facts_from_message()` — 从对话中提取用户事实，含 `entity_name` 判断
 - **事实格式化**: `_format_facts_grouped()` — 按分类（CATEGORY_NAMES）分组展示事实
@@ -103,6 +105,9 @@ MySQL `pipi_test`，用户 `pipi`，密码 `<DB_PASSWORD>`。代码同时兼容 
 - `test_cases`: 测试用例（含 dimension_code、input_text、expected_output、failure_flags）
 - `test_tasks`: 测试任务（含 status、progress）
 - `test_results`: 执行结果（含 actual_output、score、executed_at、deduction_reason、human_score、human_note）
+- `fixed_test_cases`: 固定垂类知识用例（独立维护，含 domain / sub_domain / case_id 前缀 FIXED-{DOMAIN}-NN）
+- `fixed_test_tasks`: 固定用例测试任务（不含 persona_id / dimension_codes，与画像无关）
+- `fixed_test_results`: 固定用例执行评测结果（含 actual_output / score / human_score）
 - `test_dimensions`: 测试维度定义
 - `scheduled_tasks`: 预约任务（cron 表达式）
 - `growth_tasks`: 成长模拟任务
@@ -160,7 +165,7 @@ cases = pipi_api.generate_test_cases(
 )
 ```
 
-7 个 key: `case_gen`, `case_regenerate`, `fact_extract`, `eval_batch`, `eval_case`, `eval_realtime`, `case_review`。
+8 个 key: `case_gen`, `case_regenerate`, `fact_extract`, `eval_batch`, `eval_case`, `eval_realtime`, `case_review`, `fixed_case_gen`。
 
 ### 用例生成重试
 

@@ -41,6 +41,7 @@
 - **用户画像管理** — 61 字段画像，LLM 生成 + 手动填写；CRUD + 批量创建
 - **聊天测试** — 模拟用户与玩偶实时对话，自动提取用户事实、自动评测打分
 - **测试用例生成** — LLM 按维度生成多轮对话用例（`【R1】【R2】` 格式），含质量复核 + 不合格自动重生成
+- **固定垂类用例** — 独立维护独立执行的垂类知识一问一答（古诗 / 数学 / 故事 / 常识），人工 + LLM 辅助批量生成，复用评测链路走虚拟维度 G1
 - **异步任务执行** — 后台 worker 模式，通过数据库 status 字段协调，无锁
 - **多裁判集成评测** — 3 个 LLM 独立打分取均值，标准差反映一致性
 - **Few-shot 纠正注入** — 人工纠正记录自动注入下次评测 prompt
@@ -49,7 +50,7 @@
 - **红队安全测试** — 5 P0 维度 × 13 类攻击 × 25 条陷阱用例，含多轮陷阱链
 - **预约任务 full_flow** — cron 定时触发「生成 → 审核 → 执行 → 评测」四阶段
 - **长期成长模拟** — 多日对话 + 记忆形成验证
-- **LLM 配置** — 7 个调用场景独立配置 model/temperature/max_tokens/timeout
+- **LLM 配置** — 8 个调用场景独立配置 model/temperature/max_tokens/timeout
 - **OIDC 单点登录** — SSO 接入，未登录 401 自动跳转
 
 ## 快速开始
@@ -107,6 +108,9 @@ MySQL `pipi_test`（用户 `pipi`），代码同时兼容 SQLite（通过 `USE_M
 | `test_cases` | 测试用例（含 is_redteam / redteam_trap_type） |
 | `test_tasks` | 测试任务 |
 | `test_results` | 执行结果（score / human_score / dialog_ids / ttfb_ms） |
+| `fixed_test_cases` | 固定垂类知识用例（domain / sub_domain / case_id 前缀 FIXED-{DOMAIN}-NN） |
+| `fixed_test_tasks` | 固定用例测试任务（与画像无关） |
+| `fixed_test_results` | 固定用例执行评测结果 |
 | `test_dimensions` | 测试维度定义 |
 | `scheduled_tasks` | 预约任务（cron + full_flow） |
 | `user_facts` | 用户事实记忆（is_active / emotion_tag） |
@@ -115,7 +119,7 @@ MySQL `pipi_test`（用户 `pipi`），代码同时兼容 SQLite（通过 `USE_M
 | `auto_evaluation` | 自动评测记录 |
 | `eval_corrections` | 人工纠正案例（few-shot 注入） |
 | `eval_config` | 评测开关（auto_eval_enabled / inject_corrections） |
-| `llm_config` | LLM 7 场景参数 |
+| `llm_config` | LLM 8 场景参数 |
 | `api_endpoints` | 玩偶 API 配置 |
 | `concurrency_slots` | 并发槽位（aivs/api/llm） |
 | `toy_persona` | 玩偶人设 |
