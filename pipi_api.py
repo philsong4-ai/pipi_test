@@ -1161,7 +1161,6 @@ def generate_fixed_cases(
     user_prompt = fixed_prompts["user"].format(
         domain=domain,
         domain_name=domain_name,
-        domain_upper=domain_upper,
         count=count,
         difficulty=difficulty,
         domain_hint=domain_hint_text,
