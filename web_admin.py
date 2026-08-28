@@ -4743,11 +4743,14 @@ def _growth_worker(task_id, user_id=None, slot_type=None):
                 ]
                 result = pipi_api.call_pipi_stream(api_messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers, protocol=_protocol, user_id=persona_id)
                 reply_text = result.get("full_text", "")
+                api_error = result.get("error") or ""
 
                 # 3. 保存玩偶回复
                 if reply_text:
                     save_chat_msg(persona_id, "pipi", _get_toy_persona_name(target_api), reply_text, user_id=user_id,
                                   ttfb_ms=result.get("ttfb_ms"), total_ms=result.get("response_time_ms"))
+                else:
+                    print(f"[GROWTH EMPTY REPLY] task={task_id} idx={msg_index} persona={persona_id} device={device_id} protocol={_protocol} error={api_error} ttfb={result.get('ttfb_ms')} total={result.get('response_time_ms')}", flush=True)
 
                 # 4. 同步提取事实（准确度优先）
                 extracted_facts = []
@@ -4789,9 +4792,14 @@ def _growth_worker(task_id, user_id=None, slot_type=None):
 
                 # 5. 更新进度记录
                 conn3 = get_db_connection()
-                execute_query(conn3,
-                    "UPDATE growth_progress SET reply_text=?, facts_json=?, status=?, completed_at=NOW() WHERE id=?",
-                    (reply_text, json.dumps(extracted_facts, ensure_ascii=False), "completed", prog_id))
+                if reply_text:
+                    execute_query(conn3,
+                        "UPDATE growth_progress SET reply_text=?, facts_json=?, status=?, completed_at=NOW() WHERE id=?",
+                        (reply_text, json.dumps(extracted_facts, ensure_ascii=False), "completed", prog_id))
+                else:
+                    execute_query(conn3,
+                        "UPDATE growth_progress SET reply_text=?, facts_json=?, status=?, error_message=?, completed_at=NOW() WHERE id=?",
+                        ("", json.dumps(extracted_facts, ensure_ascii=False), "failed", api_error or "empty reply", prog_id))
                 conn3.commit()
                 conn3.close()
 
