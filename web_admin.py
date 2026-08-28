@@ -7288,6 +7288,102 @@ def list_fixed_cases():
     return jsonify({"items": [row_to_dict(r) for r in rows], "total": total, "page": page, "limit": limit})
 
 
+@app.route("/api/fixed_cases/export", methods=["GET"])
+def export_fixed_cases_excel():
+    """导出固定用例为 Excel。支持 domain / status / keyword 过滤（同 list）。"""
+    from io import BytesIO
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    domain = request.args.get("domain", "")
+    status = request.args.get("status", "active")
+    keyword = request.args.get("keyword", "")
+    uid = _current_uid()
+
+    where = ["user_id = ?"]
+    params = [uid]
+    if domain:
+        where.append("domain = ?")
+        params.append(domain)
+    if status:
+        where.append("status = ?")
+        params.append(status)
+    if keyword:
+        where.append("(title LIKE ? OR input_text LIKE ? OR expected_output LIKE ? OR case_id LIKE ?)")
+        kw = f"%{keyword}%"
+        params.extend([kw, kw, kw, kw])
+    where_sql = " AND ".join(where)
+
+    conn = get_db_connection()
+    rows = execute_query(conn,
+        f"SELECT * FROM fixed_test_cases WHERE {where_sql} ORDER BY domain, case_id",
+        params, fetch_all=True)
+    conn.close()
+    items = [row_to_dict(r) for r in rows]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "固定用例"
+
+    headers = [
+        "case_id", "domain", "sub_domain", "title", "priority", "status",
+        "input_text", "expected_output", "evaluation_points", "failure_flags",
+        "created_at", "updated_at",
+    ]
+    header_labels = {
+        "case_id": "用例ID", "domain": "知识域", "sub_domain": "子类",
+        "title": "标题", "priority": "优先级", "status": "状态",
+        "input_text": "用户输入", "expected_output": "标准答案",
+        "evaluation_points": "评估点", "failure_flags": "扣分点",
+        "created_at": "创建时间", "updated_at": "更新时间",
+    }
+    ws.append([header_labels[h] for h in headers])
+
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill("solid", fgColor="4472C4")
+    thin = Side(border_style="thin", color="CCCCCC")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for col_idx in range(1, len(headers) + 1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = border
+
+    for item in items:
+        ws.append([item.get(h, "") or "" for h in headers])
+
+    wrap_align = Alignment(wrap_text=True, vertical="top")
+    for row_idx in range(2, len(items) + 2):
+        for col_idx in range(1, len(headers) + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.alignment = wrap_align
+            cell.border = border
+
+    widths = {
+        "case_id": 20, "domain": 10, "sub_domain": 14, "title": 24,
+        "priority": 8, "status": 10, "input_text": 40, "expected_output": 60,
+        "evaluation_points": 30, "failure_flags": 24, "created_at": 20, "updated_at": 20,
+    }
+    for col_idx, h in enumerate(headers, start=1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = widths.get(h, 16)
+
+    ws.freeze_panes = "A2"
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    fname = f"fixed_cases_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+    return send_file(
+        buf,
+        as_attachment=True,
+        download_name=fname,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
 @app.route("/api/fixed_cases/<int:case_id>", methods=["GET"])
 def get_fixed_case(case_id):
     conn = get_db_connection()
