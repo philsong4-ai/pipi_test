@@ -328,12 +328,13 @@ def _ensure_tables():
                 "SELECT COLUMN_TYPE FROM information_schema.columns WHERE table_schema = DATABASE() "
                 "AND table_name = 'async_tasks' AND column_name = 'task_type'",
                 fetch_one=True) if USE_MYSQL else None
-            if USE_MYSQL and row and "rtgen" not in (row.get("COLUMN_TYPE") or ""):
+            if USE_MYSQL and row and "fixed_gen" not in (row.get("COLUMN_TYPE") or ""):
                 execute_query(conn,
                     "ALTER TABLE async_tasks MODIFY COLUMN task_type "
-                    "ENUM('generate','execute','evaluate','rtgen','rtexec','rteval') NOT NULL")
+                    "ENUM('generate','execute','evaluate','rtgen','rtexec','rteval',"
+                    "'fixed_gen','fixed_exec','fixed_eval') NOT NULL")
                 conn.commit()
-                print("[STARTUP] Extended async_tasks.task_type enum with rtgen/rtexec/rteval", flush=True)
+                print("[STARTUP] Extended async_tasks.task_type enum with fixed_gen/fixed_exec/fixed_eval", flush=True)
         except Exception as e:
             print(f"[STARTUP] Could not extend async_tasks.task_type enum: {e}", flush=True)
 
