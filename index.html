@@ -357,6 +357,9 @@ body{background:#f5f5f7;color:#1d1d1f}
         <option value="math">数学</option>
         <option value="story">故事</option>
         <option value="trivia">常识</option>
+        <option value="idiom">成语</option>
+        <option value="science">科学</option>
+        <option value="geography">地理</option>
       </select>
       <input id="fixed-filter-keyword" placeholder="关键词搜索" onkeyup="if(event.key==='Enter')loadFixedCases()" style="padding:6px 10px;border:1px solid #d2d2d7;border-radius:6px;font-size:13px;min-width:180px">
       <button class="btn" onclick="loadFixedCases()" style="background:#fafafa">刷新</button>
@@ -3191,7 +3194,7 @@ function showFixedCaseModal(id) {
     var html = '<div style="padding:16px">' +
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">' +
         '<div><label style="font-size:12px;color:#86868b">domain</label><select id="fc-domain" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px">' +
-          ['poem','math','story','trivia'].map(d=>'<option value="'+d+'"'+(data.domain===d?' selected':'')+'>'+d+'</option>').join('') +
+          ['poem','math','story','trivia','idiom','science','geography'].map(d=>'<option value="'+d+'"'+(data.domain===d?' selected':'')+'>'+d+'</option>').join('') +
         '</select></div>' +
         '<div><label style="font-size:12px;color:#86868b">sub_domain</label><input id="fc-sub" value="' + escapeHtml(data.sub_domain||'') + '" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px"></div>' +
         '<div><label style="font-size:12px;color:#86868b">case_id（留空自动）</label><input id="fc-cid" value="' + escapeHtml(data.case_id||'') + '" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px"></div>' +
@@ -3271,7 +3274,7 @@ function batchImportFixedCases(input) {
 function showFixedGenModal() {
   var html = '<div style="padding:16px">' +
     '<div style="margin-bottom:8px"><label style="font-size:12px;color:#86868b">domain</label><select id="fcg-domain" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px">' +
-      ['poem','math','story','trivia'].map(d=>'<option value="'+d+'">'+d+'</option>').join('') +
+      ['poem','math','story','trivia','idiom','science','geography'].map(d=>'<option value="'+d+'">'+d+'</option>').join('') +
     '</select></div>' +
     '<div style="margin-bottom:8px"><label style="font-size:12px;color:#86868b">sub_domain（可选）</label><input id="fcg-sub" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px"></div>' +
     '<div style="margin-bottom:8px"><label style="font-size:12px;color:#86868b">count（1-20）</label><input id="fcg-count" type="number" value="5" min="1" max="20" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px"></div>' +

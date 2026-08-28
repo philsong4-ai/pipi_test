@@ -1137,6 +1137,9 @@ def generate_fixed_cases(
         "math": "数学",
         "story": "故事",
         "trivia": "常识",
+        "idiom": "成语",
+        "science": "科学",
+        "geography": "地理",
     }
     domain_name = domain_names.get(domain, domain)
     domain_upper = domain.upper()
@@ -1145,7 +1148,10 @@ def generate_fixed_cases(
         "poem": "覆盖唐诗/宋词/现代诗；必背名篇 + 中等 + 长篇混合",
         "math": "覆盖四则运算/方程/几何/概率/趣味数学",
         "story": "覆盖寓言/童话/历史故事/民间故事",
-        "trivia": "覆盖地理/历史/科学/生活常识",
+        "trivia": "覆盖生活常识/历史趣闻/民俗节气/礼仪习俗",
+        "idiom": "覆盖常见成语 + 中等难度 + 易错成语（如望其项背/差强人意/不刊之论）",
+        "science": "覆盖物理（力学/电学/光学/热学）/化学（元素/反应）/生物（人体/生态）/天文（行星/恒星）",
+        "geography": "覆盖中国地理（省/省会）/世界地理（国家/首都）/自然地理（高原/平原/盆地）",
     }
     domain_hint_text = domain_hints.get(domain, "")
     if sub_domain:
