@@ -7371,10 +7371,11 @@ _fixed_gen_tasks = {}
 
 @app.route("/api/fixed_cases/generate", methods=["POST"])
 def generate_fixed_cases():
-    """LLM 辅助批量生成固定用例。body: {domain, count, difficulty, sub_domain?}"""
+    """LLM 辅助批量生成固定用例。body: {domain, count, difficulty, sub_domain?}
+    domain='all' 时一次性覆盖全部 7 个领域。"""
     data = request.get_json() or {}
     domain = (data.get("domain") or "").strip().lower()
-    if domain not in _FIXED_DOMAINS:
+    if domain != "all" and domain not in _FIXED_DOMAINS:
         return jsonify({"error": f"invalid domain: {domain}"}), 400
     count = min(20, max(1, int(data.get("count", 5))))
     difficulty = (data.get("difficulty") or "medium").strip()
@@ -7387,11 +7388,13 @@ def generate_fixed_cases():
 
     import uuid
     task_id = uuid.uuid4().hex[:8]
+    domains_to_run = list(_FIXED_DOMAINS) if domain == "all" else [domain]
+    total = count * len(domains_to_run)
     task = {
         "task_id": task_id, "status": "pending", "user_id": uid,
-        "domain": domain, "count": count, "difficulty": difficulty,
-        "sub_domain": sub_domain,
-        "progress": {"total": count, "done": 0, "current": domain},
+        "domain": domain, "domains_to_run": domains_to_run,
+        "count": count, "difficulty": difficulty, "sub_domain": sub_domain,
+        "progress": {"total": total, "done": 0, "current": domains_to_run[0]},
         "created_case_ids": [], "errors": [],
     }
     _fixed_gen_tasks[task_id] = task
@@ -7400,7 +7403,7 @@ def generate_fixed_cases():
     t = threading.Thread(target=_generate_fixed_cases_worker,
                          args=(task_id, uid, slot_type), daemon=True)
     t.start()
-    return jsonify({"task_id": task_id, "status": "pending"})
+    return jsonify({"task_id": task_id, "status": "pending", "domains": domains_to_run, "total": total})
 
 
 @app.route("/api/fixed_cases/generate/<task_id>", methods=["GET"])
@@ -7424,6 +7427,7 @@ def _generate_fixed_cases_worker(task_id, user_id=None, slot_type=None):
         _save_async_task(task_id, "fixed_gen", task, user_id=user_id)
 
         domain = task.get("domain", "poem")
+        domains_to_run = task.get("domains_to_run") or ([domain] if domain != "all" else list(_FIXED_DOMAINS))
         count = int(task.get("count", 5))
         difficulty = task.get("difficulty", "medium")
         sub_domain = task.get("sub_domain", "")
@@ -7433,40 +7437,45 @@ def _generate_fixed_cases_worker(task_id, user_id=None, slot_type=None):
         llm_config = get_llm_config()
         cfg = llm_config.get("fixed_case_gen") or llm_config.get("case_gen") or {}
 
-        cases = pipi_api.generate_fixed_cases(
-            domain=domain, count=count, difficulty=difficulty,
-            sub_domain=sub_domain, target_api=target_api, **cfg,
-        )
-        if not cases:
-            task["status"] = "failed"
-            task["error_message"] = "LLM 返回空结果"
-            _save_async_task(task_id, "fixed_gen", task, user_id=user_id)
-            return
-
         conn = get_db_connection()
         created = []
-        for idx, case in enumerate(cases):
+        for dom in domains_to_run:
+            task["progress"]["current"] = dom
+            _fixed_gen_tasks[task_id] = task
+            _save_async_task(task_id, "fixed_gen", task, user_id=user_id)
             try:
-                # 强制覆盖 case_id 前缀，避免 LLM 给错
-                case["case_id"] = _get_unique_fixed_case_id(conn, domain)
-                case["domain"] = domain
-                if sub_domain and not case.get("sub_domain"):
-                    case["sub_domain"] = sub_domain
-                rid = _save_fixed_case(conn, case, user_id)
-                created.append(rid)
-                task["progress"]["done"] = idx + 1
+                cases = pipi_api.generate_fixed_cases(
+                    domain=dom, count=count, difficulty=difficulty,
+                    sub_domain=sub_domain, target_api=target_api, **cfg,
+                )
+                if not cases:
+                    task.setdefault("errors", []).append({"domain": dom, "error": "LLM 返回空结果"})
+                    continue
+                for case in cases:
+                    try:
+                        # 强制覆盖 case_id 前缀，避免 LLM 给错
+                        case["case_id"] = _get_unique_fixed_case_id(conn, dom)
+                        case["domain"] = dom
+                        if sub_domain and not case.get("sub_domain"):
+                            case["sub_domain"] = sub_domain
+                        rid = _save_fixed_case(conn, case, user_id)
+                        created.append(rid)
+                    except Exception as e:
+                        task.setdefault("errors", []).append({"case_id": case.get("case_id", ""), "error": str(e)})
+                task["progress"]["done"] = len(created)
                 task["created_case_ids"] = created
                 _fixed_gen_tasks[task_id] = task
                 _save_async_task(task_id, "fixed_gen", task, user_id=user_id)
+                print(f"[FIXED GEN] {task_id} {dom} done, +{len(cases)} cases (total {len(created)})", flush=True)
             except Exception as e:
-                task.setdefault("errors", []).append({"case_id": case.get("case_id", ""), "error": str(e)})
+                task.setdefault("errors", []).append({"domain": dom, "error": str(e)})
         conn.close()
 
         task["status"] = "completed"
         task["cases_created"] = len(created)
         _fixed_gen_tasks[task_id] = task
         _save_async_task(task_id, "fixed_gen", task, user_id=user_id)
-        print(f"[FIXED GEN] {task_id} completed, +{len(created)} cases", flush=True)
+        print(f"[FIXED GEN] {task_id} completed, +{len(created)} cases (across {len(domains_to_run)} domains)", flush=True)
     except Exception as e:
         import traceback
         print(f"[FIXED GEN FATAL] {task_id}: {e}\n{traceback.format_exc()}", flush=True)

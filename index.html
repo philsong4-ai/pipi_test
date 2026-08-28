@@ -369,7 +369,14 @@ body{background:#f5f5f7;color:#1d1d1f}
       <button class="btn" onclick="showFixedGenModal()" style="background:#34c759;border-color:#34c759;color:#fff">LLM 生成</button>
     </div>
 
-    <div id="fixed-cases-list" style="max-height:480px;overflow-y:auto;border:1px solid #d2d2d7;border-radius:6px">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;border:1px solid #d2d2d7;border-bottom:none;border-radius:6px 6px 0 0;background:#f5f5f7">
+      <label style="font-size:13px;color:#1d1d1f;display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input type="checkbox" id="fixed-select-all" onchange="toggleAllFixedCases(this.checked)" style="margin:0">
+        <span>全选当前页</span>
+      </label>
+      <span id="fixed-selected-count" style="font-size:12px;color:#86868b">已选 0 条</span>
+    </div>
+    <div id="fixed-cases-list" style="max-height:440px;overflow-y:auto;border:1px solid #d2d2d7;border-top:none;border-radius:0 0 6px 6px">
       <div style="color:#aeaeb2;text-align:center;padding:40px;font-size:13px">加载中...</div>
     </div>
     <div id="fixed-cases-pagination" style="margin-top:8px;display:flex;justify-content:space-between;align-items:center;font-size:13px;color:#86868b"></div>
@@ -3141,6 +3148,8 @@ function loadFixedCases() {
   var url = '/api/fixed_cases?page=' + fixedCasePage + '&limit=20';
   if (domain) url += '&domain=' + encodeURIComponent(domain);
   if (keyword) url += '&keyword=' + encodeURIComponent(keyword);
+  var selectAll = document.getElementById('fixed-select-all');
+  if (selectAll) selectAll.checked = false;
   fetch(url)
     .then(r => r.json())
     .then(data => {
@@ -3155,7 +3164,7 @@ function loadFixedCases() {
             '<div style="display:flex;justify-content:space-between;align-items:start">' +
               '<div style="flex:1">' +
                 '<label style="display:inline-flex;align-items:start;gap:6px;cursor:pointer">' +
-                  '<input type="checkbox" class="fixed-case-checkbox" value="' + c.id + '" style="margin-top:3px">' +
+                  '<input type="checkbox" class="fixed-case-checkbox" value="' + c.id + '" style="margin-top:3px" onchange="updateFixedSelectedCount()">' +
                   '<div>' +
                     '<div style="font-weight:500">' + escapeHtml(c.case_id) + ' · ' + escapeHtml(c.title) + ' ' +
                       '<span style="color:#86868b;font-size:11px">[' + c.domain + (c.sub_domain ? '/' + escapeHtml(c.sub_domain) : '') + ']</span>' +
@@ -3273,11 +3282,11 @@ function batchImportFixedCases(input) {
 
 function showFixedGenModal() {
   var html = '<div style="padding:16px">' +
-    '<div style="margin-bottom:8px"><label style="font-size:12px;color:#86868b">domain</label><select id="fcg-domain" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px">' +
-      ['poem','math','story','trivia','idiom','science','geography'].map(d=>'<option value="'+d+'">'+d+'</option>').join('') +
+    '<div style="margin-bottom:8px"><label style="font-size:12px;color:#86868b">domain（选「全部」一次性覆盖 7 个领域）</label><select id="fcg-domain" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px">' +
+      ['<option value="all">全部</option>'].concat(['poem','math','story','trivia','idiom','science','geography'].map(d=>'<option value="'+d+'">'+d+'</option>')).join('') +
     '</select></div>' +
-    '<div style="margin-bottom:8px"><label style="font-size:12px;color:#86868b">sub_domain（可选）</label><input id="fcg-sub" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px"></div>' +
-    '<div style="margin-bottom:8px"><label style="font-size:12px;color:#86868b">count（1-20）</label><input id="fcg-count" type="number" value="5" min="1" max="20" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px"></div>' +
+    '<div style="margin-bottom:8px"><label style="font-size:12px;color:#86868b">sub_domain（可选，仅单 domain 生效）</label><input id="fcg-sub" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px"></div>' +
+    '<div style="margin-bottom:8px"><label style="font-size:12px;color:#86868b">每个 domain 生成 count 条（1-20）</label><input id="fcg-count" type="number" value="5" min="1" max="20" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px"></div>' +
     '<div style="margin-bottom:12px"><label style="font-size:12px;color:#86868b">difficulty</label><select id="fcg-diff" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px">' +
       ['easy','medium','hard'].map(d=>'<option value="'+d+'"'+(d==='medium'?' selected':'')+'>'+d+'</option>').join('') +
     '</select></div>' +
@@ -3328,6 +3337,13 @@ function pollFixedGenStatus(taskId) {
 
 function toggleAllFixedCases(checked) {
   document.querySelectorAll('.fixed-case-checkbox').forEach(cb => cb.checked = checked);
+  updateFixedSelectedCount();
+}
+
+function updateFixedSelectedCount() {
+  var n = document.querySelectorAll('.fixed-case-checkbox:checked').length;
+  var el = document.getElementById('fixed-selected-count');
+  if (el) el.textContent = '已选 ' + n + ' 条';
 }
 
 function getSelectedFixedCases() {
