@@ -710,8 +710,8 @@ def _ensure_tables():
                             status VARCHAR(20) DEFAULT 'pending',
                             actual_output TEXT,
                             dialog_ids JSON,
-                            ttfb_ms INT,
-                            total_ms INT,
+                            ttfb_ms JSON,
+                            total_ms JSON,
                             score DECIMAL(5,2),
                             deduction_reason TEXT,
                             eval_detail TEXT,
@@ -735,8 +735,8 @@ def _ensure_tables():
                             status TEXT DEFAULT 'pending',
                             actual_output TEXT,
                             dialog_ids TEXT,
-                            ttfb_ms INTEGER,
-                            total_ms INTEGER,
+                            ttfb_ms TEXT,
+                            total_ms TEXT,
                             score REAL,
                             deduction_reason TEXT,
                             eval_detail TEXT,
@@ -752,6 +752,22 @@ def _ensure_tables():
                 print("[STARTUP] Created fixed_test_results table", flush=True)
             except Exception as e:
                 print(f"[STARTUP] Could not create fixed_test_results: {e}", flush=True)
+
+        # fixed_test_results.ttfb_ms / total_ms 改为 JSON/TEXT 以存多轮时延列表
+        if USE_MYSQL:
+            for _col in ("ttfb_ms", "total_ms"):
+                try:
+                    row = execute_query(conn,
+                        "SELECT COLUMN_TYPE FROM information_schema.columns WHERE table_schema = DATABASE() "
+                        "AND table_name = 'fixed_test_results' AND column_name = %s",
+                        (_col,), fetch_one=True)
+                    if row and "int" in (row.get("COLUMN_TYPE") or "").lower():
+                        execute_query(conn,
+                            f"ALTER TABLE fixed_test_results MODIFY COLUMN {_col} JSON NULL")
+                        conn.commit()
+                        print(f"[STARTUP] Converted fixed_test_results.{_col} INT -> JSON", flush=True)
+                except Exception as e:
+                    print(f"[STARTUP] Could not convert fixed_test_results.{_col}: {e}", flush=True)
 
         # 服务启动时恢复被中断的任务：重新拉起 worker
         conn2 = get_db_connection()
@@ -7672,9 +7688,15 @@ def execute_fixed_task(task_id):
         conn.close()
         return jsonify({"error": "task not found"}), 404
     row = row_to_dict(row)
-    if row["status"] not in ("pending", "failed"):
+    if row["status"] not in ("pending", "failed", "executed"):
         conn.close()
         return jsonify({"error": f"task status is {row['status']}, cannot execute"}), 400
+
+    # 已执行的任务重跑：重置 results 为 pending
+    if row["status"] == "executed":
+        execute_query(conn, "UPDATE fixed_test_results SET status='pending', actual_output=NULL, dialog_ids=NULL, ttfb_ms=NULL, total_ms=NULL, executed_at=NULL WHERE task_id=?", (task_id,))
+        execute_query(conn, "UPDATE fixed_test_tasks SET progress_done=0, error_message=NULL WHERE id=?", (task_id,))
+        conn.commit()
 
     slot_type = f"user:{uid}:fixedtask"
     if not _acquire_slot(slot_type, 2, ttl_seconds=7200, wait=False, timeout=0):
