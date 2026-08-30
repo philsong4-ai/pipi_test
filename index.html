@@ -3473,22 +3473,39 @@ function pollFixedTaskStatus() {
 }
 
 function loadFixedResults() {
-  if (!fixedCurrentTaskId) { _fixedToast('请先创建任务'); return; }
+  if (!fixedCurrentTaskId) {
+    // 没选任务时，自动挑最新一条
+    fetch('/api/fixed_tasks?limit=1')
+      .then(r=>r.json())
+      .then(d=>{
+        if (d && d.items && d.items.length) {
+          selectFixedTask(d.items[0].id);
+        } else {
+          _fixedToast('请先创建任务');
+          var list = document.getElementById('fixed-results-list');
+          if (list) { list.style.display='block'; list.innerHTML = '<div style="color:#aeaeb2;padding:20px;text-align:center">暂无任务，请先创建并执行</div>'; }
+        }
+      })
+      .catch(e=>{ _fixedToast('加载任务失败：' + e); });
+    return;
+  }
   fetch('/api/fixed_tasks/' + fixedCurrentTaskId + '/results')
     .then(r=>r.json())
     .then(items=>{
       var list = document.getElementById('fixed-results-list');
+      if (!list) return;
       list.style.display = 'block';
-      if (!items.length) { list.innerHTML = '<div style="color:#aeaeb2;padding:20px;text-align:center">无结果</div>'; return; }
+      if (!items || !items.length) { list.innerHTML = '<div style="color:#aeaeb2;padding:20px;text-align:center">无结果（任务可能未执行）</div>'; return; }
       list.innerHTML = items.map(function(r) {
         var score = r.human_score != null ? r.human_score : (r.score != null ? parseFloat(r.score).toFixed(1) : '-');
         var scoreColor = (score === '-' || score === null) ? '#86868b' : (parseFloat(score) >= 6 ? '#34c759' : '#ff3b30');
+        var statusBadge = r.status ? '<span style="color:#86868b;font-size:11px;margin-left:6px">' + escapeHtml(r.status) + '</span>' : '';
         return '<div style="padding:10px 12px;border-bottom:1px solid #f0f0f2;font-size:13px">' +
           '<div style="display:flex;justify-content:space-between">' +
             '<div style="flex:1">' +
-              '<div style="font-weight:500">' + escapeHtml(r.case_code) + ' · ' + escapeHtml(r.title||'') + '</div>' +
+              '<div style="font-weight:500">' + escapeHtml(r.case_code) + ' · ' + escapeHtml(r.title||'') + statusBadge + '</div>' +
               '<div style="color:#86868b;font-size:12px">问：' + escapeHtml(_fixedTruncate(r.input_text||'', 80)) + '</div>' +
-              '<div style="color:#86868b;font-size:12px">玩偶答：' + escapeHtml(_fixedTruncate(r.actual_output||'', 100)) + '</div>' +
+              '<div style="color:#86868b;font-size:12px">玩偶答：' + escapeHtml(_fixedTruncate(r.actual_output||'(未生成)', 100)) + '</div>' +
               '<div style="color:#86868b;font-size:12px">标准：' + escapeHtml(_fixedTruncate(r.expected_output||'', 80)) + '</div>' +
               (r.deduction_reason ? '<div style="color:#ff9500;font-size:12px">扣分：' + escapeHtml(_fixedTruncate(r.deduction_reason, 120)) + '</div>' : '') +
             '</div>' +
