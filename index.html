@@ -3473,6 +3473,8 @@ function pollFixedTaskStatus() {
 }
 
 function loadFixedResults() {
+  var statusEl = document.getElementById('fixed-task-status');
+  if (statusEl) statusEl.innerHTML = '<span style="color:#0071e3">正在加载结果…</span>';
   if (!fixedCurrentTaskId) {
     // 没选任务时，自动挑最新一条
     fetch('/api/fixed_tasks?limit=1')
