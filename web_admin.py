@@ -7596,6 +7596,32 @@ def _generate_fixed_cases_worker(task_id, user_id=None, slot_type=None):
                 print(f"[SLOT RELEASE] {slot_type} failed: {e}", flush=True)
 
 
+@app.route("/api/fixed_tasks", methods=["GET"])
+def list_fixed_tasks():
+    """列出固定用例测试任务。支持 status 过滤 + 分页。"""
+    status = request.args.get("status", "")
+    page = max(1, int(request.args.get("page", 1)))
+    limit = min(100, int(request.args.get("limit", 20)))
+    offset = (page - 1) * limit
+    uid = _current_uid()
+
+    where = ["user_id = ?"]
+    params = [uid]
+    if status:
+        where.append("status = ?")
+        params.append(status)
+    where_sql = " AND ".join(where)
+
+    conn = get_db_connection()
+    count_row = execute_query(conn, f"SELECT COUNT(*) AS cnt FROM fixed_test_tasks WHERE {where_sql}", params, fetch_one=True)
+    total = row_to_dict(count_row)["cnt"] if count_row else 0
+    rows = execute_query(conn,
+        f"SELECT * FROM fixed_test_tasks WHERE {where_sql} ORDER BY id DESC LIMIT ? OFFSET ?",
+        params + [limit, offset], fetch_all=True)
+    conn.close()
+    return jsonify({"items": [row_to_dict(r) for r in rows], "total": total, "page": page, "limit": limit})
+
+
 @app.route("/api/fixed_tasks", methods=["POST"])
 def create_fixed_task():
     """创建固定用例测试任务。body: {name, device_id, case_ids, target_api?}"""

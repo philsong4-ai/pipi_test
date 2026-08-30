@@ -395,6 +395,11 @@ body{background:#f5f5f7;color:#1d1d1f}
       <button class="btn" onclick="loadFixedResults()" style="background:#fafafa">查看结果</button>
     </div>
     <div id="fixed-task-status" style="font-size:12px;color:#86868b;margin-bottom:12px;padding:8px 12px;background:#fafafa;border-radius:6px;min-height:20px">先创建任务</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin:8px 0 6px 0">
+      <h4 style="font-size:13px;margin:0;color:#1d1d1f">历史任务</h4>
+      <button class="btn btn-sm" onclick="loadFixedTasks()" style="background:#fafafa;font-size:12px">刷新</button>
+    </div>
+    <div id="fixed-tasks-list" style="max-height:280px;overflow-y:auto;border:1px solid #d2d2d7;border-radius:6px;margin-bottom:12px"></div>
     <div id="fixed-results-list" style="max-height:500px;overflow-y:auto;border:1px solid #d2d2d7;border-radius:6px;display:none"></div>
   </div>
 </div>
@@ -902,7 +907,7 @@ function switchTab(tabName) {
 document.querySelectorAll('.nav-item').forEach(function(btn) {
   btn.addEventListener('click', function() {
     switchTab(btn.dataset.tab);
-    if (btn.dataset.tab === 'fixed-cases') loadFixedCases();
+    if (btn.dataset.tab === 'fixed-cases') { loadFixedCases(); loadFixedTasks(); }
   });
 });
 
@@ -3380,7 +3385,51 @@ function startFixedTask() {
       fixedCurrentTaskId = d.id;
       document.getElementById('fixed-task-status').innerHTML = '已创建任务 #' + d.id + '，可点执行';
       _fixedToast('已创建任务');
+      loadFixedTasks();
     });
+}
+
+function loadFixedTasks() {
+  fetch('/api/fixed_tasks?limit=50')
+    .then(r=>r.json())
+    .then(d=>{
+      if (d.error) { _fixedToast(d.error); return; }
+      var list = document.getElementById('fixed-tasks-list');
+      if (!list) return;
+      var items = d.items || [];
+      if (!items.length) {
+        list.innerHTML = '<div style="color:#aeaeb2;font-size:13px;padding:16px;text-align:center">暂无任务</div>';
+        return;
+      }
+      var statusColor = {pending:'#86868b', running:'#0071e3', executed:'#ff9500', evaluated:'#af52c4', completed:'#34c759', failed:'#ff3b30'};
+      list.innerHTML = items.map(function(t) {
+        var sc = statusColor[t.status] || '#86868b';
+        var active = (t.id === fixedCurrentTaskId);
+        var bg = active ? '#e8f0fe' : 'transparent';
+        var cases = 0; try { cases = JSON.parse(t.case_ids||'[]').length; } catch(e){}
+        return '<div onclick="selectFixedTask(' + t.id + ')" style="padding:8px 12px;border-bottom:1px solid #f0f0f2;cursor:pointer;background:' + bg + ';font-size:12px">' +
+          '<div style="display:flex;justify-content:space-between;align-items:center">' +
+            '<div style="flex:1">' +
+              '<span style="font-weight:600;color:#1d1d1f">#' + t.id + '</span> ' +
+              '<span style="color:' + sc + ';font-weight:500;margin-left:6px">' + escapeHtml(t.status||'') + '</span>' +
+              (active ? ' <span style="color:#0071e3;font-size:11px">[当前]</span>' : '') +
+            '</div>' +
+            '<div style="color:#86868b;font-size:11px">' + (t.progress_done||0) + '/' + (t.progress_total||0) + ' · ' + cases + '用例</div>' +
+          '</div>' +
+          '<div style="color:#86868b;font-size:11px;margin-top:3px">' +
+            escapeHtml(t.name||'') + ' · ' + escapeHtml(t.device_id||'') + ' · ' + escapeHtml(t.target_api||'') +
+            (t.created_at ? ' · ' + escapeHtml(String(t.created_at).replace('T',' ').substring(0,16)) : '') +
+          '</div>' +
+        '</div>';
+      }).join('');
+    });
+}
+
+function selectFixedTask(id) {
+  fixedCurrentTaskId = id;
+  document.getElementById('fixed-task-status').innerHTML = '已选任务 #' + id;
+  loadFixedTasks();
+  loadFixedResults();
 }
 
 function executeFixedTask() {
