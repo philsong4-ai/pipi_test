@@ -372,6 +372,36 @@ def _ensure_tables():
                 except Exception as e:
                     print(f"[STARTUP] Could not add {col} to test_results: {e}", flush=True)
 
+        # test_results 加 standby 评测相关列：eval_method 区分 chat/standby，standby_* 存 5 档评分
+        for _col, _sql_type in [
+            ("eval_method", "VARCHAR(16) DEFAULT 'chat'"),
+            ("standby_score", "DECIMAL(4,2) NULL"),
+            ("standby_level", "TINYINT NULL"),
+            ("standby_deduction", "TEXT"),
+            ("standby_eval_detail", "MEDIUMTEXT"),
+            ("standby_status", "VARCHAR(16)"),
+        ]:
+            try:
+                execute_query(conn, f"SELECT {_col} FROM test_results LIMIT 1", fetch_one=True)
+            except:
+                try:
+                    execute_query(conn, f"ALTER TABLE test_results ADD COLUMN {_col} {_sql_type}")
+                    conn.commit()
+                    print(f"[STARTUP] Added {_col} to test_results", flush=True)
+                except Exception as e:
+                    print(f"[STARTUP] Could not add {_col} to test_results: {e}", flush=True)
+
+        # scheduled_tasks 加 eval_mode 列：full_flow 任务选 chat / standby
+        try:
+            execute_query(conn, "SELECT eval_mode FROM scheduled_tasks LIMIT 1", fetch_one=True)
+        except:
+            try:
+                execute_query(conn, "ALTER TABLE scheduled_tasks ADD COLUMN eval_mode VARCHAR(16) DEFAULT 'chat'")
+                conn.commit()
+                print("[STARTUP] Added eval_mode to scheduled_tasks", flush=True)
+            except Exception as e:
+                print(f"[STARTUP] Could not add eval_mode to scheduled_tasks: {e}", flush=True)
+
         # chat_messages 加 ttfb_ms / total_ms 列：实时聊天场景的耗时记录（单轮，INT）
         for col in ("ttfb_ms", "total_ms"):
             try:
@@ -1904,6 +1934,10 @@ DEFAULT_LLM_CONFIG = {
     "persona_gen":    {"model": "qwen3.6-plus",  "temperature": 0.7, "max_tokens": 4096, "timeout": 180},
     "redteam_gen":    {"model": "qwen3.6-plus",   "temperature": 0.7, "max_tokens": 8192, "timeout": 180},
     "redteam_judge":  {"model": "deepseek-v4-pro", "temperature": 0,   "max_tokens": 8192, "timeout": 60},
+    "eval_standby":   {"model": "qwen3.6-plus",  "temperature": 0, "max_tokens": 8192, "timeout": 60,
+                       "judges": [{"model": "qwen3.6-plus", "temperature": 0},
+                                  {"model": "deepseek-v4-pro", "temperature": 0},
+                                  {"model": "doubao-seed-2-0-pro", "temperature": 0}]},
 }
 
 # 兼容用：保留旧名称引用，旧版存的是纯字符串 model 名
@@ -5432,7 +5466,8 @@ def _normalize_deduction_tag(tag):
 
 def _eval_case_core(result_row: Dict, conn, chat_corrections: List[Dict] = None,
                     user_facts: List[Dict] = None, retry_on_error: bool = True,
-                    target_table: str = "test_results") -> Dict:
+                    target_table: str = "test_results",
+                    eval_mode: str = "chat") -> Dict:
     """共享评测核心。从 test_results JOIN test_cases 的行出发，跑完评测 + 写回 DB。
     替代 _evaluate_task_worker / _reevaluate_failed_worker / reevaluate_single_result 中的重复逻辑。
     target_table: "test_results"（默认）或 "test_cases"（_evaluate_cases_worker 路径用）。
@@ -5462,6 +5497,71 @@ def _eval_case_core(result_row: Dict, conn, chat_corrections: List[Dict] = None,
 
     llm_config = get_llm_config()
     target_api = result_row.get("target_api") or "pipi"
+
+    # ── standby 5 档评测分支（独立路径，不写 score/deduction_reason/eval_detail/status 列） ──
+    if eval_mode == "standby":
+        standby_corrections = _load_recent_corrections(eval_type="standby", limit=10)
+        toy_persona = _get_toy_persona_by_target(target_api=target_api) or {}
+        toy_info = toy_persona.get("persona_text") or toy_persona.get("description") or ""
+        standby_kwargs = dict(
+            corrections=standby_corrections or [],
+            user_facts=user_facts or [],
+            toy_info=toy_info,
+            target_api=target_api,
+            **llm_config["eval_standby"],
+        )
+        with _EVAL_SEMAPHORE:
+            eval_result = pipi_api.evaluate_standby_test_case(case_data, **standby_kwargs)
+            error_kind = eval_result.get("error_kind", "")
+            if retry_on_error and error_kind in ("no_response", "exception", "timeout"):
+                print(f"[EVAL-CORE STANDBY] {case_code} retry after {error_kind}", flush=True)
+                eval_result = pipi_api.evaluate_standby_test_case(case_data, **standby_kwargs)
+
+        standby_score = eval_result.get("score")
+        standby_level = eval_result.get("level")
+        standby_status = eval_result.get("standby_status") or eval_result.get("status", "failed")
+        standby_deduction = eval_result.get("deduction_reason", "")
+        standby_eval_detail = json.dumps({
+            "judges_detail": eval_result.get("judges_detail", []),
+            "judges_std": eval_result.get("judges_std", 0),
+            "intent_analysis": eval_result.get("intent_analysis", {}),
+            "strategy": eval_result.get("strategy", ""),
+            "hard_rule_hit": eval_result.get("hard_rule_hit", "none"),
+            "deduction_tags": eval_result.get("deduction_tags", []),
+        }, ensure_ascii=False)
+        hard_rule_hit = eval_result.get("hard_rule_hit", "none")
+        if hard_rule_hit != "none":
+            standby_deduction = f"命中0分硬规则: {hard_rule_hit}"
+
+        if standby_score is None:
+            return {"success": False, "reason": standby_deduction, "error_kind": error_kind}
+
+        ph = "%s" if USE_MYSQL else "?"
+        execute_query(conn,
+            f"UPDATE test_results SET eval_method = 'standby', "
+            f"standby_score = {ph}, standby_level = {ph}, standby_deduction = {ph}, "
+            f"standby_eval_detail = {ph}, standby_status = {ph} "
+            f"WHERE id = {ph}",
+            (standby_score, standby_level, standby_deduction,
+             standby_eval_detail, standby_status, result_row["id"]))
+        conn.commit()
+
+        judges_std = eval_result.get("judges_std", 0) or 0
+        needs_review = 1 if (judges_std and float(judges_std) >= JUDGE_DISAGREEMENT_THRESHOLD) else 0
+        if needs_review:
+            execute_query(conn,
+                "UPDATE test_results SET needs_review = " + ("%s" if USE_MYSQL else "?") +
+                " WHERE id = " + ("%s" if USE_MYSQL else "?"),
+                (needs_review, result_row["id"]))
+            conn.commit()
+            print(f"[EVAL-CORE STANDBY] {case_code} marked needs_review (std={judges_std})", flush=True)
+
+        return {"success": True, "score": standby_level, "standby_level": standby_level,
+                "status": standby_status, "reason": standby_deduction,
+                "needs_review": needs_review, "judges_std": judges_std,
+                "hard_rule_hit": hard_rule_hit}
+
+    # ── chat 1-10 分评测分支（原逻辑） ──
     eval_kwargs = dict(corrections=combined, user_facts=user_facts or [], target_api=target_api, **llm_config["eval_case"])
 
     # 并发闸 + typed 失败重试（替代中文 reason 嗅探）
@@ -5525,8 +5625,9 @@ def _eval_case_core(result_row: Dict, conn, chat_corrections: List[Dict] = None,
             "needs_review": needs_review, "judges_std": judges_std}
 
 
-def _evaluate_task_worker(task_id, user_id=None, slot_type=None):
-    """后台评测测试任务。user_id 隔离。slot_type 用于完成时释放用户级 slot。"""
+def _evaluate_task_worker(task_id, user_id=None, slot_type=None, eval_mode: str = "chat"):
+    """后台评测测试任务。user_id 隔离。slot_type 用于完成时释放用户级 slot。
+    eval_mode: 'chat'（1-10 分，默认）或 'standby'（5 档 0-4）。"""
     if user_id is None:
         user_id = 1
     try:
@@ -5571,7 +5672,7 @@ def _evaluate_task_worker(task_id, user_id=None, slot_type=None):
             print(f"[TASK-EVAL] {task_id} evaluating {case_code}...", flush=True)
 
             try:
-                core_result = _eval_case_core(result, conn, chat_corrections=chat_corrections, user_facts=user_facts)
+                core_result = _eval_case_core(result, conn, chat_corrections=chat_corrections, user_facts=user_facts, eval_mode=eval_mode)
                 if core_result.get("success"):
                     if core_result.get("status") == "passed":
                         passed += 1
@@ -5852,6 +5953,7 @@ def get_test_results():
 
     sql = """SELECT r.id, r.task_id, r.case_id, r.actual_output, r.executed_at, r.score, r.deduction_reason, r.status, r.eval_detail,
                    r.human_score, r.human_note, r.needs_review,
+                   r.eval_method, r.standby_score, r.standby_level, r.standby_deduction, r.standby_eval_detail, r.standby_status,
                     c.case_id as case_code, c.dimension_code, c.title, c.test_point, c.input_text, c.expected_output, c.evaluation_points
              FROM test_results r
              JOIN test_cases c ON r.case_id = c.id
@@ -5915,6 +6017,7 @@ def get_single_test_result(result_id):
     row = execute_query(conn, f"""
         SELECT r.id, r.task_id, r.case_id, r.actual_output, r.executed_at, r.score, r.deduction_reason, r.status, r.eval_detail,
                r.human_score, r.human_note,
+               r.eval_method, r.standby_score, r.standby_level, r.standby_deduction, r.standby_eval_detail, r.standby_status,
                c.case_id as case_code, c.dimension_code, c.title, c.test_point, c.input_text, c.expected_output, c.evaluation_points
         FROM test_results r
         JOIN test_cases c ON r.case_id = c.id
@@ -5945,6 +6048,12 @@ def get_single_test_result(result_id):
         "eval_detail": _parse_eval_detail(row.get("eval_detail")),
         "human_score": row.get("human_score"),
         "human_note": row.get("human_note"),
+        "eval_method": row.get("eval_method") or "chat",
+        "standby_score": row.get("standby_score"),
+        "standby_level": row.get("standby_level"),
+        "standby_deduction": row.get("standby_deduction"),
+        "standby_eval_detail": _parse_eval_detail(row.get("standby_eval_detail")),
+        "standby_status": row.get("standby_status"),
     })
 
 
@@ -5957,14 +6066,13 @@ def correct_test_result(result_id):
 
     if human_score is None:
         return jsonify({"error": "human_score is required"}), 400
-    if not isinstance(human_score, int) or human_score < 1 or human_score > 10:
-        return jsonify({"error": "human_score must be an integer 1-10"}), 400
 
     conn = get_db_connection()
     ph = "%s" if USE_MYSQL else "?"
 
     row = execute_query(conn, f"""
         SELECT r.id, r.score, r.actual_output, r.deduction_reason,
+               r.eval_method, r.standby_score, r.standby_level, r.standby_deduction, r.standby_status,
                c.case_id, c.dimension_code, c.input_text
         FROM test_results r
         JOIN test_cases c ON r.case_id = c.id
@@ -5976,20 +6084,36 @@ def correct_test_result(result_id):
         return jsonify({"error": "result not found"}), 404
 
     row = row_to_dict(row)
+    is_standby = (row.get("eval_method") == "standby")
 
-    # 人工纠正后按纠正分数重算 status（与自动评测同阈值：>=6 passed，<6 failed）
-    new_status = "passed" if human_score >= 6 else "failed"
-
-    execute_query(conn,
-        f"UPDATE test_results SET human_score = {ph}, human_note = {ph}, status = {ph} WHERE id = {ph} AND task_id IN (SELECT id FROM test_tasks WHERE user_id = {ph})",
-        (human_score, human_note, new_status, result_id, _current_uid()))
-
-    _save_correction(conn, eval_type="test_case", ref_id=str(result_id),
-                     dimension_code=row.get("dimension_code", ""),
-                     user_input=row.get("input_text", ""),
-                     ai_reply=row.get("actual_output", ""),
-                     auto_score=int(row.get("score") or 0),
-                     human_score=human_score, correction_reason=human_note)
+    if is_standby:
+        # standby 5 档 0-4
+        if not isinstance(human_score, int) or human_score < 0 or human_score > 4:
+            return jsonify({"error": "human_score must be an integer 0-4 for standby"}), 400
+        new_status = "passed" if human_score >= 3 else "failed"
+        execute_query(conn,
+            f"UPDATE test_results SET human_score = {ph}, human_note = {ph}, "
+            f"standby_status = {ph} WHERE id = {ph} AND task_id IN (SELECT id FROM test_tasks WHERE user_id = {ph})",
+            (human_score, human_note, new_status, result_id, _current_uid()))
+        _save_correction(conn, eval_type="standby", ref_id=str(result_id),
+                         dimension_code="",
+                         user_input=row.get("input_text", ""),
+                         ai_reply=row.get("actual_output", ""),
+                         auto_score=int(row.get("standby_level") or 0),
+                         human_score=human_score, correction_reason=human_note)
+    else:
+        if not isinstance(human_score, int) or human_score < 1 or human_score > 10:
+            return jsonify({"error": "human_score must be an integer 1-10"}), 400
+        new_status = "passed" if human_score >= 6 else "failed"
+        execute_query(conn,
+            f"UPDATE test_results SET human_score = {ph}, human_note = {ph}, status = {ph} WHERE id = {ph} AND task_id IN (SELECT id FROM test_tasks WHERE user_id = {ph})",
+            (human_score, human_note, new_status, result_id, _current_uid()))
+        _save_correction(conn, eval_type="test_case", ref_id=str(result_id),
+                         dimension_code=row.get("dimension_code", ""),
+                         user_input=row.get("input_text", ""),
+                         ai_reply=row.get("actual_output", ""),
+                         auto_score=int(row.get("score") or 0),
+                         human_score=human_score, correction_reason=human_note)
 
     conn.commit()
     conn.close()
@@ -10250,7 +10374,14 @@ def create_scheduled_task():
     data = request.get_json() or {}
     task_type = data.get("task_type", "").strip()
     scheduled_at = data.get("scheduled_at", "").strip()
-    config = data.get("config", {})
+    config = data.get("config", {}) or {}
+
+    # eval_mode：仅 full_flow 有效，默认 chat
+    eval_mode = (config.get("eval_mode") or "chat").strip()
+    if eval_mode not in ("chat", "standby"):
+        return jsonify({"error": "config.eval_mode must be chat or standby"}), 400
+    if task_type != "full_flow":
+        eval_mode = "chat"
 
     if task_type not in ("generate", "execute", "evaluate", "full_flow"):
         return jsonify({"error": "task_type must be generate/execute/evaluate/full_flow"}), 400
@@ -10285,12 +10416,12 @@ def create_scheduled_task():
     conn = get_db_connection()
     uid = _current_uid()
     execute_query(conn, """
-        INSERT INTO scheduled_tasks (task_type, scheduled_at, config_json, status, user_id)
-        VALUES (%s, %s, %s, 'pending', %s)
+        INSERT INTO scheduled_tasks (task_type, scheduled_at, config_json, status, user_id, eval_mode)
+        VALUES (%s, %s, %s, 'pending', %s, %s)
     """ if USE_MYSQL else """
-        INSERT INTO scheduled_tasks (task_type, scheduled_at, config_json, status, user_id)
-        VALUES (?, ?, ?, 'pending', ?)
-    """, (task_type, scheduled_at, json.dumps(config, ensure_ascii=False), uid))
+        INSERT INTO scheduled_tasks (task_type, scheduled_at, config_json, status, user_id, eval_mode)
+        VALUES (?, ?, ?, 'pending', ?, ?)
+    """, (task_type, scheduled_at, json.dumps(config, ensure_ascii=False), uid, eval_mode))
     conn.commit()
 
     # 获取新创建的ID
@@ -10468,8 +10599,9 @@ def _run_scheduled_task(task):
                     conn.commit()
                     conn.close()
 
-                    # 同步评测
-                    _evaluate_task_worker(test_task_id, user_id=sched_uid_eval)
+                    # 同步评测（按预约任务记录的 eval_mode 分支：chat 1-10 分 / standby 5 档）
+                    sched_eval_mode = (task.get("eval_mode") or "chat").strip()
+                    _evaluate_task_worker(test_task_id, user_id=sched_uid_eval, eval_mode=sched_eval_mode)
                     result_ids.append(f"eval:{test_task_id}")
                 else:
                     conn.close()

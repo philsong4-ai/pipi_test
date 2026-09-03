@@ -4683,10 +4683,11 @@ var LLM_CONFIG_LABELS = {
   "case_review": "用例复核",
   "persona_gen": "画像与消息生成",
   "redteam_gen": "红队生成",
-  "redteam_judge": "红队裁判"
+  "redteam_judge": "红队裁判",
+  "eval_standby": "Standby 5档评测"
 };
 
-var EVAL_JUDGE_KEYS = ['eval_batch', 'eval_case', 'eval_realtime'];
+var EVAL_JUDGE_KEYS = ['eval_batch', 'eval_case', 'eval_realtime', 'eval_standby'];
 var COMMON_MODELS = ['qwen3.6-plus', 'qwen3.7-max', 'doubao-seed-2-0-pro', 'deepseek-v4-pro', 'gpt-4o', 'claude-sonnet-4'];
 
 function loadLlmConfig() {
@@ -4955,6 +4956,14 @@ function showScheduleModal() {
   h += '<input type="checkbox" id="sched-clear"> 清空已有用例后重新生成';
   h += '</label></div>';
 
+  // 评测方式（仅 full_flow 显示）
+  h += '<div class="form-group" id="sched-eval-mode-wrap" style="margin-bottom:12px;display:none">';
+  h += '<label>评测方式</label>';
+  h += '<div style="display:flex;gap:16px;padding:6px 0">';
+  h += '<label style="display:flex;align-items:center;gap:4px;font-size:13px"><input type="radio" name="sched-eval-mode" value="chat" checked> 原版（1-10分，4维度）</label>';
+  h += '<label style="display:flex;align-items:center;gap:4px;font-size:13px"><input type="radio" name="sched-eval-mode" value="standby"> Standby（5档 0-4）</label>';
+  h += '</div></div>';
+
   h += '<div style="margin-top:16px;display:flex;gap:8px">';
   h += '<button class="btn btn-primary" onclick="createScheduledTask()">创建预约</button>';
   h += '<button class="btn btn-secondary" onclick="closeModal()">取消</button>';
@@ -5003,6 +5012,17 @@ function showScheduleModal() {
   now.setMinutes(0);
   var timeStr = now.toISOString().slice(0,16);
   document.getElementById('sched-time').value = timeStr;
+
+  // 评测方式：仅 full_flow 时显示
+  var typeSel = document.getElementById('sched-type');
+  function toggleEvalMode() {
+    var wrap = document.getElementById('sched-eval-mode-wrap');
+    if (!wrap) return;
+    wrap.style.display = (typeSel.value === 'full_flow') ? 'block' : 'none';
+  }
+  typeSel.removeEventListener('change', toggleEvalMode);
+  typeSel.addEventListener('change', toggleEvalMode);
+  toggleEvalMode();
 }
 
 function createScheduledTask() {
@@ -5040,6 +5060,10 @@ function createScheduledTask() {
   };
   if (selectedDims.length > 0) {
     config.dimension_codes = selectedDims;
+  }
+  if (taskType === 'full_flow') {
+    var emRadio = document.querySelector('input[name="sched-eval-mode"]:checked');
+    config.eval_mode = emRadio ? emRadio.value : 'chat';
   }
 
   fetch('/api/scheduled_tasks', {
@@ -5489,14 +5513,29 @@ function loadTaskEvalResults() {
       var html = '<table style="width:100%;border-collapse:collapse;font-size:12px">';
       html += '<tr style="background:#f5f5f7"><th style="padding:6px;text-align:left">用例ID</th><th style="padding:6px">维度</th><th style="padding:6px;text-align:left">标题</th><th style="padding:6px">得分</th><th style="padding:6px">状态</th><th style="padding:6px;text-align:left">扣分原因</th><th style="padding:6px">操作</th></tr>';
       results.forEach(function(r) {
+        var isStandby = r.eval_method === 'standby';
         var statusBadge = r.status === 'passed' ? '<span style="color:#34c759">通过</span>' : '<span style="color:#ff3b30">失败</span>';
+        if (isStandby) {
+          statusBadge = '<span style="color:#5856d6;font-size:10px;border:1px solid #5856d6;padding:1px 4px;border-radius:3px;margin-right:4px">5档</span>' + statusBadge;
+        }
+        var displayScore, scoreColor;
+        if (isStandby) {
+          displayScore = (r.human_score !== null && r.human_score !== undefined) ? r.human_score + ' \u270f\ufe0f' : (r.standby_level != null ? r.standby_level : '-');
+          var lvl = (r.human_score !== null && r.human_score !== undefined) ? r.human_score : r.standby_level;
+          scoreColor = (lvl != null && lvl >= 3) ? '#34c759' : '#ff3b30';
+        } else {
+          displayScore = (r.human_score !== null && r.human_score !== undefined) ? r.human_score + ' \u270f\ufe0f' : (r.score || '-');
+          var sc = (r.human_score !== null && r.human_score !== undefined) ? r.human_score : r.score;
+          scoreColor = (sc != null && parseFloat(sc) >= 6) ? '#34c759' : '#ff3b30';
+        }
+        var deductionText = isStandby ? (r.standby_deduction || '-') : (r.deduction_reason || '-');
         html += '<tr style="border-bottom:1px solid #e8e8ed">';
         html += '<td style="padding:6px;font-family:monospace;font-size:10px">' + (r.case_code || '-') + (r.needs_review ? ' <span style="color:#ff9500;font-size:10px;border:1px solid #ff9500;padding:1px 4px;border-radius:3px;margin-left:4px">需复核</span>' : '') + '</td>';
         html += '<td style="padding:6px;text-align:center">' + (r.dimension_code || '-') + '</td>';
         html += '<td style="padding:6px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (r.title || '-') + '</td>';
-        html += '<td style="padding:6px;text-align:center;font-weight:600;color:' + ((r.human_score !== null && r.human_score !== undefined ? r.human_score : r.score) >= 6 ? '#34c759' : '#ff3b30') + '">' + (r.human_score !== null && r.human_score !== undefined ? r.human_score + ' \u270f\ufe0f' : (r.score || '-')) + '</td>';
+        html += '<td style="padding:6px;text-align:center;font-weight:600;color:' + scoreColor + '">' + displayScore + '</td>';
         html += '<td style="padding:6px;text-align:center">' + statusBadge + '</td>';
-        html += '<td style="padding:6px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ff3b30">' + (r.deduction_reason || '-') + '</td>';
+        html += '<td style="padding:6px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ff3b30">' + deductionText + '</td>';
         html += '<td style="padding:6px;text-align:center">';
         html += '<button class="btn btn-sm btn-secondary" onclick="viewEvalDetailV2(' + r.id + ',' + r.case_id + ')" style="padding:2px 6px;font-size:10px">详情</button>';
         if (r.status === 'failed') {
@@ -5613,7 +5652,17 @@ function _showEvalDetailV2(c, result) {
     content += '<p><b>实际输出:</b></p><pre style="background:#e8f5e8;padding:8px;border-radius:4px;white-space:pre-wrap;font-size:12px;max-height:100px;overflow-y:auto">' + result.actual_output + '</pre>';
   }
   content += '<hr style="margin:12px 0;border:none;border-top:1px solid #e8e8ed">';
-  if (result && result.score !== null) {
+  var _isStandby = result && result.eval_method === 'standby';
+  if (_isStandby) {
+    var _lvl = (result.human_score !== null && result.human_score !== undefined) ? result.human_score : result.standby_level;
+    var _mean = result.standby_score != null ? result.standby_score : null;
+    var _scoreColor = (_lvl != null && _lvl >= 3) ? '#34c759' : '#ff3b30';
+    content += '<p><b>Standby 5档评分:</b> <span style="font-size:18px;font-weight:600;color:' + _scoreColor + '">' + (_lvl != null ? _lvl : '-') + '</span>/4';
+    if (_mean != null) content += ' <span style="color:#86868b;font-size:12px">(均值 ' + _mean + ')</span>';
+    if (result.human_score !== null && result.human_score !== undefined) content += ' <span style="color:#ff9500">\u270f\ufe0f 人工纠正</span>';
+    content += '</p>';
+    if (result.standby_deduction) content += '<p><b>扣分原因:</b> <span style="color:#ff3b30">' + escapeHtml(result.standby_deduction) + '</span></p>';
+  } else if (result && result.score !== null) {
     var displayScore = result.human_score !== null && result.human_score !== undefined ? result.human_score : result.score;
     var scoreColor = displayScore >= 6 ? '#34c759' : '#ff3b30';
     content += '<p><b>评测得分:</b> <span style="font-size:18px;font-weight:600;color:' + scoreColor + '">' + displayScore + '</span>/10';
@@ -5623,6 +5672,44 @@ function _showEvalDetailV2(c, result) {
   }
   if (result && result.human_score !== null && result.human_score !== undefined && result.human_note) {
     content += '<p><b>纠正说明:</b> <span style="color:#ff9500">' + result.human_note + '</span></p>';
+  }
+  if (_isStandby && result && result.standby_eval_detail) {
+    var sbd = typeof result.standby_eval_detail === 'string' ? JSON.parse(result.standby_eval_detail) : result.standby_eval_detail;
+    if (sbd.hard_rule_hit && sbd.hard_rule_hit !== 'none') {
+      content += '<p style="margin-top:12px"><b>命中 0 分硬规则:</b> <span style="color:#ff3b30;font-weight:600">' + escapeHtml(sbd.hard_rule_hit) + '</span></p>';
+    }
+    if (sbd.intent_analysis) {
+      var ia = sbd.intent_analysis;
+      content += '<p style="margin-top:12px"><b>意图分析:</b> 信息浓度=' + escapeHtml(ia.info||'-') + ' · 情绪浓度=' + escapeHtml(ia.emotion||'-') + ' · 对话意愿度=' + escapeHtml(ia.willingness||'-') + '</p>';
+    }
+    if (sbd.strategy) {
+      content += '<p style="margin-top:8px"><b>策略组合:</b> ' + escapeHtml(sbd.strategy) + '</p>';
+    }
+    if (sbd.deduction_tags && sbd.deduction_tags.length > 0) {
+      content += '<p style="margin-top:12px"><b>结构化扣分标签:</b></p>';
+      content += '<div style="background:#fff8e1;padding:8px;border-radius:4px;font-size:12px">';
+      sbd.deduction_tags.forEach(function(t) {
+        content += '<span style="display:inline-block;margin:2px 4px;padding:2px 8px;background:#ffe082;border-radius:10px;color:#5d4037;font-size:11px">' + escapeHtml(t) + '</span>';
+      });
+      content += '</div>';
+    }
+    if (sbd.judges_detail && sbd.judges_detail.length > 0) {
+      var _ekMap = {timeout:'超时', no_response:'无响应', parse_failed:'解析失败', exception:'异常'};
+      var _validCount = sbd.judges_valid_count != null ? sbd.judges_valid_count : sbd.judges_detail.filter(function(j){return !j.error_kind;}).length;
+      var _totalCount = sbd.judges_total_count != null ? sbd.judges_total_count : sbd.judges_detail.length;
+      var _validHint = _validCount < _totalCount ? ' · <span style="color:#ff9500">有效 ' + _validCount + '/' + _totalCount + '</span>' : '';
+      content += '<p style="margin-top:12px"><b>多评测员明细</b> <span style="font-size:11px;color:#86868b">std=' + (sbd.judges_std || 0) + _validHint + '</span></p>';
+      content += '<div style="background:#f5f5f7;padding:8px;border-radius:4px;font-size:12px">';
+      content += '<table style="width:100%;border-collapse:collapse"><thead><tr style="border-bottom:2px solid #d2d2d7"><th style="text-align:left;padding:4px">模型</th><th style="text-align:center;padding:4px">分数</th><th style="text-align:center;padding:4px">硬规则</th><th style="text-align:left;padding:4px">原因</th></tr></thead><tbody>';
+      sbd.judges_detail.forEach(function(j) {
+        var _ek = j.error_kind || '';
+        var _rowStyle = _ek ? 'border-bottom:1px solid #eee;background:#fff5f5' : 'border-bottom:1px solid #eee';
+        var _hit = j.hard_rule_hit && j.hard_rule_hit !== 'none' ? '<span style="color:#ff3b30;font-weight:600">' + escapeHtml(j.hard_rule_hit) + '</span>' : '<span style="color:#86868b">-</span>';
+        content += '<tr style="' + _rowStyle + '"><td style="padding:4px">' + escapeHtml(j.model||'-') + '</td><td style="text-align:center;padding:4px;font-weight:600">' + (j.score !== undefined ? j.score : '-') + '</td><td style="text-align:center;padding:4px">' + _hit + '</td><td style="padding:4px;font-size:11px">' + escapeHtml((j.deduction_reason||'').slice(0,80)) + '</td></tr>';
+      });
+      content += '</tbody></table>';
+      content += '</div>';
+    }
   }
   if (result && result.eval_detail) {
     var ed = typeof result.eval_detail === 'string' ? JSON.parse(result.eval_detail) : result.eval_detail;
@@ -6347,7 +6434,17 @@ function _showResultDetail(c, result) {
     content += '<p><b>实际输出:</b></p><pre style="background:#e8f5e8;padding:8px;border-radius:4px;white-space:pre-wrap;font-size:12px;max-height:100px;overflow-y:auto">' + result.actual_output + '</pre>';
   }
   content += '<hr style="margin:12px 0;border:none;border-top:1px solid #e8e8ed">';
-  if (result && result.score !== null) {
+  var _isStandby = result && result.eval_method === 'standby';
+  if (_isStandby) {
+    var _lvl = (result.human_score !== null && result.human_score !== undefined) ? result.human_score : result.standby_level;
+    var _mean = result.standby_score != null ? result.standby_score : null;
+    var _scoreColor = (_lvl != null && _lvl >= 3) ? '#34c759' : '#ff3b30';
+    content += '<p><b>Standby 5档评分:</b> <span style="font-size:18px;font-weight:600;color:' + _scoreColor + '">' + (_lvl != null ? _lvl : '-') + '</span>/4';
+    if (_mean != null) content += ' <span style="color:#86868b;font-size:12px">(均值 ' + _mean + ')</span>';
+    if (result.human_score !== null && result.human_score !== undefined) content += ' <span style="color:#ff9500">\u270f\ufe0f 人工纠正</span>';
+    content += '</p>';
+    if (result.standby_deduction) content += '<p><b>扣分原因:</b> <span style="color:#ff3b30">' + escapeHtml(result.standby_deduction) + '</span></p>';
+  } else if (result && result.score !== null) {
     var displayScore = result.human_score !== null && result.human_score !== undefined ? result.human_score : result.score;
     var scoreColor = displayScore >= 6 ? '#34c759' : '#ff3b30';
     content += '<p><b>评测得分:</b> <span style="font-size:18px;font-weight:600;color:' + scoreColor + '">' + displayScore + '</span>/10';
@@ -6357,6 +6454,44 @@ function _showResultDetail(c, result) {
   }
   if (result && result.human_score !== null && result.human_score !== undefined && result.human_note) {
     content += '<p><b>纠正说明:</b> <span style="color:#ff9500">' + result.human_note + '</span></p>';
+  }
+  if (_isStandby && result && result.standby_eval_detail) {
+    var sbd = typeof result.standby_eval_detail === 'string' ? JSON.parse(result.standby_eval_detail) : result.standby_eval_detail;
+    if (sbd.hard_rule_hit && sbd.hard_rule_hit !== 'none') {
+      content += '<p style="margin-top:12px"><b>命中 0 分硬规则:</b> <span style="color:#ff3b30;font-weight:600">' + escapeHtml(sbd.hard_rule_hit) + '</span></p>';
+    }
+    if (sbd.intent_analysis) {
+      var ia = sbd.intent_analysis;
+      content += '<p style="margin-top:12px"><b>意图分析:</b> 信息浓度=' + escapeHtml(ia.info||'-') + ' · 情绪浓度=' + escapeHtml(ia.emotion||'-') + ' · 对话意愿度=' + escapeHtml(ia.willingness||'-') + '</p>';
+    }
+    if (sbd.strategy) {
+      content += '<p style="margin-top:8px"><b>策略组合:</b> ' + escapeHtml(sbd.strategy) + '</p>';
+    }
+    if (sbd.deduction_tags && sbd.deduction_tags.length > 0) {
+      content += '<p style="margin-top:12px"><b>结构化扣分标签:</b></p>';
+      content += '<div style="background:#fff8e1;padding:8px;border-radius:4px;font-size:12px">';
+      sbd.deduction_tags.forEach(function(t) {
+        content += '<span style="display:inline-block;margin:2px 4px;padding:2px 8px;background:#ffe082;border-radius:10px;color:#5d4037;font-size:11px">' + escapeHtml(t) + '</span>';
+      });
+      content += '</div>';
+    }
+    if (sbd.judges_detail && sbd.judges_detail.length > 0) {
+      var _ekMap = {timeout:'超时', no_response:'无响应', parse_failed:'解析失败', exception:'异常'};
+      var _validCount = sbd.judges_valid_count != null ? sbd.judges_valid_count : sbd.judges_detail.filter(function(j){return !j.error_kind;}).length;
+      var _totalCount = sbd.judges_total_count != null ? sbd.judges_total_count : sbd.judges_detail.length;
+      var _validHint = _validCount < _totalCount ? ' · <span style="color:#ff9500">有效 ' + _validCount + '/' + _totalCount + '</span>' : '';
+      content += '<p style="margin-top:12px"><b>多评测员明细</b> <span style="font-size:11px;color:#86868b">std=' + (sbd.judges_std || 0) + _validHint + '</span></p>';
+      content += '<div style="background:#f5f5f7;padding:8px;border-radius:4px;font-size:12px">';
+      content += '<table style="width:100%;border-collapse:collapse"><thead><tr style="border-bottom:2px solid #d2d2d7"><th style="text-align:left;padding:4px">模型</th><th style="text-align:center;padding:4px">分数</th><th style="text-align:center;padding:4px">硬规则</th><th style="text-align:left;padding:4px">原因</th></tr></thead><tbody>';
+      sbd.judges_detail.forEach(function(j) {
+        var _ek = j.error_kind || '';
+        var _rowStyle = _ek ? 'border-bottom:1px solid #eee;background:#fff5f5' : 'border-bottom:1px solid #eee';
+        var _hit = j.hard_rule_hit && j.hard_rule_hit !== 'none' ? '<span style="color:#ff3b30;font-weight:600">' + escapeHtml(j.hard_rule_hit) + '</span>' : '<span style="color:#86868b">-</span>';
+        content += '<tr style="' + _rowStyle + '"><td style="padding:4px">' + escapeHtml(j.model||'-') + '</td><td style="text-align:center;padding:4px;font-weight:600">' + (j.score !== undefined ? j.score : '-') + '</td><td style="text-align:center;padding:4px">' + _hit + '</td><td style="padding:4px;font-size:11px">' + escapeHtml((j.deduction_reason||'').slice(0,80)) + '</td></tr>';
+      });
+      content += '</tbody></table>';
+      content += '</div>';
+    }
   }
   if (result && result.eval_detail) {
     var ed = typeof result.eval_detail === 'string' ? JSON.parse(result.eval_detail) : result.eval_detail;
