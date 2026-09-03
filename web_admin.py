@@ -11,6 +11,7 @@ import sys
 import random
 import threading
 import datetime
+import html as _html
 from typing import Dict, List
 
 # 给 print() 加时间戳
@@ -5551,10 +5552,12 @@ def _eval_case_core(result_row: Dict, conn, chat_corrections: List[Dict] = None,
         execute_query(conn,
             f"UPDATE test_results SET eval_method = 'standby', "
             f"standby_score = {ph}, standby_level = {ph}, standby_deduction = {ph}, "
-            f"standby_eval_detail = {ph}, standby_status = {ph} "
+            f"standby_eval_detail = {ph}, standby_status = {ph}, "
+            f"status = {ph} "
             f"WHERE id = {ph}",
             (standby_score, standby_level, standby_deduction,
-             standby_eval_detail, standby_status, result_row["id"]))
+             standby_eval_detail, standby_status, standby_status,
+             result_row["id"]))
         conn.commit()
 
         judges_std = eval_result.get("judges_std", 0) or 0
@@ -7022,11 +7025,11 @@ def generate_standby_report_v2():
         hit_badge = f'<span style="color:#ff3b30;font-weight:600">{STANDBY_HARD_RULE_NAMES.get(hit, hit)}</span>' if hit != "none" else '<span style="color:#86868b">未命中</span>'
         failed_details += f"""
         <div class="case-card">
-            <div style="font-weight:600;margin-bottom:6px">{r.get('case_code','')} - {escape_html(r.get('title',''))}</div>
-            <div style="color:#86868b;font-size:12px">档位: <b style="color:{level_colors.get(int(r.get('standby_level') or 0))}">{r.get('standby_level')}</b> · 均值 {r.get('standby_score')} · 策略 {strategy} · 硬规则 {hit_badge}</div>
-            <div style="color:#86868b;font-size:12px;margin-top:6px">用户输入: {escapeHtml(r.get('input_text','')[:200])}</div>
-            <div style="color:#86868b;font-size:12px;margin-top:4px">玩偶回复: {escapeHtml(r.get('actual_output','')[:300])}</div>
-            <div style="color:#ff3b30;font-size:12px;margin-top:4px">扣分原因: {escapeHtml(r.get('standby_deduction',''))}</div>
+            <div style="font-weight:600;margin-bottom:6px">{_html.escape(str(r.get('case_code','')))} - {_html.escape(str(r.get('title','')))}</div>
+            <div style="color:#86868b;font-size:12px">档位: <b style="color:{level_colors.get(int(r.get('standby_level') or 0))}">{r.get('standby_level')}</b> · 均值 {r.get('standby_score')} · 策略 {_html.escape(str(strategy))} · 硬规则 {hit_badge}</div>
+            <div style="color:#86868b;font-size:12px;margin-top:6px">用户输入: {_html.escape(str(r.get('input_text',''))[:200])}</div>
+            <div style="color:#86868b;font-size:12px;margin-top:4px">玩偶回复: {_html.escape(str(r.get('actual_output',''))[:300])}</div>
+            <div style="color:#ff3b30;font-size:12px;margin-top:4px">扣分原因: {_html.escape(str(r.get('standby_deduction','')))}</div>
         </div>"""
 
     summary_text = ""
