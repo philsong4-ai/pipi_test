@@ -5826,10 +5826,12 @@ function exportEvalExcelV2() {
   }
   var clusterFilter = document.getElementById('eval-filter-cluster-v2') ? document.getElementById('eval-filter-cluster-v2').value : '';
   var statusFilter = document.getElementById('eval-filter-status-v2') ? document.getElementById('eval-filter-status-v2').value : '';
-  var url = '/api/test_report_excel?task_id=' + currentSelectedTaskId;
-  if (clusterFilter) url += '&cluster_code=' + clusterFilter;
-  if (statusFilter) url += '&status=' + statusFilter;
-  window.open(url, '_blank');
+  var extra = '';
+  if (clusterFilter) extra += '&cluster_code=' + clusterFilter;
+  if (statusFilter) extra += '&status=' + statusFilter;
+  dispatchTaskReportUrl(currentSelectedTaskId, 'excel', extra).then(function(url) {
+    window.open(url, '_blank');
+  });
 }
 
 // ─── Jira 集成 ─────────────────────────────────
@@ -6264,9 +6266,33 @@ function showExecutionDetailModal(c, result, taskId) {
   document.getElementById('modal-bg').style.display = 'flex';
 }
 
+// 按任务 eval_method 分派报告 URL（standby 走独立路由，chat 走原路由）
+function dispatchTaskReportUrl(taskId, kind, extraParams) {
+  // kind: 'html' or 'excel'; extraParams: string like '&cluster_code=X'
+  return fetch('/api/test_tasks/' + taskId)
+    .then(function(r) { return r.json(); })
+    .then(function(t) {
+      var isStandby = (t && t.eval_method === 'standby');
+      var base;
+      if (kind === 'html') {
+        base = isStandby ? '/api/standby_report_v2' : '/api/test_report_v2';
+      } else {
+        base = isStandby ? '/api/standby_report_excel' : '/api/test_report_excel';
+      }
+      return base + '?task_id=' + taskId + (extraParams || '');
+    })
+    .catch(function() {
+      // 查询失败回退到原 chat 路由
+      var base = (kind === 'html') ? '/api/test_report_v2' : '/api/test_report_excel';
+      return base + '?task_id=' + taskId + (extraParams || '');
+    });
+}
+
 // 查看任务报告 V2
 function viewTaskReportV2(taskId) {
-  window.open('/api/test_report_v2?task_id=' + taskId, '_blank');
+  dispatchTaskReportUrl(taskId, 'html').then(function(url) {
+    window.open(url, '_blank');
+  });
 }
 
 // 加载评测页面的任务下拉
@@ -6392,12 +6418,14 @@ function exportEvalExcel() {
     alert('请先选择测试任务');
     return;
   }
-  var url = '/api/test_report_excel?task_id=' + taskId;
   var clusterFilter = document.getElementById('eval-filter-cluster') ? document.getElementById('eval-filter-cluster').value : '';
   var statusFilter = document.getElementById('eval-filter-status').value;
-  if (clusterFilter) url += '&cluster_code=' + clusterFilter;
-  if (statusFilter) url += '&status=' + statusFilter;
-  window.open(url, '_blank');
+  var extra = '';
+  if (clusterFilter) extra += '&cluster_code=' + clusterFilter;
+  if (statusFilter) extra += '&status=' + statusFilter;
+  dispatchTaskReportUrl(taskId, 'excel', extra).then(function(url) {
+    window.open(url, '_blank');
+  });
 }
 
 // 查看结果详情（支持上一条/下一条切换）
@@ -6635,26 +6663,33 @@ function previewReport() {
     return;
   }
 
-  fetch('/api/test_report_v2?task_id=' + taskId)
-    .then(r => r.json())
-    .then(data => {
+  dispatchTaskReportUrl(taskId, 'html').then(function(url) {
+    fetch(url)
+      .then(r => r.json())
+      .then(data => {
       if (data.error) {
         preview.innerHTML = '<div style="color:#ff3b30">错误: ' + data.error + '</div>';
         return;
       }
+      var isStandby = (data.task && data.task.eval_method === 'standby');
       var html = '<div style="font-size:13px">';
       html += '<h4>' + data.task.name + '</h4>';
-      html += '<p>任务ID: ' + data.task.task_id + '</p>';
+      html += '<p>任务ID: ' + data.task.task_id + (isStandby ? ' <span style="color:#86868b">(Standby 5档)</span>' : '') + '</p>';
       html += '<div style="display:flex;gap:20px;margin:16px 0">';
       html += '<div><span style="font-size:24px;font-weight:600">' + data.summary.total + '</span><br>总用例</div>';
       html += '<div><span style="font-size:24px;font-weight:600;color:#34c759">' + data.summary.passed + '</span><br>通过</div>';
       html += '<div><span style="font-size:24px;font-weight:600;color:#ff3b30">' + data.summary.failed + '</span><br>失败</div>';
       html += '<div><span style="font-size:24px;font-weight:600;color:#007aff">' + data.summary.pass_rate + '%</span><br>通过率</div>';
-      html += '<div><span style="font-size:24px;font-weight:600">' + data.summary.avg_score + '</span><br>平均分</div>';
+      if (isStandby) {
+        html += '<div><span style="font-size:24px;font-weight:600">' + (data.summary.avg_level !== undefined ? data.summary.avg_level : '-') + '</span><br>平均档位</div>';
+      } else {
+        html += '<div><span style="font-size:24px;font-weight:600">' + data.summary.avg_score + '</span><br>平均分</div>';
+      }
       html += '</div>';
       html += '</div>';
       preview.innerHTML = html;
     });
+  });
 }
 
 // 查看完整报告 V2
@@ -6665,7 +6700,9 @@ function viewTestReportV2() {
     return;
   }
   // 打开HTML报告
-  window.open('/api/test_report_v2?task_id=' + taskId, '_blank');
+  dispatchTaskReportUrl(taskId, 'html').then(function(url) {
+    window.open(url, '_blank');
+  });
 }
 
 // 下载报告 V2
@@ -6676,7 +6713,9 @@ function downloadTestReportV2() {
     return;
   }
   // 下载Excel报告
-  window.location.href = '/api/test_report_excel?task_id=' + taskId;
+  dispatchTaskReportUrl(taskId, 'excel').then(function(url) {
+    window.location.href = url;
+  });
 }
 
 // 初始化执行维度选择框

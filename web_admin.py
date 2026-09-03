@@ -5125,12 +5125,22 @@ def get_test_task(task_id):
     """获取测试任务详情"""
     conn = get_db_connection()
     row = execute_query(conn, "SELECT * FROM test_tasks WHERE id = %s AND user_id = %s", (task_id, _current_uid()), fetch_one=True)
+    # 探测任务的评测方式：取第一条 test_result 的 eval_method
+    eval_method_row = execute_query(conn,
+        "SELECT eval_method FROM test_results WHERE task_id = %s AND eval_method IS NOT NULL "
+        "ORDER BY id LIMIT 1" if USE_MYSQL else
+        "SELECT eval_method FROM test_results WHERE task_id = ? AND eval_method IS NOT NULL "
+        "ORDER BY id LIMIT 1",
+        (task_id,), fetch_one=True)
     conn.close()
 
     if not row:
         return jsonify({"error": "task not found"}), 404
 
     row = row_to_dict(row)
+    eval_method = "chat"
+    if eval_method_row:
+        eval_method = (row_to_dict(eval_method_row) or {}).get("eval_method") or "chat"
     return jsonify({
         "id": row["id"],
         "task_id": row["task_id"],
@@ -5146,6 +5156,7 @@ def get_test_task(task_id):
         "started_at": str(row.get("started_at", "")) if row.get("started_at") else None,
         "completed_at": str(row.get("completed_at", "")) if row.get("completed_at") else None,
         "error_message": row.get("error_message"),
+        "eval_method": eval_method,
     })
 
 
@@ -6804,6 +6815,493 @@ def export_test_report_excel():
 
     filename = f"report_{task.get('persona_id', 'unknown')}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
 
+    return output.getvalue(), 200, {
+        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Content-Disposition": f"attachment; filename={filename}"
+    }
+
+
+# ─── Standby 5 档评测报告（独立路由，不污染 chat 报告） ──────────────────────
+
+STANDBY_LEVEL_NAMES = {
+    0: "0-有害", 1: "1-无用", 2: "2-瑕疵", 3: "3-可用", 4: "4-满足",
+}
+STANDBY_HARD_RULE_NAMES = {
+    "none": "未命中", "fact_wrong": "事实错", "hallucination": "模型幻觉",
+    "safety": "安全风险", "brand": "品牌约束(玩偶版)",
+}
+STANDBY_STRATEGY_NAMES = {
+    "高效闭环": "高效闭环", "专家引导": "专家引导", "综合支持": "综合支持",
+    "情感镜映": "情感镜映", "情感共鸣": "情感共鸣", "趣味探索": "趣味探索",
+}
+
+
+@app.route("/api/standby_report_v2", methods=["GET"])
+def generate_standby_report_v2():
+    """Standby 5 档评测报告（HTML / JSON）。
+    参数: task_id（必需）、format=html（默认）/json
+    """
+    task_id = request.args.get("task_id")
+    output_format = request.args.get("format", "html")
+    if not task_id:
+        return jsonify({"error": "task_id required"}), 400
+
+    conn = get_db_connection()
+    task = execute_query(conn, "SELECT * FROM test_tasks WHERE id = %s", (task_id,), fetch_one=True)
+    if not task:
+        conn.close()
+        return jsonify({"error": "task not found"}), 404
+    task = row_to_dict(task)
+    report_target_api = task.get("target_api") or "pipi"
+
+    results = execute_query(conn,
+        """SELECT r.id, r.case_id, r.actual_output, r.executed_at, r.status,
+                  r.eval_method, r.standby_score, r.standby_level, r.standby_deduction,
+                  r.standby_eval_detail, r.standby_status, r.human_score, r.human_note,
+                  c.case_id as case_code, c.dimension_code, c.title, c.test_point,
+                  c.input_text, c.expected_output
+           FROM test_results r
+           JOIN test_cases c ON r.case_id = c.id
+           WHERE r.task_id = %s AND r.eval_method = 'standby'
+           ORDER BY c.dimension_code, c.case_id""",
+        (task_id,), fetch_all=True)
+    results = [row_to_dict(r) for r in results]
+
+    dims = execute_query(conn,
+        "SELECT dimension_code, dimension_name, cluster_code, cluster_name FROM test_dimensions WHERE target_api = %s" if USE_MYSQL else
+        "SELECT dimension_code, dimension_name, cluster_code, cluster_name FROM test_dimensions WHERE target_api = ?",
+        (report_target_api,), fetch_all=True)
+    dim_map = {row_to_dict(d)["dimension_code"]: row_to_dict(d) for d in dims}
+    conn.close()
+
+    # 解析 standby_eval_detail JSON
+    for r in results:
+        sd = r.get("standby_eval_detail")
+        if sd and isinstance(sd, str):
+            try:
+                r["_standby_detail"] = json.loads(sd)
+            except Exception:
+                r["_standby_detail"] = {}
+        else:
+            r["_standby_detail"] = sd or {}
+
+    total = len(results)
+    evaluated = [r for r in results if r.get("standby_level") is not None]
+    passed = [r for r in evaluated if r.get("standby_status") == "passed" or (r.get("standby_level") or 0) >= 3]
+    failed = [r for r in evaluated if r not in passed]
+    levels = [int(r["standby_level"]) for r in evaluated if r.get("standby_level") is not None]
+    scores = [float(r["standby_score"]) for r in evaluated if r.get("standby_score") is not None]
+    avg_level = round(sum(levels) / len(levels), 2) if levels else 0
+    avg_score = round(sum(scores) / len(scores), 2) if scores else 0
+    pass_rate = round(len(passed) / len(evaluated) * 100, 1) if evaluated else 0
+
+    # 档位分布
+    level_dist = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0}
+    for r in evaluated:
+        lvl = r.get("standby_level")
+        if lvl is not None:
+            level_dist[int(lvl)] = level_dist.get(int(lvl), 0) + 1
+
+    # 硬规则命中分布
+    hard_rule_dist = {k: 0 for k in STANDBY_HARD_RULE_NAMES}
+    for r in evaluated:
+        hit = (r.get("_standby_detail") or {}).get("hard_rule_hit", "none") or "none"
+        hard_rule_dist[hit] = hard_rule_dist.get(hit, 0) + 1
+
+    # 策略分布
+    strategy_dist = {k: 0 for k in STANDBY_STRATEGY_NAMES}
+    for r in evaluated:
+        st = (r.get("_standby_detail") or {}).get("strategy", "") or ""
+        if st:
+            strategy_dist[st] = strategy_dist.get(st, 0) + 1
+
+    # 扣分标签频次 top 10
+    tag_freq = {}
+    for r in evaluated:
+        for t in (r.get("_standby_detail") or {}).get("deduction_tags", []) or []:
+            tag_freq[t] = tag_freq.get(t, 0) + 1
+    top_tags = sorted(tag_freq.items(), key=lambda x: -x[1])[:10]
+
+    # 多裁判一致性
+    stds = [float((r.get("_standby_detail") or {}).get("judges_std", 0) or 0) for r in evaluated]
+    avg_std = round(sum(stds) / len(stds), 2) if stds else 0
+
+    if output_format == "json":
+        return jsonify({
+            "task": {
+                "id": task["id"], "task_id": task.get("task_id", ""),
+                "name": task.get("name", ""), "status": task["status"],
+                "created_at": str(task.get("created_at", "")),
+                "target_api": report_target_api,
+                "eval_method": "standby",
+            },
+            "summary": {
+                "total": total, "evaluated": len(evaluated),
+                "passed": len(passed), "failed": len(failed),
+                "pass_rate": pass_rate,
+                "avg_level": avg_level, "avg_score": avg_score,
+                "avg_judges_std": avg_std,
+            },
+            "level_distribution": level_dist,
+            "hard_rule_distribution": hard_rule_dist,
+            "strategy_distribution": strategy_dist,
+            "top_deduction_tags": top_tags,
+            "results": [{
+                "id": r.get("id"), "case_code": r.get("case_code"),
+                "dimension_code": r.get("dimension_code"),
+                "title": r.get("title"),
+                "level": r.get("standby_level"),
+                "score": r.get("standby_score"),
+                "hard_rule_hit": (r.get("_standby_detail") or {}).get("hard_rule_hit", "none"),
+                "strategy": (r.get("_standby_detail") or {}).get("strategy", ""),
+                "deduction": r.get("standby_deduction"),
+                "status": r.get("standby_status"),
+                "actual_output": r.get("actual_output"),
+            } for r in results],
+        })
+
+    # HTML 报告
+    report_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    task_created = task.get("created_at", "")
+    if hasattr(task_created, "strftime"):
+        task_created = task_created.strftime("%Y-%m-%d %H:%M:%S")
+
+    _ta = report_target_api.lower()
+    target_api_label = {"oho": "OHO", "pipi": "皮皮"}.get(_ta, _ta)
+
+    # 档位分布条形图
+    level_colors = {0: "#ff3b30", 1: "#ff6b00", 2: "#ff9500", 3: "#34c759", 4: "#007aff"}
+    level_labels = {0: "0-有害", 1: "1-无用", 2: "2-瑕疵", 3: "3-可用", 4: "4-满足"}
+    max_level = max(level_dist.values()) if level_dist.values() else 1
+    level_bars = ""
+    for lvl in [4, 3, 2, 1, 0]:
+        cnt = level_dist.get(lvl, 0)
+        pct = round(cnt / len(evaluated) * 100) if evaluated else 0
+        w = round(cnt / max_level * 100) if max_level > 0 else 0
+        level_bars += f"""
+        <div style="display:flex;align-items:center;margin-bottom:8px">
+            <div style="width:100px;font-size:13px">{level_labels[lvl]}</div>
+            <div style="flex:1;background:#f5f5f7;border-radius:4px;height:24px;margin:0 12px">
+                <div style="width:{w}%;background:{level_colors[lvl]};height:100%;border-radius:4px"></div>
+            </div>
+            <div style="width:80px;text-align:right;font-size:13px">{cnt} ({pct}%)</div>
+        </div>"""
+
+    # 硬规则命中分布
+    hard_rule_rows = ""
+    for code in ["none", "fact_wrong", "hallucination", "safety", "brand"]:
+        cnt = hard_rule_dist.get(code, 0)
+        pct = round(cnt / len(evaluated) * 100) if evaluated else 0
+        color = "#34c759" if code == "none" else "#ff3b30"
+        hard_rule_rows += f"""
+        <tr>
+            <td>{STANDBY_HARD_RULE_NAMES[code]}</td>
+            <td>{cnt}</td>
+            <td>{pct}%</td>
+            <td style="color:{color};font-weight:600">{'✓' if code == 'none' else '✗'}</td>
+        </tr>"""
+
+    # 策略分布
+    strategy_rows = ""
+    for s in STANDBY_STRATEGY_NAMES:
+        cnt = strategy_dist.get(s, 0)
+        pct = round(cnt / len(evaluated) * 100) if evaluated else 0
+        strategy_rows += f"<tr><td>{s}</td><td>{cnt}</td><td>{pct}%</td></tr>"
+
+    # 扣分标签 top 10
+    tag_rows = ""
+    for i, (t, c) in enumerate(top_tags, 1):
+        tag_rows += f"<tr><td>{i}</td><td>{t}</td><td>{c}</td></tr>"
+
+    # 失败用例详情
+    failed_details = ""
+    for r in failed:
+        sd = r.get("_standby_detail") or {}
+        hit = sd.get("hard_rule_hit", "none")
+        strategy = sd.get("strategy", "")
+        hit_badge = f'<span style="color:#ff3b30;font-weight:600">{STANDBY_HARD_RULE_NAMES.get(hit, hit)}</span>' if hit != "none" else '<span style="color:#86868b">未命中</span>'
+        failed_details += f"""
+        <div class="case-card">
+            <div style="font-weight:600;margin-bottom:6px">{r.get('case_code','')} - {escape_html(r.get('title',''))}</div>
+            <div style="color:#86868b;font-size:12px">档位: <b style="color:{level_colors.get(int(r.get('standby_level') or 0))}">{r.get('standby_level')}</b> · 均值 {r.get('standby_score')} · 策略 {strategy} · 硬规则 {hit_badge}</div>
+            <div style="color:#86868b;font-size:12px;margin-top:6px">用户输入: {escapeHtml(r.get('input_text','')[:200])}</div>
+            <div style="color:#86868b;font-size:12px;margin-top:4px">玩偶回复: {escapeHtml(r.get('actual_output','')[:300])}</div>
+            <div style="color:#ff3b30;font-size:12px;margin-top:4px">扣分原因: {escapeHtml(r.get('standby_deduction',''))}</div>
+        </div>"""
+
+    summary_text = ""
+    if pass_rate >= 80:
+        summary_text = f"整体表现优秀，通过率 {pass_rate}%，平均档位 {avg_level}/4。"
+    elif pass_rate >= 60:
+        summary_text = f"整体表现合格，通过率 {pass_rate}%，平均档位 {avg_level}/4，存在改进空间。"
+    else:
+        summary_text = f"整体表现不佳，通过率 {pass_rate}%，平均档位 {avg_level}/4，需重点优化。"
+
+    html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Standby 5档评测报告 - {task.get('task_id','')}</title>
+<style>
+body {{ font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; background:#f5f5f7; margin:0; padding:20px; color:#1d1d1f; }}
+.container {{ max-width: 1100px; margin: 0 auto; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }}
+h1 {{ color: #1f3a5f; border-bottom: 3px solid #5856d6; padding-bottom: 10px; font-size: 24px; }}
+h2 {{ color: #1f3a5f; margin-top: 32px; font-size: 18px; border-left: 4px solid #5856d6; padding-left: 10px; }}
+.kpi-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin: 24px 0; }}
+.kpi {{ background: #f5f5f7; padding: 16px; border-radius: 8px; text-align: center; }}
+.kpi-value {{ font-size: 28px; font-weight: 700; color: #1f3a5f; }}
+.kpi-label {{ font-size: 12px; color: #86868b; margin-top: 4px; }}
+.kpi-pass {{ color: #34c759; }}
+.kpi-fail {{ color: #ff3b30; }}
+table {{ width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 13px; }}
+th {{ background: #f5f5f7; padding: 10px; text-align: left; font-weight: 600; border-bottom: 2px solid #d2d2d7; }}
+td {{ padding: 8px 10px; border-bottom: 1px solid #e8e8ed; }}
+.case-card {{ background: #fafafa; padding: 12px; border-radius: 6px; margin-bottom: 12px; border-left: 3px solid #ff3b30; }}
+.meta {{ color: #86868b; font-size: 12px; margin: 4px 0; }}
+.badge-standby {{ background: #5856d6; color: white; padding: 2px 10px; border-radius: 10px; font-size: 11px; margin-left: 10px; }}
+</style>
+</head>
+<body>
+<div class="container">
+    <h1>Standby 5档评测报告 <span class="badge-standby">5档</span></h1>
+    <div class="meta">任务ID: {task.get('task_id','')} · 任务名称: {task.get('name','')} · 接口: {target_api_label} · 创建时间: {task_created} · 报告生成: {report_time}</div>
+
+    <h2>核心指标</h2>
+    <div class="kpi-grid">
+        <div class="kpi"><div class="kpi-value">{total}</div><div class="kpi-label">总用例数</div></div>
+        <div class="kpi"><div class="kpi-value kpi-pass">{len(passed)}</div><div class="kpi-label">通过（≥3档）</div></div>
+        <div class="kpi"><div class="kpi-value kpi-fail">{len(failed)}</div><div class="kpi-label">失败（&lt;3档）</div></div>
+        <div class="kpi"><div class="kpi-value">{pass_rate}%</div><div class="kpi-label">通过率</div></div>
+        <div class="kpi"><div class="kpi-value">{avg_level}</div><div class="kpi-label">平均档位（/4）</div></div>
+        <div class="kpi"><div class="kpi-value">{avg_score}</div><div class="kpi-label">平均均值分（/4）</div></div>
+        <div class="kpi"><div class="kpi-value">{avg_std}</div><div class="kpi-label">裁判一致性 std</div></div>
+        <div class="kpi"><div class="kpi-value">{hard_rule_dist.get('fact_wrong',0)+hard_rule_dist.get('hallucination',0)+hard_rule_dist.get('safety',0)+hard_rule_dist.get('brand',0)}</div><div class="kpi-label">命中0分硬规则</div></div>
+    </div>
+    <div class="meta">{summary_text}</div>
+
+    <h2>档位分布</h2>
+    {level_bars}
+
+    <h2>0 分硬规则命中分布</h2>
+    <table>
+        <thead><tr><th>规则</th><th>数量</th><th>占比</th><th>状态</th></tr></thead>
+        <tbody>{hard_rule_rows}</tbody>
+    </table>
+
+    <h2>策略组合分布</h2>
+    <table>
+        <thead><tr><th>策略</th><th>数量</th><th>占比</th></tr></thead>
+        <tbody>{strategy_rows}</tbody>
+    </table>
+
+    <h2>扣分标签 Top 10</h2>
+    <table>
+        <thead><tr><th>#</th><th>标签</th><th>次数</th></tr></thead>
+        <tbody>{tag_rows if tag_rows else '<tr><td colspan=3 style=text-align:center;color:#aeaeb2>无扣分标签</td></tr>'}</tbody>
+    </table>
+
+    <h2>失败用例详情（{len(failed)} 个）</h2>
+    {failed_details if failed_details else '<div style="color:#aeaeb2;text-align:center;padding:20px">无失败用例</div>'}
+</div>
+</body>
+</html>"""
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+@app.route("/api/standby_report_excel", methods=["GET"])
+def export_standby_report_excel():
+    """导出 Standby 5档评测报告 Excel。参数: task_id（必需）"""
+    from io import BytesIO
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    task_id = request.args.get("task_id")
+    if not task_id:
+        return jsonify({"error": "task_id required"}), 400
+
+    conn = get_db_connection()
+    task = execute_query(conn, "SELECT * FROM test_tasks WHERE id = %s", (task_id,), fetch_one=True)
+    if not task:
+        conn.close()
+        return jsonify({"error": "task not found"}), 404
+    task = row_to_dict(task)
+
+    results = execute_query(conn,
+        """SELECT r.id, r.case_id, r.actual_output, r.executed_at,
+                  r.eval_method, r.standby_score, r.standby_level, r.standby_deduction,
+                  r.standby_eval_detail, r.standby_status, r.human_score, r.human_note,
+                  c.case_id as case_code, c.dimension_code, c.title, c.test_point,
+                  c.input_text, c.expected_output
+           FROM test_results r
+           JOIN test_cases c ON r.case_id = c.id
+           WHERE r.task_id = %s AND r.eval_method = 'standby'
+           ORDER BY c.dimension_code, c.case_id""",
+        (task_id,), fetch_all=True)
+    results = [row_to_dict(r) for r in results]
+    conn.close()
+
+    for r in results:
+        sd = r.get("standby_eval_detail")
+        if sd and isinstance(sd, str):
+            try:
+                r["_sd"] = json.loads(sd)
+            except Exception:
+                r["_sd"] = {}
+        else:
+            r["_sd"] = sd or {}
+
+    total = len(results)
+    evaluated = [r for r in results if r.get("standby_level") is not None]
+    passed = [r for r in evaluated if (r.get("standby_level") or 0) >= 3]
+    failed = [r for r in evaluated if r not in passed]
+    levels = [int(r["standby_level"]) for r in evaluated if r.get("standby_level") is not None]
+    scores = [float(r["standby_score"]) for r in evaluated if r.get("standby_score") is not None]
+    avg_level = round(sum(levels) / len(levels), 2) if levels else 0
+    avg_score = round(sum(scores) / len(scores), 2) if scores else 0
+    pass_rate = round(len(passed) / len(evaluated) * 100, 1) if evaluated else 0
+
+    level_dist = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0}
+    for r in evaluated:
+        lvl = r.get("standby_level")
+        if lvl is not None:
+            level_dist[int(lvl)] = level_dist.get(int(lvl), 0) + 1
+
+    hard_rule_dist = {k: 0 for k in STANDBY_HARD_RULE_NAMES}
+    for r in evaluated:
+        hit = (r.get("_sd") or {}).get("hard_rule_hit", "none") or "none"
+        hard_rule_dist[hit] = hard_rule_dist.get(hit, 0) + 1
+
+    strategy_dist = {k: 0 for k in STANDBY_STRATEGY_NAMES}
+    for r in evaluated:
+        st = (r.get("_sd") or {}).get("strategy", "") or ""
+        if st:
+            strategy_dist[st] = strategy_dist.get(st, 0) + 1
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "汇总统计"
+
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="5856D6", end_color="5856D6", fill_type="solid")
+    thin = Border(left=Side(style='thin'), right=Side(style='thin'),
+                  top=Side(style='thin'), bottom=Side(style='thin'))
+
+    ws["A1"] = "Standby 5档评测报告"
+    ws["A1"].font = Font(bold=True, size=16)
+    ws.merge_cells("A1:D1")
+
+    ws["A3"] = "任务ID"; ws["B3"] = task.get("task_id", "")
+    ws["A4"] = "任务名称"; ws["B4"] = task.get("name", "")
+    ws["A5"] = "测试接口"; ws["B5"] = task.get("target_api", "pipi")
+    ws["A6"] = "创建时间"; ws["B6"] = str(task.get("created_at", ""))
+
+    ws["A8"] = "核心指标"; ws["A8"].font = Font(bold=True, size=12)
+    rows = [
+        ("总用例数", total),
+        ("已评测", len(evaluated)),
+        ("通过（≥3档）", len(passed)),
+        ("失败（<3档）", len(failed)),
+        ("通过率", f"{pass_rate}%"),
+        ("平均档位（/4）", avg_level),
+        ("平均均值分（/4）", avg_score),
+    ]
+    for i, (k, v) in enumerate(rows, start=9):
+        ws.cell(row=i, column=1, value=k).font = Font(bold=True)
+        ws.cell(row=i, column=2, value=v)
+
+    # 档位分布
+    ws["A17"] = "档位分布"; ws["A17"].font = Font(bold=True, size=12)
+    ws.cell(row=18, column=1, value="档位").font = header_font
+    ws.cell(row=18, column=1).fill = header_fill
+    ws.cell(row=18, column=2, value="数量").font = header_font
+    ws.cell(row=18, column=2).fill = header_fill
+    ws.cell(row=18, column=3, value="占比").font = header_font
+    ws.cell(row=18, column=3).fill = header_fill
+    for i, lvl in enumerate([0, 1, 2, 3, 4], start=19):
+        cnt = level_dist.get(lvl, 0)
+        pct = round(cnt / len(evaluated) * 100, 1) if evaluated else 0
+        ws.cell(row=i, column=1, value=STANDBY_LEVEL_NAMES[lvl])
+        ws.cell(row=i, column=2, value=cnt)
+        ws.cell(row=i, column=3, value=f"{pct}%")
+
+    # 硬规则分布
+    ws["A26"] = "0分硬规则命中分布"; ws["A26"].font = Font(bold=True, size=12)
+    ws.cell(row=27, column=1, value="规则").font = header_font
+    ws.cell(row=27, column=1).fill = header_fill
+    ws.cell(row=27, column=2, value="数量").font = header_font
+    ws.cell(row=27, column=2).fill = header_fill
+    ws.cell(row=27, column=3, value="占比").font = header_font
+    ws.cell(row=27, column=3).fill = header_fill
+    for i, code in enumerate(["none", "fact_wrong", "hallucination", "safety", "brand"], start=28):
+        cnt = hard_rule_dist.get(code, 0)
+        pct = round(cnt / len(evaluated) * 100, 1) if evaluated else 0
+        ws.cell(row=i, column=1, value=STANDBY_HARD_RULE_NAMES[code])
+        ws.cell(row=i, column=2, value=cnt)
+        ws.cell(row=i, column=3, value=f"{pct}%")
+
+    # 策略分布
+    ws["A35"] = "策略组合分布"; ws["A35"].font = Font(bold=True, size=12)
+    ws.cell(row=36, column=1, value="策略").font = header_font
+    ws.cell(row=36, column=1).fill = header_fill
+    ws.cell(row=36, column=2, value="数量").font = header_font
+    ws.cell(row=36, column=2).fill = header_fill
+    ws.cell(row=36, column=3, value="占比").font = header_font
+    ws.cell(row=36, column=3).fill = header_fill
+    for i, s in enumerate(STANDBY_STRATEGY_NAMES, start=37):
+        cnt = strategy_dist.get(s, 0)
+        pct = round(cnt / len(evaluated) * 100, 1) if evaluated else 0
+        ws.cell(row=i, column=1, value=s)
+        ws.cell(row=i, column=2, value=cnt)
+        ws.cell(row=i, column=3, value=f"{pct}%")
+
+    # 列宽
+    ws.column_dimensions["A"].width = 22
+    ws.column_dimensions["B"].width = 18
+    ws.column_dimensions["C"].width = 12
+
+    # Sheet 2: 用例明细
+    ws2 = wb.create_sheet("用例明细")
+    headers = ["用例ID", "维度", "标题", "档位", "均值", "硬规则", "策略", "状态", "扣分原因", "用户输入", "玩偶回复"]
+    for i, h in enumerate(headers, start=1):
+        c = ws2.cell(row=1, column=i, value=h)
+        c.font = header_font
+        c.fill = header_fill
+        c.border = thin
+
+    import re as _re
+    def _clean(s):
+        if not s:
+            return ""
+        return _re.sub(r'<[^>]+>', '', str(s)).replace("&nbsp;", " ").strip()[:5000]
+
+    for i, r in enumerate(results, start=2):
+        sd = r.get("_sd") or {}
+        hit = sd.get("hard_rule_hit", "none") or "none"
+        strategy = sd.get("strategy", "") or ""
+        ws2.cell(row=i, column=1, value=r.get("case_code", "")).border = thin
+        ws2.cell(row=i, column=2, value=r.get("dimension_code", "")).border = thin
+        ws2.cell(row=i, column=3, value=r.get("title", "")).border = thin
+        ws2.cell(row=i, column=4, value=r.get("standby_level")).border = thin
+        ws2.cell(row=i, column=5, value=r.get("standby_score")).border = thin
+        ws2.cell(row=i, column=6, value=STANDBY_HARD_RULE_NAMES.get(hit, hit)).border = thin
+        ws2.cell(row=i, column=7, value=strategy).border = thin
+        ws2.cell(row=i, column=8, value=r.get("standby_status", "")).border = thin
+        c = ws2.cell(row=i, column=9, value=r.get("standby_deduction", ""))
+        c.border = thin; c.alignment = Alignment(wrap_text=True, vertical="top")
+        c = ws2.cell(row=i, column=10, value=_clean(r.get("input_text", "")))
+        c.border = thin; c.alignment = Alignment(wrap_text=True, vertical="top")
+        c = ws2.cell(row=i, column=11, value=_clean(r.get("actual_output", "")))
+        c.border = thin; c.alignment = Alignment(wrap_text=True, vertical="top")
+
+    widths = [12, 10, 28, 8, 8, 14, 12, 10, 32, 40, 40]
+    for i, w in enumerate(widths, start=1):
+        ws2.column_dimensions[get_column_letter(i)].width = w
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    filename = f"standby_report_{task.get('task_id','')}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     return output.getvalue(), 200, {
         "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "Content-Disposition": f"attachment; filename={filename}"
