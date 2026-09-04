@@ -665,8 +665,9 @@ def call_aivs_stream(
 def call_extract_llm(messages: List[Dict], timeout: int = 20, model: str = None, temperature: float = None, max_tokens: int = None) -> Dict:
     """
     调用 LLM（LiteLLM 代理）。
-    OpenAI 兼容格式，非流式响应。
-    model 参数可指定模型，默认使用 EXTRACT_LLM_MODEL。
+    走流式（stream=True）以避免 LLM 代理 nginx ~120s 超时返回 504：
+    只要 LLM 持续吐 token，代理读 socket 就会重置 read timeout，不会主动断连。
+    OpenAI 兼容流式格式：data: {choices:[{delta:{content:"..."}}]}。
     """
     if not EXTRACT_LLM_KEY:
         return {
@@ -695,14 +696,20 @@ def call_extract_llm(messages: List[Dict], timeout: int = 20, model: str = None,
         use_model = model or EXTRACT_LLM_MODEL
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {EXTRACT_LLM_KEY}"
+            "Authorization": f"Bearer {EXTRACT_LLM_KEY}",
+            "Accept": "text/event-stream",
         }
         payload = {
             "model": use_model,
             "messages": messages,
             "temperature": temperature if temperature is not None else 0.3,
             "max_tokens": max_tokens if max_tokens is not None else 8192,
+            "stream": True,
         }
+
+        # timeout 用 (connect, read) 元组：read timeout 作用于每次 socket read
+        # 而非整个响应——LLM 流式吐 token 间隔通常 <30s，给 60s 余量足够
+        stream_timeout = (10, max(30, min(timeout, 60)))
 
         start_time = time.time()
         try:
@@ -710,24 +717,50 @@ def call_extract_llm(messages: List[Dict], timeout: int = 20, model: str = None,
                 EXTRACT_LLM_URL,
                 headers=headers,
                 json=payload,
-                timeout=timeout
+                timeout=stream_timeout,
+                stream=True,
             )
             elapsed_ms = round((time.time() - start_time) * 1000, 2)
 
             if response.status_code != 200:
+                # 非流式错误响应：读 body 取前 200 字符
+                err_text = ""
+                try:
+                    err_text = response.text[:200]
+                except Exception:
+                    pass
                 return {
                     "full_text": "",
                     "response_time_ms": elapsed_ms,
-                    "error": f"HTTP {response.status_code}: {response.text[:200]}"
+                    "error": f"HTTP {response.status_code}: {err_text}"
                 }
 
-            data = response.json()
-            content = ""
-            if "choices" in data and len(data["choices"]) > 0:
-                content = data["choices"][0].get("message", {}).get("content", "")
+            content_parts = []
+            try:
+                for raw_line in response.iter_lines(decode_unicode=True):
+                    if not raw_line:
+                        continue
+                    # SSE 行形如 "data: {...}" 或 "data: [DONE]"
+                    if raw_line.startswith("data:"):
+                        data_str = raw_line[5:].strip()
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+                        choices = chunk.get("choices") or []
+                        if choices:
+                            delta = choices[0].get("delta") or {}
+                            piece = delta.get("content")
+                            if piece:
+                                content_parts.append(piece)
+            finally:
+                response.close()
 
+            elapsed_ms = round((time.time() - start_time) * 1000, 2)
             return {
-                "full_text": content,
+                "full_text": "".join(content_parts),
                 "response_time_ms": elapsed_ms,
             }
 
@@ -735,7 +768,7 @@ def call_extract_llm(messages: List[Dict], timeout: int = 20, model: str = None,
             return {
                 "full_text": "",
                 "response_time_ms": -1,
-                "error": f"Timeout after {timeout}s"
+                "error": f"Timeout (connect/read={stream_timeout})"
             }
         except Exception as e:
             return {
