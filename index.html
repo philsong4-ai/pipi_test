@@ -4973,18 +4973,22 @@ function showScheduleModal() {
   document.getElementById('edit-form').innerHTML = h;
   document.getElementById('modal-bg').style.display = 'flex';
 
-  // 填充用户下拉
-  fetch('/api/personas')
+  // 填充用户下拉（只展示未执行过测试的用户）
+  fetch('/api/personas?per_page=100&exclude_executed=1')
     .then(r => r.json())
     .then(data => {
       var sel = document.getElementById('sched-persona');
       if (!sel) return;
       var personas = data.items || data;
       sel.innerHTML = '<option value="">请选择</option>';
+      if (personas.length === 0) {
+        sel.innerHTML = '<option value="">（暂无未执行过的用户）</option>';
+        return;
+      }
       personas.forEach(function(p) {
         var opt = document.createElement('option');
         opt.value = p.id;
-        opt.textContent = p.name || p.id;
+        opt.textContent = (p.name || p.id) + ' (' + p.id + ')';
         sel.appendChild(opt);
       });
     });

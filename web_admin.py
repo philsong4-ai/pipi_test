@@ -1129,10 +1129,15 @@ def index():
 
 @app.route("/api/personas", methods=["GET"])
 def get_personas():
-    """获取用户画像列表，支持分页和搜索"""
+    """获取用户画像列表，支持分页和搜索。
+
+    可选参数：
+    - exclude_executed=1 过滤掉已经执行过测试任务的用户（test_tasks 中存在 completed/executed/evaluating/running 状态）
+    """
     page = request.args.get("page", 1, type=int)
     per_page = request.args.get("per_page", 20, type=int)
     search = request.args.get("search", "").strip()
+    exclude_executed = request.args.get("exclude_executed", "0") == "1"
 
     per_page = min(per_page, 100)  # 限制最大每页数量
     offset = (page - 1) * per_page
@@ -1140,29 +1145,47 @@ def get_personas():
     conn = get_db_connection()
     uid = _current_uid()
 
+    # 未执行过 = 不存在 completed/executed/evaluating/running 的 test_tasks
+    # SQL 统一用 ? 占位符，execute_query 会自动转 MySQL 的 %s
+    executed_statuses = ("completed", "executed", "evaluating", "running")
+    executed_in = ",".join(["?"] * len(executed_statuses))
+    not_exists_sql = (
+        f"NOT EXISTS (SELECT 1 FROM test_tasks WHERE test_tasks.persona_id = personas.id "
+        f"AND test_tasks.user_id = ? AND test_tasks.status IN ({executed_in}))"
+    )
+    executed_clause = f" AND {not_exists_sql}" if exclude_executed else ""
+    executed_params = (uid, *executed_statuses) if exclude_executed else ()
+
     # 构建查询
     if search:
         # 搜索 id 或 name
-        placeholder = "%s" if USE_MYSQL else "?"
-        count_sql = f"SELECT COUNT(*) as total FROM personas WHERE user_id = {placeholder} AND (id LIKE {placeholder} OR name LIKE {placeholder})"
         search_param = f"%{search}%"
-        total_row = execute_query(conn, count_sql, (uid, search_param, search_param), fetch_one=True)
+        count_sql = (
+            "SELECT COUNT(*) as total FROM personas "
+            "WHERE user_id = ? AND (id LIKE ? OR name LIKE ?)"
+            f"{executed_clause}"
+        )
+        total_row = execute_query(conn, count_sql, (uid, search_param, search_param, *executed_params), fetch_one=True)
         total = row_to_dict(total_row)["total"]
 
         data_sql = f"""
             SELECT * FROM personas
-            WHERE user_id = {placeholder} AND (id LIKE {placeholder} OR name LIKE {placeholder})
+            WHERE user_id = ? AND (id LIKE ? OR name LIKE ?)
+            {executed_clause}
             ORDER BY created_at DESC, id DESC
-            LIMIT {placeholder} OFFSET {placeholder}
+            LIMIT ? OFFSET ?
         """
-        rows = execute_query(conn, data_sql, (uid, search_param, search_param, per_page, offset), fetch_all=True)
+        rows = execute_query(conn, data_sql, (uid, search_param, search_param, *executed_params, per_page, offset), fetch_all=True)
     else:
-        count_sql = "SELECT COUNT(*) as total FROM personas WHERE user_id = ?"
-        total_row = execute_query(conn, count_sql, (uid,), fetch_one=True)
+        count_sql = f"SELECT COUNT(*) as total FROM personas WHERE user_id = ?{executed_clause}"
+        total_row = execute_query(conn, count_sql, (uid, *executed_params), fetch_one=True)
         total = row_to_dict(total_row)["total"]
 
-        data_sql = "SELECT * FROM personas WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
-        rows = execute_query(conn, data_sql, (uid, per_page, offset), fetch_all=True)
+        data_sql = (
+            f"SELECT * FROM personas WHERE user_id = ?{executed_clause} "
+            "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+        )
+        rows = execute_query(conn, data_sql, (uid, *executed_params, per_page, offset), fetch_all=True)
 
     conn.close()
 
