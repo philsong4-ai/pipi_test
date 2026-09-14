@@ -6915,11 +6915,17 @@ def generate_standby_report_v2():
     evaluated = [r for r in results if r.get("standby_level") is not None]
     passed = [r for r in evaluated if r.get("standby_status") == "passed" or (r.get("standby_level") or 0) >= 3]
     failed = [r for r in evaluated if r not in passed]
+    satisfied = [r for r in evaluated if (r.get("standby_level") or 0) >= 4]
+    usable = [r for r in evaluated if (r.get("standby_level") or 0) >= 3]
     levels = [int(r["standby_level"]) for r in evaluated if r.get("standby_level") is not None]
     scores = [float(r["standby_score"]) for r in evaluated if r.get("standby_score") is not None]
     avg_level = round(sum(levels) / len(levels), 2) if levels else 0
     avg_score = round(sum(scores) / len(scores), 2) if scores else 0
-    pass_rate = round(len(passed) / len(evaluated) * 100, 1) if evaluated else 0
+    pass_rate = round(len(usable) / len(evaluated) * 100, 1) if evaluated else 0
+    satisfy_rate = round(len(satisfied) / len(evaluated) * 100, 1) if evaluated else 0
+    usable_rate = round(len(usable) / len(evaluated) * 100, 1) if evaluated else 0
+    satisfy_threshold = 60.0
+    usable_threshold = 80.0
 
     # 档位分布
     level_dist = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0}
@@ -6963,8 +6969,13 @@ def generate_standby_report_v2():
             },
             "summary": {
                 "total": total, "evaluated": len(evaluated),
-                "passed": len(passed), "failed": len(failed),
+                "passed": len(usable), "failed": len(failed),
                 "pass_rate": pass_rate,
+                "satisfied_count": len(satisfied), "usable_count": len(usable),
+                "satisfy_rate": satisfy_rate, "usable_rate": usable_rate,
+                "satisfy_threshold": satisfy_threshold, "usable_threshold": usable_threshold,
+                "satisfy_met": satisfy_rate >= satisfy_threshold,
+                "usable_met": usable_rate >= usable_threshold,
                 "avg_level": avg_level, "avg_score": avg_score,
                 "avg_judges_std": avg_std,
             },
@@ -7055,13 +7066,20 @@ def generate_standby_report_v2():
             <div style="color:#ff3b30;font-size:12px;margin-top:4px">扣分原因: {_html.escape(str(r.get('standby_deduction','')))}</div>
         </div>"""
 
-    summary_text = ""
-    if pass_rate >= 80:
-        summary_text = f"整体表现优秀，通过率 {pass_rate}%，平均档位 {avg_level}/4。"
-    elif pass_rate >= 60:
-        summary_text = f"整体表现合格，通过率 {pass_rate}%，平均档位 {avg_level}/4，存在改进空间。"
-    else:
-        summary_text = f"整体表现不佳，通过率 {pass_rate}%，平均档位 {avg_level}/4，需重点优化。"
+    satisfy_met = satisfy_rate >= satisfy_threshold
+    usable_met = usable_rate >= usable_threshold
+    summary_text = (
+        f"满足率（≥4档）{satisfy_rate}% / 目标 {satisfy_threshold:.0f}%，"
+        + ("达标" if satisfy_met else "未达标") + "；"
+        f"可用率（≥3档）{usable_rate}% / 目标 {usable_threshold:.0f}%，"
+        + ("达标" if usable_met else "未达标") + "。"
+        f"平均档位 {avg_level}/4，平均均值分 {avg_score}/4。"
+    )
+
+    satisfy_color = "#34c759" if satisfy_met else "#ff3b30"
+    usable_color = "#34c759" if usable_met else "#ff3b30"
+    satisfy_tag = "✓ 达标" if satisfy_met else "✗ 未达标"
+    usable_tag = "✓ 达标" if usable_met else "✗ 未达标"
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -7077,6 +7095,11 @@ h2 {{ color: #1f3a5f; margin-top: 32px; font-size: 18px; border-left: 4px solid 
 .kpi {{ background: #f5f5f7; padding: 16px; border-radius: 8px; text-align: center; }}
 .kpi-value {{ font-size: 28px; font-weight: 700; color: #1f3a5f; }}
 .kpi-label {{ font-size: 12px; color: #86868b; margin-top: 4px; }}
+.kpi-main {{ background: linear-gradient(135deg, #eef2ff 0%, #f5f5f7 100%); padding: 20px; border-radius: 10px; text-align: center; border: 2px solid #5856d6; }}
+.kpi-main-value {{ font-size: 36px; font-weight: 800; }}
+.kpi-tag {{ display: inline-block; margin-top: 6px; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }}
+.tag-met {{ background: #34c759; color: white; }}
+.tag-miss {{ background: #ff3b30; color: white; }}
 .kpi-pass {{ color: #34c759; }}
 .kpi-fail {{ color: #ff3b30; }}
 table {{ width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 13px; }}
@@ -7092,18 +7115,32 @@ td {{ padding: 8px 10px; border-bottom: 1px solid #e8e8ed; }}
     <h1>Standby 5档评测报告 <span class="badge-standby">5档</span></h1>
     <div class="meta">任务ID: {task.get('task_id','')} · 任务名称: {task.get('name','')} · 接口: {target_api_label} · 创建时间: {task_created} · 报告生成: {report_time}</div>
 
-    <h2>核心指标</h2>
+    <h2>核心达标指标</h2>
+    <div class="kpi-grid" style="grid-template-columns: repeat(2, 1fr); margin-bottom: 12px">
+        <div class="kpi-main">
+            <div class="kpi-main-value" style="color:{satisfy_color}">{satisfy_rate}%</div>
+            <div class="kpi-label">满足率（≥4档 / 满足）· 目标 {satisfy_threshold:.0f}% · {len(satisfied)}/{len(evaluated)} 条</div>
+            <span class="kpi-tag {'tag-met' if satisfy_met else 'tag-miss'}">{satisfy_tag}</span>
+        </div>
+        <div class="kpi-main">
+            <div class="kpi-main-value" style="color:{usable_color}">{usable_rate}%</div>
+            <div class="kpi-label">可用率（≥3档 / 可用）· 目标 {usable_threshold:.0f}% · {len(usable)}/{len(evaluated)} 条</div>
+            <span class="kpi-tag {'tag-met' if usable_met else 'tag-miss'}">{usable_tag}</span>
+        </div>
+    </div>
+    <div class="meta" style="font-size:13px;color:#1d1d1f;margin-bottom:24px">{summary_text}</div>
+
+    <h2>其他指标</h2>
     <div class="kpi-grid">
         <div class="kpi"><div class="kpi-value">{total}</div><div class="kpi-label">总用例数</div></div>
-        <div class="kpi"><div class="kpi-value kpi-pass">{len(passed)}</div><div class="kpi-label">通过（≥3档）</div></div>
+        <div class="kpi"><div class="kpi-value kpi-pass">{len(usable)}</div><div class="kpi-label">可用（≥3档）</div></div>
         <div class="kpi"><div class="kpi-value kpi-fail">{len(failed)}</div><div class="kpi-label">失败（&lt;3档）</div></div>
-        <div class="kpi"><div class="kpi-value">{pass_rate}%</div><div class="kpi-label">通过率</div></div>
+        <div class="kpi"><div class="kpi-value">{len(satisfied)}</div><div class="kpi-label">满足（≥4档）</div></div>
         <div class="kpi"><div class="kpi-value">{avg_level}</div><div class="kpi-label">平均档位（/4）</div></div>
         <div class="kpi"><div class="kpi-value">{avg_score}</div><div class="kpi-label">平均均值分（/4）</div></div>
         <div class="kpi"><div class="kpi-value">{avg_std}</div><div class="kpi-label">裁判一致性 std</div></div>
         <div class="kpi"><div class="kpi-value">{hard_rule_dist.get('fact_wrong',0)+hard_rule_dist.get('hallucination',0)+hard_rule_dist.get('safety',0)+hard_rule_dist.get('brand',0)}</div><div class="kpi-label">命中0分硬规则</div></div>
     </div>
-    <div class="meta">{summary_text}</div>
 
     <h2>档位分布</h2>
     {level_bars}
@@ -7179,13 +7216,17 @@ def export_standby_report_excel():
 
     total = len(results)
     evaluated = [r for r in results if r.get("standby_level") is not None]
-    passed = [r for r in evaluated if (r.get("standby_level") or 0) >= 3]
-    failed = [r for r in evaluated if r not in passed]
+    satisfied = [r for r in evaluated if (r.get("standby_level") or 0) >= 4]
+    usable = [r for r in evaluated if (r.get("standby_level") or 0) >= 3]
+    failed = [r for r in evaluated if (r.get("standby_level") or 0) < 3]
     levels = [int(r["standby_level"]) for r in evaluated if r.get("standby_level") is not None]
     scores = [float(r["standby_score"]) for r in evaluated if r.get("standby_score") is not None]
     avg_level = round(sum(levels) / len(levels), 2) if levels else 0
     avg_score = round(sum(scores) / len(scores), 2) if scores else 0
-    pass_rate = round(len(passed) / len(evaluated) * 100, 1) if evaluated else 0
+    satisfy_rate = round(len(satisfied) / len(evaluated) * 100, 1) if evaluated else 0
+    usable_rate = round(len(usable) / len(evaluated) * 100, 1) if evaluated else 0
+    satisfy_threshold = 60.0
+    usable_threshold = 80.0
 
     level_dist = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0}
     for r in evaluated:
@@ -7222,29 +7263,44 @@ def export_standby_report_excel():
     ws["A5"] = "测试接口"; ws["B5"] = task.get("target_api", "pipi")
     ws["A6"] = "创建时间"; ws["B6"] = str(task.get("created_at", ""))
 
-    ws["A8"] = "核心指标"; ws["A8"].font = Font(bold=True, size=12)
+    ws["A8"] = "核心达标指标"; ws["A8"].font = Font(bold=True, size=12)
+    satisfy_met = satisfy_rate >= satisfy_threshold
+    usable_met = usable_rate >= usable_threshold
     rows = [
-        ("总用例数", total),
-        ("已评测", len(evaluated)),
-        ("通过（≥3档）", len(passed)),
-        ("失败（<3档）", len(failed)),
-        ("通过率", f"{pass_rate}%"),
-        ("平均档位（/4）", avg_level),
-        ("平均均值分（/4）", avg_score),
+        ("满足率（≥4档）", f"{satisfy_rate}%"),
+        ("满足率目标", f"{satisfy_threshold:.0f}%"),
+        ("满足率达标", "✓ 达标" if satisfy_met else "✗ 未达标"),
+        ("可用率（≥3档）", f"{usable_rate}%"),
+        ("可用率目标", f"{usable_threshold:.0f}%"),
+        ("可用率达标", "✓ 达标" if usable_met else "✗ 未达标"),
     ]
     for i, (k, v) in enumerate(rows, start=9):
         ws.cell(row=i, column=1, value=k).font = Font(bold=True)
         ws.cell(row=i, column=2, value=v)
 
+    ws["A16"] = "其他指标"; ws["A16"].font = Font(bold=True, size=12)
+    other_rows = [
+        ("总用例数", total),
+        ("已评测", len(evaluated)),
+        ("满足（≥4档）", len(satisfied)),
+        ("可用（≥3档）", len(usable)),
+        ("失败（<3档）", len(failed)),
+        ("平均档位（/4）", avg_level),
+        ("平均均值分（/4）", avg_score),
+    ]
+    for i, (k, v) in enumerate(other_rows, start=17):
+        ws.cell(row=i, column=1, value=k).font = Font(bold=True)
+        ws.cell(row=i, column=2, value=v)
+
     # 档位分布
-    ws["A17"] = "档位分布"; ws["A17"].font = Font(bold=True, size=12)
-    ws.cell(row=18, column=1, value="档位").font = header_font
-    ws.cell(row=18, column=1).fill = header_fill
-    ws.cell(row=18, column=2, value="数量").font = header_font
-    ws.cell(row=18, column=2).fill = header_fill
-    ws.cell(row=18, column=3, value="占比").font = header_font
-    ws.cell(row=18, column=3).fill = header_fill
-    for i, lvl in enumerate([0, 1, 2, 3, 4], start=19):
+    ws["A25"] = "档位分布"; ws["A25"].font = Font(bold=True, size=12)
+    ws.cell(row=26, column=1, value="档位").font = header_font
+    ws.cell(row=26, column=1).fill = header_fill
+    ws.cell(row=26, column=2, value="数量").font = header_font
+    ws.cell(row=26, column=2).fill = header_fill
+    ws.cell(row=26, column=3, value="占比").font = header_font
+    ws.cell(row=26, column=3).fill = header_fill
+    for i, lvl in enumerate([0, 1, 2, 3, 4], start=27):
         cnt = level_dist.get(lvl, 0)
         pct = round(cnt / len(evaluated) * 100, 1) if evaluated else 0
         ws.cell(row=i, column=1, value=STANDBY_LEVEL_NAMES[lvl])
@@ -7252,14 +7308,14 @@ def export_standby_report_excel():
         ws.cell(row=i, column=3, value=f"{pct}%")
 
     # 硬规则分布
-    ws["A26"] = "0分硬规则命中分布"; ws["A26"].font = Font(bold=True, size=12)
-    ws.cell(row=27, column=1, value="规则").font = header_font
-    ws.cell(row=27, column=1).fill = header_fill
-    ws.cell(row=27, column=2, value="数量").font = header_font
-    ws.cell(row=27, column=2).fill = header_fill
-    ws.cell(row=27, column=3, value="占比").font = header_font
-    ws.cell(row=27, column=3).fill = header_fill
-    for i, code in enumerate(["none", "fact_wrong", "hallucination", "safety", "brand"], start=28):
+    ws["A34"] = "0分硬规则命中分布"; ws["A34"].font = Font(bold=True, size=12)
+    ws.cell(row=35, column=1, value="规则").font = header_font
+    ws.cell(row=35, column=1).fill = header_fill
+    ws.cell(row=35, column=2, value="数量").font = header_font
+    ws.cell(row=35, column=2).fill = header_fill
+    ws.cell(row=35, column=3, value="占比").font = header_font
+    ws.cell(row=35, column=3).fill = header_fill
+    for i, code in enumerate(["none", "fact_wrong", "hallucination", "safety", "brand"], start=36):
         cnt = hard_rule_dist.get(code, 0)
         pct = round(cnt / len(evaluated) * 100, 1) if evaluated else 0
         ws.cell(row=i, column=1, value=STANDBY_HARD_RULE_NAMES[code])
@@ -7267,14 +7323,14 @@ def export_standby_report_excel():
         ws.cell(row=i, column=3, value=f"{pct}%")
 
     # 策略分布
-    ws["A35"] = "策略组合分布"; ws["A35"].font = Font(bold=True, size=12)
-    ws.cell(row=36, column=1, value="策略").font = header_font
-    ws.cell(row=36, column=1).fill = header_fill
-    ws.cell(row=36, column=2, value="数量").font = header_font
-    ws.cell(row=36, column=2).fill = header_fill
-    ws.cell(row=36, column=3, value="占比").font = header_font
-    ws.cell(row=36, column=3).fill = header_fill
-    for i, s in enumerate(STANDBY_STRATEGY_NAMES, start=37):
+    ws["A43"] = "策略组合分布"; ws["A43"].font = Font(bold=True, size=12)
+    ws.cell(row=44, column=1, value="策略").font = header_font
+    ws.cell(row=44, column=1).fill = header_fill
+    ws.cell(row=44, column=2, value="数量").font = header_font
+    ws.cell(row=44, column=2).fill = header_fill
+    ws.cell(row=44, column=3, value="占比").font = header_font
+    ws.cell(row=44, column=3).fill = header_fill
+    for i, s in enumerate(STANDBY_STRATEGY_NAMES, start=45):
         cnt = strategy_dist.get(s, 0)
         pct = round(cnt / len(evaluated) * 100, 1) if evaluated else 0
         ws.cell(row=i, column=1, value=s)

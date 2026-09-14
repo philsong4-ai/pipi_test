@@ -6679,14 +6679,20 @@ function previewReport() {
       var html = '<div style="font-size:13px">';
       html += '<h4>' + data.task.name + '</h4>';
       html += '<p>任务ID: ' + data.task.task_id + (isStandby ? ' <span style="color:#86868b">(Standby 5档)</span>' : '') + '</p>';
-      html += '<div style="display:flex;gap:20px;margin:16px 0">';
+      html += '<div style="display:flex;gap:20px;margin:16px 0;flex-wrap:wrap">';
       html += '<div><span style="font-size:24px;font-weight:600">' + data.summary.total + '</span><br>总用例</div>';
-      html += '<div><span style="font-size:24px;font-weight:600;color:#34c759">' + data.summary.passed + '</span><br>通过</div>';
-      html += '<div><span style="font-size:24px;font-weight:600;color:#ff3b30">' + data.summary.failed + '</span><br>失败</div>';
-      html += '<div><span style="font-size:24px;font-weight:600;color:#007aff">' + data.summary.pass_rate + '%</span><br>通过率</div>';
       if (isStandby) {
+        var satRate = data.summary.satisfy_rate;
+        var useRate = data.summary.usable_rate;
+        var satMet = data.summary.satisfy_met;
+        var useMet = data.summary.usable_met;
+        html += '<div><span style="font-size:24px;font-weight:600;color:' + (satMet ? '#34c759' : '#ff3b30') + '">' + (satRate !== undefined ? satRate + '%' : '-') + '</span><br>满足率（≥4档/目标60%）' + (satMet ? ' ✓' : ' ✗') + '</div>';
+        html += '<div><span style="font-size:24px;font-weight:600;color:' + (useMet ? '#34c759' : '#ff3b30') + '">' + (useRate !== undefined ? useRate + '%' : '-') + '</span><br>可用率（≥3档/目标80%）' + (useMet ? ' ✓' : ' ✗') + '</div>';
         html += '<div><span style="font-size:24px;font-weight:600">' + (data.summary.avg_level !== undefined ? data.summary.avg_level : '-') + '</span><br>平均档位</div>';
       } else {
+        html += '<div><span style="font-size:24px;font-weight:600;color:#34c759">' + data.summary.passed + '</span><br>通过</div>';
+        html += '<div><span style="font-size:24px;font-weight:600;color:#ff3b30">' + data.summary.failed + '</span><br>失败</div>';
+        html += '<div><span style="font-size:24px;font-weight:600;color:#007aff">' + data.summary.pass_rate + '%</span><br>通过率</div>';
         html += '<div><span style="font-size:24px;font-weight:600">' + data.summary.avg_score + '</span><br>平均分</div>';
       }
       html += '</div>';
