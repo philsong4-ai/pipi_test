@@ -9858,15 +9858,21 @@ def _generate_cases_worker(task_id, user_id=None, slot_type=None):
                     **llm_config["case_gen"]
                 )
 
-                # LLM 空兜底：1 次，复用下面的保存逻辑
+                # LLM 空兜底：3 次重试，间隔递增（10/20/30s）
+                # Why: 凌晨任务发现某些维度（F2/C4/E1）LLM 偶发输出畸形 JSON，
+                # 短间隔 5s 重试撞同一概率高；长间隔 + 多次能避开 LLM 短时抖动
                 if not cases:
-                    print(f"[CASE GEN] {task_id} {dim_code} LLM returned empty (after 2 attempts), worker retry...", flush=True)
-                    import time
-                    time.sleep(5)
-                    cases = pipi_api.generate_test_cases(
-                        dimension=dim, toy_persona=toy_persona, persona=persona,
-                        user_facts=user_facts, count=need_count, target_api=target_api, **llm_config["case_gen"]
-                    )
+                    for retry_idx in range(3):
+                        backoff = 10 * (retry_idx + 1)
+                        print(f"[CASE GEN] {task_id} {dim_code} LLM returned empty, worker retry {retry_idx+1}/3 after {backoff}s...", flush=True)
+                        import time as _time
+                        _time.sleep(backoff)
+                        cases = pipi_api.generate_test_cases(
+                            dimension=dim, toy_persona=toy_persona, persona=persona,
+                            user_facts=user_facts, count=need_count, target_api=target_api, **llm_config["case_gen"]
+                        )
+                        if cases:
+                            break
 
                 # 保存到数据库（单次，无 db 重试循环 — _get_unique_case_id 解决 case_id 冲突，_save_test_case 内部校验字段）
                 dim_ids = []  # 局部变量，不进 task dict，避免污染其他维度

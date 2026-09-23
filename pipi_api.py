@@ -14,6 +14,69 @@ import requests
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Optional, Any
 
+
+def _repair_json_array(text: str) -> Optional[List[Dict]]:
+    """从可能畸形/截断的 LLM 输出里抢救出 JSON 数组。
+
+    Why: LLM 偶尔输出截断（max_tokens 提前用完）或多余标点导致 json.loads 失败，
+    重试 3 次都撞同一位置无意义。这里用 stdlib 做容错解析：
+    1. 先剥到 [ ... ] 主体
+    2. 逐对象解析，遇到畸形就跳过该对象继续下一个
+    3. 返回成功解析的对象列表（可能少于 LLM 声明数量，但总比 0 好）
+    """
+    if not text:
+        return None
+    match = re.search(r'\[[\s\S]*', text)
+    if not match:
+        return None
+    body = match.group(0)
+    # 找到最后一个完整 } 的位置，截掉后面不完整的尾巴
+    last_brace = body.rfind('}')
+    if last_brace == -1:
+        return None
+    body = body[:last_brace + 1]
+    # 补一个 ] 让 json.loads 能跑（即便中间有畸形对象）
+    body = body.rstrip().rstrip(',') + '\n]'
+
+    # 第一试：直接 loads
+    try:
+        data = json.loads(body)
+        if isinstance(data, list):
+            return [d for d in data if isinstance(d, dict)]
+    except json.JSONDecodeError:
+        pass
+
+    # 第二试：按顶层 { ... } 分段，每段独立 loads
+    objects = []
+    depth = 0
+    start = -1
+    for i, ch in enumerate(body):
+        if ch == '{':
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0 and start != -1:
+                snippet = body[start:i + 1]
+                try:
+                    obj = json.loads(snippet)
+                    if isinstance(obj, dict):
+                        objects.append(obj)
+                except json.JSONDecodeError:
+                    # 尝试修掉尾逗号
+                    cleaned = re.sub(r',\s*([}\]])', r'\1', snippet)
+                    try:
+                        obj = json.loads(cleaned)
+                        if isinstance(obj, dict):
+                            objects.append(obj)
+                    except json.JSONDecodeError:
+                        pass
+                start = -1
+    if objects:
+        return objects
+    return None
+
 # ─── 配置 ─────────────────────────────────────────
 # 多玩偶 API 接口改造：URL/Key 不再硬编码兜底，优先走 api_endpoints 表（web 端调用必传 api_url/api_key）
 # 这里保留 env 兜底仅用于 CLI 脚本（test_pipi_batch.py），web 端未传参时若 env 未设则抛错
@@ -1115,19 +1178,40 @@ def generate_test_cases(
 
             json_match = re.search(r'\[[\s\S]*\]', result_text)
             if json_match:
-                cases = json.loads(json_match.group())
-                for i, case in enumerate(cases):
-                    if not case.get("case_id"):
-                        case["case_id"] = f"{dim_code}-{i+1:02d}"
-                return cases
+                try:
+                    cases = json.loads(json_match.group())
+                except json.JSONDecodeError as e:
+                    # Why: LLM 偶发输出畸形 JSON（尾逗号/截断/多余标点），直接重试会撞同一位置
+                    # 用容错解析抢救出能解析的对象，不足 count 再重试补
+                    print(f"[CASE GEN] generate_test_cases {dim_code} json.loads failed ({e}), trying repair...", flush=True)
+                    cases = _repair_json_array(result_text) or []
+                if cases:
+                    for i, case in enumerate(cases):
+                        if not case.get("case_id"):
+                            case["case_id"] = f"{dim_code}-{i+1:02d}"
+                    return cases
 
-            # JSON 解析失败
-            if attempt < max_retries - 1:
-                print(f"[CASE GEN] generate_test_cases {dim_code} JSON parse failed, retry {attempt+1}/{max_retries-1}", flush=True)
-                time.sleep(3 * (attempt + 1))
+                # JSON 解析失败
+                if attempt < max_retries - 1:
+                    print(f"[CASE GEN] generate_test_cases {dim_code} JSON parse failed (repair got empty), retry {attempt+1}/{max_retries-1}", flush=True)
+                    time.sleep(3 * (attempt + 1))
+                else:
+                    print(f"[CASE GEN] generate_test_cases {dim_code} JSON parse failed after {max_retries} attempts", flush=True)
+                    return []
             else:
-                print(f"[CASE GEN] generate_test_cases {dim_code} JSON parse failed after {max_retries} attempts", flush=True)
-                return []
+                # 没匹配到 [...] 主体，尝试整个文本容错解析
+                repaired = _repair_json_array(result_text)
+                if repaired:
+                    for i, case in enumerate(repaired):
+                        if not case.get("case_id"):
+                            case["case_id"] = f"{dim_code}-{i+1:02d}"
+                    return repaired
+                if attempt < max_retries - 1:
+                    print(f"[CASE GEN] generate_test_cases {dim_code} no JSON array found, retry {attempt+1}/{max_retries-1}", flush=True)
+                    time.sleep(3 * (attempt + 1))
+                else:
+                    print(f"[CASE GEN] generate_test_cases {dim_code} no JSON array after {max_retries} attempts", flush=True)
+                    return []
         except Exception as e:
             if attempt < max_retries - 1:
                 print(f"[CASE GEN] generate_test_cases {dim_code} error: {e}, retry {attempt+1}/{max_retries-1}", flush=True)
