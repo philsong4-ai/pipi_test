@@ -8079,8 +8079,19 @@ def export_fixed_cases_excel():
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = border
 
+    domain_cn = {
+        "poem": "古诗", "math": "数学", "story": "故事", "trivia": "常识",
+        "idiom": "成语", "science": "科学", "geography": "地理",
+    }
+
     for item in items:
-        ws.append([item.get(h, "") or "" for h in headers])
+        row = []
+        for h in headers:
+            v = item.get(h, "") or ""
+            if h == "domain":
+                v = domain_cn.get(v, v)
+            row.append(v)
+        ws.append(row)
 
     wrap_align = Alignment(wrap_text=True, vertical="top")
     for row_idx in range(2, len(items) + 2):
