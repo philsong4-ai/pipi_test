@@ -3141,7 +3141,8 @@ var fixedGenPollTimer = null;
 // 固定用例 domain 中英文映射（前端展示用中文）
 var FIXED_DOMAIN_CN = {
   poem: '古诗', math: '数学', story: '故事', trivia: '常识',
-  idiom: '成语', science: '科学', geography: '地理'
+  idiom: '成语', science: '科学', geography: '地理',
+  identity: '身份认知', device_control: '设备控制'
 };
 function _fixedDomainCn(d) { return FIXED_DOMAIN_CN[d] || d; }
 
@@ -3216,7 +3217,7 @@ function showFixedCaseModal(id) {
     var html = '<div style="padding:16px">' +
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">' +
         '<div><label style="font-size:12px;color:#86868b">domain</label><select id="fc-domain" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px">' +
-          ['poem','math','story','trivia','idiom','science','geography'].map(d=>'<option value="'+d+'"'+(data.domain===d?' selected':'')+'>'+_fixedDomainCn(d)+'</option>').join('') +
+          ['poem','math','story','trivia','idiom','science','geography','identity','device_control'].map(d=>'<option value="'+d+'"'+(data.domain===d?' selected':'')+'>'+_fixedDomainCn(d)+'</option>').join('') +
         '</select></div>' +
         '<div><label style="font-size:12px;color:#86868b">sub_domain</label><input id="fc-sub" value="' + escapeHtml(data.sub_domain||'') + '" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px"></div>' +
         '<div><label style="font-size:12px;color:#86868b">case_id（留空自动）</label><input id="fc-cid" value="' + escapeHtml(data.case_id||'') + '" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px"></div>' +
@@ -3311,8 +3312,8 @@ function batchImportFixedCases(input) {
 
 function showFixedGenModal() {
   var html = '<div style="padding:16px">' +
-    '<div style="margin-bottom:8px"><label style="font-size:12px;color:#86868b">domain（选「全部」一次性覆盖 7 个领域）</label><select id="fcg-domain" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px">' +
-      ['<option value="all">全部</option>'].concat(['poem','math','story','trivia','idiom','science','geography'].map(d=>'<option value="'+d+'">'+_fixedDomainCn(d)+'</option>')).join('') +
+    '<div style="margin-bottom:8px"><label style="font-size:12px;color:#86868b">domain（选「全部」一次性覆盖 9 个领域）</label><select id="fcg-domain" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px">' +
+      ['<option value="all">全部</option>'].concat(['poem','math','story','trivia','idiom','science','geography','identity','device_control'].map(d=>'<option value="'+d+'">'+_fixedDomainCn(d)+'</option>')).join('') +
     '</select></div>' +
     '<div style="margin-bottom:8px"><label style="font-size:12px;color:#86868b">sub_domain（可选，仅单 domain 生效）</label><input id="fcg-sub" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px"></div>' +
     '<div style="margin-bottom:8px"><label style="font-size:12px;color:#86868b">每个 domain 生成 count 条（1-20）</label><input id="fcg-count" type="number" value="5" min="1" max="20" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px"></div>' +

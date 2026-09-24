@@ -1257,6 +1257,8 @@ def generate_fixed_cases(
         "idiom": "成语",
         "science": "科学",
         "geography": "地理",
+        "identity": "身份认知",
+        "device_control": "设备控制",
     }
     domain_name = domain_names.get(domain, domain)
     domain_upper = domain.upper()
@@ -1269,6 +1271,8 @@ def generate_fixed_cases(
         "idiom": "覆盖常见成语 + 中等难度 + 易错成语（如望其项背/差强人意/不刊之论）",
         "science": "覆盖物理（力学/电学/光学/热学）/化学（元素/反应）/生物（人体/生态）/天文（行星/恒星）",
         "geography": "覆盖中国地理（省/省会）/世界地理（国家/首都）/自然地理（高原/平原/盆地）",
+        "identity": "玩偶身份认知：自我介绍/名字识别/外观描述/来历/产品归属/与小爱区别",
+        "device_control": "设备控制：音量/亮度/指令消歧/边界值/不主动提议/结束会话",
     }
     domain_hint_text = domain_hints.get(domain, "")
     if sub_domain:
