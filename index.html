@@ -387,7 +387,7 @@ body{background:#f5f5f7;color:#1d1d1f}
 
   <div class="card" style="margin-top:16px">
     <h3 style="font-size:16px;margin-bottom:8px">固定用例任务</h3>
-    <p style="color:#86868b;font-size:13px;margin:0 0 12px 0">选好上面的用例（复选框），输入 device_id（=persona_id），一键执行 + 评测。</p>
+    <p style="color:#86868b;font-size:13px;margin:0 0 12px 0">输入 device_id（=persona_id），不勾选用例默认执行全部 active 固定用例。也可手动勾选指定用例。</p>
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
       <label style="font-size:13px;color:#86868b">device_id:</label>
       <input id="fixed-task-device" placeholder="persona_id（如 auto_xxx）" style="padding:6px 10px;border:1px solid #d2d2d7;border-radius:6px;font-size:13px;min-width:240px">
@@ -3385,16 +3385,18 @@ function getSelectedFixedCases() {
 function startFixedTask() {
   var caseIds = getSelectedFixedCases();
   var deviceId = document.getElementById('fixed-task-device').value.trim();
-  if (!caseIds.length) { _fixedToast('请先勾选用例'); return; }
   if (!deviceId) { _fixedToast('请输入 device_id'); return; }
+  var body = {device_id: deviceId};
+  if (caseIds.length) body.case_ids = caseIds;
   fetch('/api/fixed_tasks', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({device_id: deviceId, case_ids: caseIds})})
+      body: JSON.stringify(body)})
     .then(r=>r.json())
     .then(d=>{
       if (d.error) { _fixedToast(d.error); return; }
       fixedCurrentTaskId = d.id;
-      document.getElementById('fixed-task-status').innerHTML = '已创建任务 #' + d.id + '，可点执行';
-      _fixedToast('已创建任务');
+      var cnt = d.case_count || caseIds.length || 0;
+      document.getElementById('fixed-task-status').innerHTML = '已创建任务 #' + d.id + '（' + cnt + ' 条用例），可点执行';
+      _fixedToast('已创建任务（' + cnt + ' 条用例）');
       loadFixedTasks();
     });
 }

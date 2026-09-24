@@ -8356,19 +8356,38 @@ def list_fixed_tasks():
 
 @app.route("/api/fixed_tasks", methods=["POST"])
 def create_fixed_task():
-    """创建固定用例测试任务。body: {name, device_id, case_ids, target_api?}"""
+    """创建固定用例测试任务。body: {name, device_id, case_ids, target_api?}
+
+    case_ids 为空时自动拉全部 active 固定用例（含所有 domain）。
+    """
     import uuid
     data = request.get_json() or {}
     uid = _current_uid()
     device_id = (data.get("device_id") or "").strip()
     case_ids = data.get("case_ids") or []
-    if not device_id or not case_ids:
-        return jsonify({"error": "device_id and case_ids required"}), 400
+    if not device_id:
+        return jsonify({"error": "device_id required"}), 400
+
     name = (data.get("name") or f"fixed-{device_id[:8]}").strip()
     target_api = (data.get("target_api") or "pipi").strip()
     task_id_str = uuid.uuid4().hex[:8]
 
     conn = get_db_connection()
+    # case_ids 为空 → 自动拉全部 active 固定用例
+    if not case_ids:
+        if USE_MYSQL:
+            rows = execute_query(conn,
+                "SELECT id FROM fixed_test_cases WHERE status = 'active' ORDER BY id",
+                fetch_all=True)
+        else:
+            rows = execute_query(conn,
+                "SELECT id FROM fixed_test_cases WHERE status = 'active' ORDER BY id",
+                fetch_all=True)
+        case_ids = [row_to_dict(r)["id"] for r in rows]
+        if not case_ids:
+            conn.close()
+            return jsonify({"error": "no active fixed_test_cases found"}), 400
+
     if USE_MYSQL:
         execute_query(conn,
             "INSERT INTO fixed_test_tasks (task_id, name, device_id, target_api, case_ids, status, progress_total, progress_done, user_id) "
@@ -8391,7 +8410,7 @@ def create_fixed_task():
             (new_id, cid, target_api, uid))
     conn.commit()
     conn.close()
-    return jsonify({"id": new_id, "task_id": task_id_str, "status": "pending"})
+    return jsonify({"id": new_id, "task_id": task_id_str, "status": "pending", "case_count": len(case_ids)})
 
 
 @app.route("/api/fixed_tasks/<int:task_id>/execute", methods=["POST"])
