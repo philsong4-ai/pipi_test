@@ -7917,7 +7917,7 @@ def delete_test_case(case_id):
 
 # ─── 固定垂类知识用例模块（独立维护独立执行，复用 evaluate_test_case 评测）──────────
 
-_FIXED_DOMAINS = ["poem", "math", "story", "trivia", "idiom", "science", "geography", "identity", "device_control"]
+_FIXED_DOMAINS = ["poem", "math", "story", "trivia", "idiom", "science", "geography", "identity", "device_control", "sports", "entertainment", "art", "logic"]
 _FIXED_DIM_CODE = "G1"  # 虚拟维度 code，评测时从 pipi.json 的 dimension_review_checklist.G1 取硬规则
 
 
@@ -8083,6 +8083,7 @@ def export_fixed_cases_excel():
         "poem": "古诗", "math": "数学", "story": "故事", "trivia": "常识",
         "idiom": "成语", "science": "科学", "geography": "地理",
         "identity": "身份认知", "device_control": "设备控制",
+        "sports": "体育", "entertainment": "娱乐", "art": "艺术", "logic": "逻辑思维",
     }
 
     for item in items:
