@@ -3509,12 +3509,19 @@ function loadFixedResults() {
     return;
   }
   fetch('/api/fixed_tasks/' + fixedCurrentTaskId + '/results')
-    .then(r=>r.json())
+    .then(r=>{
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
     .then(items=>{
       var list = document.getElementById('fixed-results-list');
-      if (!list) return;
+      if (!list) { console.error('[loadFixedResults] #fixed-results-list not found'); return; }
       list.style.display = 'block';
-      if (!items || !items.length) { list.innerHTML = '<div style="color:#aeaeb2;padding:20px;text-align:center">无结果（任务可能未执行）</div>'; return; }
+      if (!Array.isArray(items) || !items.length) {
+        list.innerHTML = '<div style="color:#aeaeb2;padding:20px;text-align:center">无结果（任务可能未执行）</div>';
+        if (statusEl) statusEl.innerHTML = '无结果';
+        return;
+      }
       list.innerHTML = items.map(function(r) {
         var score = r.human_score != null ? r.human_score : (r.score != null ? parseFloat(r.score).toFixed(1) : '-');
         var scoreColor = (score === '-' || score === null) ? '#86868b' : (parseFloat(score) >= 6 ? '#34c759' : '#ff3b30');
@@ -3522,7 +3529,7 @@ function loadFixedResults() {
         return '<div style="padding:10px 12px;border-bottom:1px solid #f0f0f2;font-size:13px">' +
           '<div style="display:flex;justify-content:space-between">' +
             '<div style="flex:1">' +
-              '<div style="font-weight:500">' + escapeHtml(r.case_code) + ' · ' + escapeHtml(r.title||'') + statusBadge + '</div>' +
+              '<div style="font-weight:500">' + escapeHtml(r.case_code || r.case_id) + ' · ' + escapeHtml(r.title||'') + statusBadge + '</div>' +
               '<div style="color:#86868b;font-size:12px">问：' + escapeHtml(_fixedTruncate(r.input_text||'', 80)) + '</div>' +
               '<div style="color:#86868b;font-size:12px">玩偶答：' + escapeHtml(_fixedTruncate(r.actual_output||'(未生成)', 100)) + '</div>' +
               '<div style="color:#86868b;font-size:12px">标准：' + escapeHtml(_fixedTruncate(r.expected_output||'', 80)) + '</div>' +
@@ -3535,6 +3542,13 @@ function loadFixedResults() {
           '</div>' +
         '</div>';
       }).join('');
+      if (statusEl) statusEl.innerHTML = '已加载 ' + items.length + ' 条结果';
+    })
+    .catch(e=>{
+      console.error('[loadFixedResults] error:', e);
+      var list = document.getElementById('fixed-results-list');
+      if (list) { list.style.display='block'; list.innerHTML = '<div style="color:#ff3b30;padding:20px;text-align:center">加载失败：' + escapeHtml(String(e)) + '</div>'; }
+      if (statusEl) statusEl.innerHTML = '<span style="color:#ff3b30">加载失败</span>';
     });
 }
 
