@@ -800,6 +800,29 @@ def _ensure_tables():
                 except Exception as e:
                     print(f"[STARTUP] Could not convert fixed_test_results.{_col}: {e}", flush=True)
 
+        # fixed_test_results 加 standby 5 档评测相关列
+        standby_cols = [
+            ("eval_method", "VARCHAR(16) DEFAULT 'chat'", "TEXT DEFAULT 'chat'"),
+            ("standby_score", "DECIMAL(4,2) NULL", "REAL"),
+            ("standby_level", "TINYINT NULL", "INTEGER"),
+            ("standby_deduction", "TEXT", "TEXT"),
+            ("standby_eval_detail", "TEXT", "TEXT"),
+            ("standby_status", "VARCHAR(16)", "TEXT"),
+        ]
+        for col_name, mysql_type, sqlite_type in standby_cols:
+            try:
+                execute_query(conn, f"SELECT {col_name} FROM fixed_test_results LIMIT 1", fetch_one=True)
+            except Exception:
+                try:
+                    if USE_MYSQL:
+                        execute_query(conn, f"ALTER TABLE fixed_test_results ADD COLUMN {col_name} {mysql_type}")
+                    else:
+                        execute_query(conn, f"ALTER TABLE fixed_test_results ADD COLUMN {col_name} {sqlite_type}")
+                    conn.commit()
+                    print(f"[STARTUP] Added fixed_test_results.{col_name}", flush=True)
+                except Exception as e:
+                    print(f"[STARTUP] Could not add fixed_test_results.{col_name}: {e}", flush=True)
+
         # 服务启动时恢复被中断的任务：重新拉起 worker
         conn2 = get_db_connection()
         stalled = execute_query(conn2,
@@ -5572,8 +5595,12 @@ def _eval_case_core(result_row: Dict, conn, chat_corrections: List[Dict] = None,
             return {"success": False, "reason": standby_deduction, "error_kind": error_kind}
 
         ph = "%s" if USE_MYSQL else "?"
+        if target_table == "fixed_test_results":
+            update_table = "fixed_test_results"
+        else:
+            update_table = "test_results"
         execute_query(conn,
-            f"UPDATE test_results SET eval_method = 'standby', "
+            f"UPDATE {update_table} SET eval_method = 'standby', "
             f"standby_score = {ph}, standby_level = {ph}, standby_deduction = {ph}, "
             f"standby_eval_detail = {ph}, standby_status = {ph}, "
             f"status = {ph} "
@@ -5585,7 +5612,7 @@ def _eval_case_core(result_row: Dict, conn, chat_corrections: List[Dict] = None,
 
         judges_std = eval_result.get("judges_std", 0) or 0
         needs_review = 1 if (judges_std and float(judges_std) >= JUDGE_DISAGREEMENT_THRESHOLD) else 0
-        if needs_review:
+        if needs_review and target_table == "test_results":
             execute_query(conn,
                 "UPDATE test_results SET needs_review = " + ("%s" if USE_MYSQL else "?") +
                 " WHERE id = " + ("%s" if USE_MYSQL else "?"),
@@ -8653,11 +8680,12 @@ def _evaluate_fixed_task_worker(task_id, user_id=None, slot_type=None):
                     r, conn, chat_corrections=combined,
                     user_facts=[], retry_on_error=True,
                     target_table="fixed_test_results",
+                    eval_mode="standby",
                 )
                 if outcome.get("success"):
                     done += 1
-                    score = outcome.get("score")
-                    if score is not None and float(score) >= 6:
+                    level = outcome.get("standby_level")
+                    if level is not None and int(level) >= 3:
                         passed += 1
                     else:
                         failed += 1
@@ -8730,12 +8758,12 @@ def get_fixed_result_detail(result_id):
 
 @app.route("/api/fixed_results/<int:result_id>/correct", methods=["POST"])
 def correct_fixed_result(result_id):
-    """人工纠正固定用例评测分数。body: {human_score, human_note}"""
+    """人工纠正固定用例评测分数（standby 5 档 0-4）。body: {human_score, human_note}"""
     data = request.get_json() or {}
     human_score = data.get("human_score")
     human_note = (data.get("human_note") or "").strip()
-    if human_score is None or int(human_score) < 1 or int(human_score) > 10:
-        return jsonify({"error": "human_score (1-10) required"}), 400
+    if human_score is None or int(human_score) < 0 or int(human_score) > 4:
+        return jsonify({"error": "human_score (0-4) required"}), 400
     human_score = int(human_score)
     uid = _current_uid()
 
@@ -8747,8 +8775,12 @@ def correct_fixed_result(result_id):
         return jsonify({"error": "result not found"}), 404
     row = row_to_dict(row)
 
-    execute_query(conn, "UPDATE fixed_test_results SET human_score = ?, human_note = ? WHERE id = ? AND user_id = ?",
-                 (human_score, human_note, result_id, uid))
+    # standby 模式下：human_score 也按 0-4 存；同步更新 standby_status / status
+    new_status = "passed" if human_score >= 3 else "failed"
+    execute_query(conn,
+        "UPDATE fixed_test_results SET human_score = ?, human_note = ?, "
+        "standby_status = ?, status = ? WHERE id = ? AND user_id = ?",
+        (human_score, human_note, new_status, new_status, result_id, uid))
     conn.commit()
 
     # 同步写入 eval_corrections（few-shot 注入用），eval_type='fixed_case'
@@ -8758,7 +8790,7 @@ def correct_fixed_result(result_id):
             dimension_code="G1",
             user_input=row.get("input_text") or "",
             ai_reply=row.get("actual_output") or "",
-            auto_score=float(row.get("score") or 0),
+            auto_score=float(row.get("standby_level") or row.get("score") or 0),
             human_score=human_score, correction_reason=human_note,
         )
     conn.close()
@@ -8778,9 +8810,9 @@ def fixed_results_stats():
         params.append(domain)
     rows = execute_query(conn,
         f"SELECT c.domain, c.sub_domain, COUNT(*) AS total, "
-        f"AVG(COALESCE(r.human_score, r.score)) AS avg_score, "
-        f"SUM(CASE WHEN COALESCE(r.human_score, r.score) >= 6 THEN 1 ELSE 0 END) AS passed, "
-        f"SUM(CASE WHEN COALESCE(r.human_score, r.score) < 6 THEN 1 ELSE 0 END) AS failed "
+        f"AVG(COALESCE(r.human_score, r.standby_level, r.score)) AS avg_score, "
+        f"SUM(CASE WHEN COALESCE(r.human_score, r.standby_level, r.score) >= 3 THEN 1 ELSE 0 END) AS passed, "
+        f"SUM(CASE WHEN COALESCE(r.human_score, r.standby_level, r.score) < 3 THEN 1 ELSE 0 END) AS failed "
         f"FROM fixed_test_results r JOIN fixed_test_cases c ON r.case_id = c.id "
         f"WHERE r.status = 'evaluated' AND {where} "
         f"GROUP BY c.domain, c.sub_domain ORDER BY c.domain, c.sub_domain",

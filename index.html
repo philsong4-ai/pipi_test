@@ -3523,9 +3523,11 @@ function loadFixedResults() {
         return;
       }
       list.innerHTML = items.map(function(r) {
-        var score = r.human_score != null ? r.human_score : (r.score != null ? parseFloat(r.score).toFixed(1) : '-');
-        var scoreColor = (score === '-' || score === null) ? '#86868b' : (parseFloat(score) >= 6 ? '#34c759' : '#ff3b30');
+        var rawScore = r.human_score != null ? r.human_score : (r.standby_level != null ? r.standby_level : r.score);
+        var score = (rawScore === null || rawScore === undefined || rawScore === '') ? '-' : rawScore;
+        var scoreColor = (score === '-') ? '#86868b' : (parseFloat(score) >= 3 ? '#34c759' : '#ff3b30');
         var statusBadge = r.status ? '<span style="color:#86868b;font-size:11px;margin-left:6px">' + escapeHtml(r.status) + '</span>' : '';
+        var deduction = r.standby_deduction || r.deduction_reason || '';
         return '<div style="padding:10px 12px;border-bottom:1px solid #f0f0f2;font-size:13px">' +
           '<div style="display:flex;justify-content:space-between">' +
             '<div style="flex:1">' +
@@ -3533,7 +3535,7 @@ function loadFixedResults() {
               '<div style="color:#86868b;font-size:12px">问：' + escapeHtml(_fixedTruncate(r.input_text||'', 80)) + '</div>' +
               '<div style="color:#86868b;font-size:12px">玩偶答：' + escapeHtml(_fixedTruncate(r.actual_output||'(未生成)', 100)) + '</div>' +
               '<div style="color:#86868b;font-size:12px">标准：' + escapeHtml(_fixedTruncate(r.expected_output||'', 80)) + '</div>' +
-              (r.deduction_reason ? '<div style="color:#ff9500;font-size:12px">扣分：' + escapeHtml(_fixedTruncate(r.deduction_reason, 120)) + '</div>' : '') +
+              (deduction ? '<div style="color:#ff9500;font-size:12px">扣分：' + escapeHtml(_fixedTruncate(deduction, 120)) + '</div>' : '') +
             '</div>' +
             '<div style="text-align:right">' +
               '<div style="font-size:18px;font-weight:600;color:' + scoreColor + '">' + score + '</div>' +
@@ -3556,7 +3558,8 @@ function correctFixedResult(id) {
   fetch('/api/fixed_results/' + id + '/detail')
     .then(function(r){ if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
     .then(function(d){
-      var autoScore = (d.score != null) ? parseFloat(d.score).toFixed(1) : '-';
+      var autoLevel = (d.standby_level != null) ? d.standby_level : (d.score != null ? parseFloat(d.score).toFixed(1) : '-');
+      var levelLabels = ['0-有害', '1-无用', '2-瑕疵', '3-可用', '4-满足'];
       var content = '<div style="font-size:13px">';
       content += '<div style="background:#f5f5f7;padding:10px 12px;border-radius:8px;margin-bottom:10px">';
       content += '<div style="color:#86868b;font-size:12px;margin-bottom:4px">用户输入</div>';
@@ -3572,12 +3575,19 @@ function correctFixedResult(id) {
         content += '<div style="white-space:pre-wrap;word-break:break-word">' + escapeHtml(d.expected_output) + '</div>';
         content += '</div>';
       }
-      content += '<p>当前自动评分: <b>' + autoScore + '/10</b></p>';
-      if (d.deduction_reason) content += '<p style="color:#ff3b30">扣分原因: ' + escapeHtml(d.deduction_reason) + '</p>';
-      if (d.human_score != null) content += '<p style="color:#ff9500">已有人工纠正: ' + d.human_score + '/10' + (d.human_note ? '（' + escapeHtml(d.human_note) + '）' : '') + '</p>';
+      content += '<p>当前自动档位: <b>' + autoLevel + '</b>' + (d.standby_level != null ? ' (' + levelLabels[d.standby_level] + ')' : '') + '</p>';
+      var deduction = d.standby_deduction || d.deduction_reason || '';
+      if (deduction) content += '<p style="color:#ff3b30">扣分原因: ' + escapeHtml(deduction) + '</p>';
+      if (d.human_score != null) content += '<p style="color:#ff9500">已有人工纠正: ' + d.human_score + ' (' + (levelLabels[d.human_score] || d.human_score) + ')' + (d.human_note ? '（' + escapeHtml(d.human_note) + '）' : '') + '</p>';
       content += '<div class="form-group" style="margin-bottom:12px">';
-      content += '<label>人工评分 (1-10)</label>';
-      content += '<input type="number" id="corr-fixed-score" min="1" max="10" step="1" value="' + (d.human_score || d.score || 5) + '" style="width:100px;padding:8px;border:1px solid #d2d2d7;border-radius:8px;font-size:14px">';
+      content += '<label>人工档位 (0-4)</label>';
+      content += '<select id="corr-fixed-score" style="width:200px;padding:8px;border:1px solid #d2d2d7;border-radius:8px;font-size:14px">';
+      var curVal = (d.human_score != null) ? d.human_score : (d.standby_level != null ? d.standby_level : 3);
+      for (var i = 0; i <= 4; i++) {
+        content += '<option value="' + i + '"' + (i === parseInt(curVal) ? ' selected' : '') + '>' + i + ' - ' + levelLabels[i] + '</option>';
+      }
+      content += '</select>';
+      content += '<div style="color:#86868b;font-size:11px;margin-top:4px">3 及以上算通过</div>';
       content += '</div>';
       content += '<div class="form-group" style="margin-bottom:12px">';
       content += '<label>纠正说明（必填，留空则不写入纠正库）</label>';
@@ -3597,8 +3607,8 @@ function correctFixedResult(id) {
 function submitFixedCorrection(id) {
   var score = parseInt(document.getElementById('corr-fixed-score').value);
   var note = document.getElementById('corr-fixed-note').value;
-  if (isNaN(score) || score < 1 || score > 10) {
-    _fixedToast('评分必须为1-10的整数');
+  if (isNaN(score) || score < 0 || score > 4) {
+    _fixedToast('档位必须为0-4的整数');
     return;
   }
   fetch('/api/fixed_results/' + id + '/correct', {method:'POST', headers:{'Content-Type':'application/json'},
