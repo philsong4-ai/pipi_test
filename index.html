@@ -3529,7 +3529,7 @@ function loadFixedResults() {
         return '<div style="padding:10px 12px;border-bottom:1px solid #f0f0f2;font-size:13px">' +
           '<div style="display:flex;justify-content:space-between">' +
             '<div style="flex:1">' +
-              '<div style="font-weight:500">' + escapeHtml(r.case_code || r.case_id) + ' · ' + escapeHtml(r.title||'') + statusBadge + '</div>' +
+              '<div style="font-weight:500">' + escapeHtml(r.case_code || r.case_id) + ' · ' + escapeHtml(r.title||'') + statusBadge + (r.human_score != null ? ' <span style="color:#ff9500;font-size:11px">\u270f\ufe0f 人工纠正</span>' : '') + '</div>' +
               '<div style="color:#86868b;font-size:12px">问：' + escapeHtml(_fixedTruncate(r.input_text||'', 80)) + '</div>' +
               '<div style="color:#86868b;font-size:12px">玩偶答：' + escapeHtml(_fixedTruncate(r.actual_output||'(未生成)', 100)) + '</div>' +
               '<div style="color:#86868b;font-size:12px">标准：' + escapeHtml(_fixedTruncate(r.expected_output||'', 80)) + '</div>' +
@@ -3553,16 +3553,66 @@ function loadFixedResults() {
 }
 
 function correctFixedResult(id) {
-  var score = prompt('人工分数（1-10）：', '8');
-  if (score === null) return;
-  var note = prompt('纠正说明（必填，留空则不写入纠正库）：', '');
+  fetch('/api/fixed_results/' + id + '/detail')
+    .then(function(r){ if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(function(d){
+      var autoScore = (d.score != null) ? parseFloat(d.score).toFixed(1) : '-';
+      var content = '<div style="font-size:13px">';
+      content += '<div style="background:#f5f5f7;padding:10px 12px;border-radius:8px;margin-bottom:10px">';
+      content += '<div style="color:#86868b;font-size:12px;margin-bottom:4px">用户输入</div>';
+      content += '<div style="white-space:pre-wrap;word-break:break-word">' + escapeHtml(d.input_text || '') + '</div>';
+      content += '</div>';
+      content += '<div style="background:#f5f5f7;padding:10px 12px;border-radius:8px;margin-bottom:10px">';
+      content += '<div style="color:#86868b;font-size:12px;margin-bottom:4px">玩偶回复</div>';
+      content += '<div style="white-space:pre-wrap;word-break:break-word">' + escapeHtml(d.actual_output || '(未生成)') + '</div>';
+      content += '</div>';
+      if (d.expected_output) {
+        content += '<div style="background:#e8f5e9;padding:10px 12px;border-radius:8px;margin-bottom:10px">';
+        content += '<div style="color:#2e7d32;font-size:12px;margin-bottom:4px">参考答案</div>';
+        content += '<div style="white-space:pre-wrap;word-break:break-word">' + escapeHtml(d.expected_output) + '</div>';
+        content += '</div>';
+      }
+      content += '<p>当前自动评分: <b>' + autoScore + '/10</b></p>';
+      if (d.deduction_reason) content += '<p style="color:#ff3b30">扣分原因: ' + escapeHtml(d.deduction_reason) + '</p>';
+      if (d.human_score != null) content += '<p style="color:#ff9500">已有人工纠正: ' + d.human_score + '/10' + (d.human_note ? '（' + escapeHtml(d.human_note) + '）' : '') + '</p>';
+      content += '<div class="form-group" style="margin-bottom:12px">';
+      content += '<label>人工评分 (1-10)</label>';
+      content += '<input type="number" id="corr-fixed-score" min="1" max="10" step="1" value="' + (d.human_score || d.score || 5) + '" style="width:100px;padding:8px;border:1px solid #d2d2d7;border-radius:8px;font-size:14px">';
+      content += '</div>';
+      content += '<div class="form-group" style="margin-bottom:12px">';
+      content += '<label>纠正说明（必填，留空则不写入纠正库）</label>';
+      content += '<textarea id="corr-fixed-note" rows="3" placeholder="说明为什么需要纠正评分..." style="width:100%;padding:8px;border:1px solid #d2d2d7;border-radius:8px;font-size:13px">' + escapeHtml(d.human_note || '') + '</textarea>';
+      content += '</div>';
+      content += '</div>';
+      content += '<div style="margin-top:16px;text-align:right">';
+      content += '<button class="btn btn-secondary" onclick="closeModal()" style="margin-right:8px">取消</button>';
+      content += '<button class="btn btn-primary" onclick="submitFixedCorrection(' + id + ')" style="background:#ff9500">确认纠正</button>';
+      content += '</div>';
+      document.getElementById('modal-box').innerHTML = '<h3 style="margin-bottom:12px">人工纠正 · ' + escapeHtml(d.case_code || '') + '</h3>' + content;
+      document.getElementById('modal-bg').style.display = 'flex';
+    })
+    .catch(function(e){ _fixedToast('加载详情失败：' + e.message); });
+}
+
+function submitFixedCorrection(id) {
+  var score = parseInt(document.getElementById('corr-fixed-score').value);
+  var note = document.getElementById('corr-fixed-note').value;
+  if (isNaN(score) || score < 1 || score > 10) {
+    _fixedToast('评分必须为1-10的整数');
+    return;
+  }
   fetch('/api/fixed_results/' + id + '/correct', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({human_score: parseInt(score), human_note: note || ''})})
-    .then(r=>r.json())
-    .then(d=>{
+      body: JSON.stringify({human_score: score, human_note: note || ''})})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
       if (d.error) _fixedToast(d.error);
-      else { _fixedToast('已纠正'); loadFixedResults(); }
-    });
+      else {
+        _fixedToast('已纠正');
+        closeModal();
+        loadFixedResults();
+      }
+    })
+    .catch(function(e){ _fixedToast('请求失败：' + e.message); });
 }
 
 function loadFixedCasesIfNeeded() {

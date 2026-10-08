@@ -8712,6 +8712,22 @@ def list_fixed_results(task_id):
     return jsonify([row_to_dict(r) for r in rows])
 
 
+@app.route("/api/fixed_results/<int:result_id>/detail", methods=["GET"])
+def get_fixed_result_detail(result_id):
+    uid = _current_uid()
+    conn = get_db_connection()
+    row = execute_query(conn,
+        "SELECT r.*, c.case_id AS case_code, c.title, c.domain, c.sub_domain, "
+        "c.input_text, c.expected_output, c.evaluation_points, c.failure_flags "
+        "FROM fixed_test_results r JOIN fixed_test_cases c ON r.case_id = c.id "
+        "WHERE r.id = ? AND r.user_id = ?",
+        (result_id, uid), fetch_one=True)
+    conn.close()
+    if not row:
+        return jsonify({"error": "result not found"}), 404
+    return jsonify(row_to_dict(row))
+
+
 @app.route("/api/fixed_results/<int:result_id>/correct", methods=["POST"])
 def correct_fixed_result(result_id):
     """人工纠正固定用例评测分数。body: {human_score, human_note}"""
