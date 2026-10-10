@@ -6016,9 +6016,9 @@ def get_test_results():
         return jsonify({"error": "task not found"}), 404
 
     sql = """SELECT r.id, r.task_id, r.case_id, r.actual_output, r.executed_at, r.score, r.deduction_reason, r.status, r.eval_detail,
-                   r.human_score, r.human_note, r.needs_review,
+                   r.human_score, r.human_note, r.needs_review, r.ttfb_ms, r.total_ms, r.target_api,
                    r.eval_method, r.standby_score, r.standby_level, r.standby_deduction, r.standby_eval_detail, r.standby_status,
-                    c.case_id as case_code, c.dimension_code, c.title, c.test_point, c.input_text, c.expected_output, c.evaluation_points
+                    c.case_id as case_code, c.dimension_code, c.title, c.test_point, c.input_text, c.expected_output, c.evaluation_points, c.failure_flags
              FROM test_results r
              JOIN test_cases c ON r.case_id = c.id
              WHERE r.task_id = """ + ph
@@ -6061,6 +6061,11 @@ def get_test_results():
             "evaluation_points": row.get("evaluation_points", ""),
             "actual_output": row["actual_output"],
             "executed_at": str(row["executed_at"]) if row.get("executed_at") else None,
+            "ttfb_ms": row.get("ttfb_ms"),
+            "total_ms": row.get("total_ms"),
+            "target_api": row.get("target_api"),
+            "test_point": row.get("test_point"),
+            "failure_flags": row.get("failure_flags"),
             "score": row["score"],
             "deduction_reason": row["deduction_reason"],
             "status": row["status"],
@@ -6068,6 +6073,12 @@ def get_test_results():
             "human_score": row.get("human_score"),
             "human_note": row.get("human_note"),
             "needs_review": bool(row.get("needs_review")),
+            "eval_method": row.get("eval_method") or "chat",
+            "standby_score": row.get("standby_score"),
+            "standby_level": row.get("standby_level"),
+            "standby_deduction": row.get("standby_deduction"),
+            "standby_eval_detail": _parse_eval_detail(row.get("standby_eval_detail")),
+            "standby_status": row.get("standby_status"),
         })
 
     return jsonify(results)
@@ -6080,9 +6091,11 @@ def get_single_test_result(result_id):
     ph = "%s" if USE_MYSQL else "?"
     row = execute_query(conn, f"""
         SELECT r.id, r.task_id, r.case_id, r.actual_output, r.executed_at, r.score, r.deduction_reason, r.status, r.eval_detail,
-               r.human_score, r.human_note,
+               r.human_score, r.human_note, r.ttfb_ms, r.total_ms, r.target_api, r.needs_review,
                r.eval_method, r.standby_score, r.standby_level, r.standby_deduction, r.standby_eval_detail, r.standby_status,
-               c.case_id as case_code, c.dimension_code, c.title, c.test_point, c.input_text, c.expected_output, c.evaluation_points
+               c.case_id as case_code, c.dimension_code, c.title, c.test_point, c.input_text, c.expected_output,
+               c.evaluation_points, c.failure_flags, c.score_2_desc, c.score_6_desc, c.score_10_desc,
+               t.task_id as task_code, t.persona_id, t.device_id
         FROM test_results r
         JOIN test_cases c ON r.case_id = c.id
         JOIN test_tasks t ON r.task_id = t.id
@@ -6097,15 +6110,27 @@ def get_single_test_result(result_id):
     return jsonify({
         "id": row["id"],
         "task_id": row["task_id"],
+        "task_code": row.get("task_code"),
+        "persona_id": row.get("persona_id"),
+        "device_id": row.get("device_id"),
         "case_id": row["case_id"],
         "case_code": row["case_code"],
         "dimension_code": row["dimension_code"],
         "title": row["title"],
+        "test_point": row.get("test_point"),
         "input_text": row["input_text"],
         "expected_output": row["expected_output"],
         "evaluation_points": row.get("evaluation_points", ""),
+        "failure_flags": row.get("failure_flags"),
+        "score_2_desc": row.get("score_2_desc"),
+        "score_6_desc": row.get("score_6_desc"),
+        "score_10_desc": row.get("score_10_desc"),
         "actual_output": row["actual_output"],
         "executed_at": str(row["executed_at"]) if row.get("executed_at") else None,
+        "ttfb_ms": row.get("ttfb_ms"),
+        "total_ms": row.get("total_ms"),
+        "target_api": row.get("target_api"),
+        "needs_review": row.get("needs_review"),
         "score": row["score"],
         "deduction_reason": row["deduction_reason"],
         "status": row["status"],

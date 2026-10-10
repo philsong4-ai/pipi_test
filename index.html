@@ -5579,16 +5579,22 @@ function loadTaskEvalResults() {
   fetch('/api/test_results?task_id=' + currentSelectedTaskId)
     .then(r => r.json())
     .then(allResults => {
-      var passed = 0, failed = 0, total = 0, scoreSum = 0;
+      var passed = 0, failed = 0, total = 0, scoreSum = 0, scoreCount = 0, standbyCount = 0;
       allResults.forEach(function(r) {
-        if (r.status === 'passed') { passed++; scoreSum += (r.score || 0); }
-        else if (r.status === 'failed') { failed++; scoreSum += (r.score || 0); }
+        if (r.status === 'passed' || r.status === 'failed') {
+          if (r.status === 'passed') passed++;
+          else failed++;
+          var isStandby = r.eval_method === 'standby';
+          var sc = isStandby ? r.standby_level : r.score;
+          if (sc !== null && sc !== undefined) { scoreSum += parseFloat(sc); scoreCount++; if (isStandby) standbyCount++; }
+        }
       });
       total = passed + failed;
       document.getElementById('stat-passed-v2').textContent = passed;
       document.getElementById('stat-failed-v2').textContent = failed;
       document.getElementById('stat-rate-v2').textContent = total > 0 ? Math.round(passed / total * 100) + '%' : '-';
-      document.getElementById('stat-avg-v2').textContent = total > 0 ? (scoreSum / total).toFixed(1) : '-';
+      var avgLabel = standbyCount > scoreCount / 2 ? '0-4 均值' : '1-10 均分';
+      document.getElementById('stat-avg-v2').textContent = scoreCount > 0 ? (scoreSum / scoreCount).toFixed(2) + ' (' + avgLabel + ')' : '-';
     });
 
   // 加载筛选后的列表
@@ -5630,7 +5636,7 @@ function loadTaskEvalResults() {
         html += '<td style="padding:6px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (r.title || '-') + '</td>';
         html += '<td style="padding:6px;text-align:center;font-weight:600;color:' + scoreColor + '">' + displayScore + '</td>';
         html += '<td style="padding:6px;text-align:center">' + statusBadge + '</td>';
-        html += '<td style="padding:6px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ff3b30">' + deductionText + '</td>';
+        html += '<td style="padding:6px;max-width:260px;color:#ff3b30;font-size:11px;line-height:1.4"><div style="max-height:42px;overflow:hidden;word-break:break-word;white-space:normal" title="' + escapeHtml(deductionText) + '">' + escapeHtml(deductionText) + '</div></td>';
         html += '<td style="padding:6px;text-align:center">';
         html += '<button class="btn btn-sm btn-secondary" onclick="viewEvalDetailV2(' + r.id + ',' + r.case_id + ')" style="padding:2px 6px;font-size:10px">详情</button>';
         if (r.status === 'failed') {
@@ -5735,16 +5741,35 @@ function viewEvalDetailV2(resultId, caseId) {
 }
 
 function _showEvalDetailV2(c, result) {
-  var content = '<div style="font-size:13px;max-height:55vh;overflow-y:auto">';
-  content += '<p><b>用例ID:</b> ' + (c.case_id || '-') + ' | <b>维度:</b> ' + (c.dimension_code || '-') + ' | <b>位置:</b> ' + (_evalResultIndexV2 + 1) + '/' + _evalResultListV2.length + '</p>';
-  content += '<p><b>标题:</b> ' + (c.title || '-') + '</p>';
-  content += '<p><b>用户输入:</b></p><pre style="background:#f5f5f7;padding:8px;border-radius:4px;white-space:pre-wrap;font-size:12px;max-height:100px;overflow-y:auto">' + (c.input_text || '') + '</pre>';
-  content += '<p><b>期望输出:</b></p><pre style="background:#f5f5f7;padding:8px;border-radius:4px;white-space:pre-wrap;font-size:12px;max-height:80px;overflow-y:auto">' + (c.expected_output || '') + '</pre>';
+  var content = '<div style="font-size:13px;max-height:65vh;overflow-y:auto">';
+  content += '<p style="color:#86868b;font-size:12px"><b>用例ID:</b> ' + (c.case_id || '-') + ' | <b>维度:</b> ' + (c.dimension_code || '-') + ' | <b>位置:</b> ' + (_evalResultIndexV2 + 1) + '/' + _evalResultListV2.length + '</p>';
+  content += '<p style="font-weight:600;font-size:14px;margin-bottom:6px">' + (c.title || '-') + '</p>';
+  if (c.test_point) content += '<p style="color:#0071e3;font-size:12px"><b>测试点:</b> ' + escapeHtml(c.test_point) + '</p>';
+  content += '<p><b>用户输入:</b></p><pre style="background:#f5f5f7;padding:8px;border-radius:4px;white-space:pre-wrap;font-size:12px;max-height:120px;overflow-y:auto">' + escapeHtml(c.input_text || '') + '</pre>';
+  content += '<p><b>期望输出:</b></p><pre style="background:#e8f5e9;padding:8px;border-radius:4px;white-space:pre-wrap;font-size:12px;max-height:80px;overflow-y:auto">' + escapeHtml(c.expected_output || '') + '</pre>';
   if (c.evaluation_points) {
-    content += '<p><b>评估点:</b></p><pre style="background:#fff8e1;padding:8px;border-radius:4px;white-space:pre-wrap;font-size:12px;max-height:60px;overflow-y:auto;color:#5d4037">' + c.evaluation_points + '</pre>';
+    content += '<p><b>评估点:</b></p><pre style="background:#fff8e1;padding:8px;border-radius:4px;white-space:pre-wrap;font-size:12px;max-height:60px;overflow-y:auto;color:#5d4037">' + escapeHtml(c.evaluation_points) + '</pre>';
+  }
+  if (c.failure_flags) {
+    content += '<p><b>失败标记:</b> <span style="color:#c62828;font-size:12px">' + escapeHtml(c.failure_flags) + '</span></p>';
   }
   if (result && result.actual_output) {
-    content += '<p><b>实际输出:</b></p><pre style="background:#e8f5e8;padding:8px;border-radius:4px;white-space:pre-wrap;font-size:12px;max-height:100px;overflow-y:auto">' + result.actual_output + '</pre>';
+    content += '<p><b>实际输出:</b></p><pre style="background:#e8f5e8;padding:8px;border-radius:4px;white-space:pre-wrap;font-size:12px;max-height:140px;overflow-y:auto">' + escapeHtml(result.actual_output) + '</pre>';
+  }
+  // 执行元信息
+  if (result) {
+    var meta = [];
+    if (result.executed_at) meta.push('执行时间: ' + result.executed_at);
+    if (result.target_api) meta.push('目标API: ' + result.target_api);
+    if (result.ttfb_ms) {
+      var ttfb = typeof result.ttfb_ms === 'string' ? JSON.parse(result.ttfb_ms) : result.ttfb_ms;
+      if (Array.isArray(ttfb)) meta.push('首字延迟: ' + ttfb.map(function(x){return Math.round(x)+'ms';}).join(', '));
+    }
+    if (result.total_ms) {
+      var tm = typeof result.total_ms === 'string' ? JSON.parse(result.total_ms) : result.total_ms;
+      if (Array.isArray(tm)) meta.push('总耗时: ' + tm.map(function(x){return Math.round(x)+'ms';}).join(', '));
+    }
+    if (meta.length) content += '<p style="color:#86868b;font-size:11px">' + meta.join(' · ') + '</p>';
   }
   content += '<hr style="margin:12px 0;border:none;border-top:1px solid #e8e8ed">';
   var _isStandby = result && result.eval_method === 'standby';
