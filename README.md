@@ -86,6 +86,52 @@ ssh root@<SERVER_IP> "cd /opt/pipi-test/web && ./start_web.sh status"
 ssh root@<SERVER_IP> "tail -100 /opt/pipi-test/web/web_admin.log"
 ```
 
+### 玩偶 API 配置（部署后必做）
+
+玩偶 API 的 URL/Key 有两条路径，按使用场景配：
+
+**1. Web 端（任务执行 / 聊天测试）— 走 `api_endpoints` 表**
+
+服务启动后，登录 Web 界面 →「API 接口配置」面板，把 `code='pipi'` 行的占位 URL 换成真实玩偶服务地址，并在 `auth_config` JSON 里填 `api_key`：
+
+```sql
+-- 也可直接改库
+UPDATE api_endpoints
+SET base_url = 'https://<DOLL_API_DOMAIN>/toy/v1/chat/completions',
+    auth_config = '{"api_key": "<your-real-pipi-api-key>"}',
+    is_active = 1
+WHERE code = 'pipi';
+```
+
+> 注意：`api_key` 列保持 NULL，Key 存在 `auth_config` JSON 的 `api_key` 字段里。
+
+**2. CLI 脚本兜底（test_pipi_batch.py 等）— 走环境变量**
+
+在 `/opt/pipi-test/web/.env` 里设：
+
+```bash
+PIPIDE_API_URL="https://<DOLL_API_DOMAIN>/toy/v1/chat/completions"
+PIPIDE_API_KEY="your-pipi-api-key"
+```
+
+`.env` 由 `start_web.sh` 自动 source，gunicorn 进程和 CLI 脚本都能读到。Web 端调用时优先用 `api_endpoints` 表的值，CLI 脚本兜底用 env。
+
+### AIVS Java SDK（可选，仅文本模式走 AIVS 时需要）
+
+```bash
+# 服务器上拉取并编译
+cd /opt/code
+git clone git@git.hexa.team:bk_7258/aivs_java_mac.git
+cd aivs_java_mac
+export JAVA_HOME=/usr/lib/jvm/java-11-openjdk  # CentOS/Alibaba 路径
+./gradlew :demo:compileJava --offline
+
+# 验证
+./demo/ask.sh "你好" preview false "" "" true
+```
+
+ask.sh 自动从 `https://se-chat.hexa.team/v1/chat/config/token/<did>` 拉凭证，无需手动配 token。
+
 ## 服务进程
 
 gunicorn 8 worker × 2 端口（HTTP 8080 + HTTPS 443），timeout 300s。
