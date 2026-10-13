@@ -5321,6 +5321,17 @@ def _execute_task_worker(task_id, user_id=None, slot_type=None):
         results = [row_to_dict(r) for r in results]
 
         done = 0
+        consecutive_failures = 0  # 连续失败计数（熔断用）
+        fail_count = 0  # 总失败数（partial_failed 判定用）
+        # 单条失败重试参数
+        SINGLE_RETRY_DELAY = 3  # 秒
+        # 熔断参数
+        CIRCUIT_BREAK_THRESHOLD = 5  # 连续失败 5 条触发熔断
+        CIRCUIT_BREAK_PAUSE = 30  # 熔断后暂停秒数
+        # partial_failed 判定：失败率 > 50% 且至少 10 条已执行时提前退出
+        PARTIAL_FAIL_MIN_DONE = 10
+        PARTIAL_FAIL_RATIO = 0.5
+        circuit_broken = False  # 是否已熔断（退出标记）
         for result in results:
             # orphan: 用例已被删除（REGEN 重生成或人工删除），跳过执行并标记 skipped
             if not result.get("case_code"):
@@ -5334,64 +5345,101 @@ def _execute_task_worker(task_id, user_id=None, slot_type=None):
             case_code = result["case_code"]
             print(f"[TASK-EXEC] {task_id} executing {case_code}...", flush=True)
 
-            try:
-                # 解析多轮对话
-                rounds = _parse_input_rounds(result.get("input_text", ""))
-                if not rounds:
-                    execute_query(conn, "UPDATE test_results SET status = 'error' WHERE id = %s AND user_id = %s", (result["id"], user_id))
-                    conn.commit()
-                    continue
+            # 单条执行封装：返回 (success, retries_used)
+            def _execute_one_case(result_row, is_retry=False):
+                try:
+                    rounds = _parse_input_rounds(result_row.get("input_text", ""))
+                    if not rounds:
+                        execute_query(conn, "UPDATE test_results SET status = 'error' WHERE id = %s AND user_id = %s", (result_row["id"], user_id))
+                        return (False, 0)
+                    all_replies = []
+                    dialog_ids = []
+                    ttfb_list = []
+                    total_list = []
+                    has_error = False
+                    for i, msg in enumerate(rounds):
+                        import requests as req
+                        headers = {}
+                        if CLI_TOKEN:
+                            headers["X-CLI-Token"] = CLI_TOKEN
+                        headers["X-User-Id"] = str(user_id)
+                        try:
+                            resp = req.post(
+                                "http://127.0.0.1:8080/api/test/chat",
+                                json={"persona_id": persona_id, "device_id": device_id, "message": msg, "extract_facts": True, "target_api": target_api},
+                                headers=headers,
+                                timeout=120
+                            )
+                            r = resp.json()
+                        except Exception as req_e:
+                            print(f"[TASK-EXEC ERROR] {case_code} R{i+1}{' (retry)' if is_retry else ''}: {req_e}", flush=True)
+                            has_error = True
+                            break
+                        if r.get("error"):
+                            print(f"[TASK-EXEC ERROR] {case_code} R{i+1}{' (retry)' if is_retry else ''}: {r.get('error')}", flush=True)
+                            has_error = True
+                            break
+                        reply = r.get("reply", "")
+                        ttfb = r.get("ttfb_ms")
+                        total = r.get("total_ms")
+                        did = r.get("dialog_id")
+                        if did:
+                            dialog_ids.append(did)
+                        if ttfb is not None:
+                            ttfb_list.append(ttfb)
+                        if total is not None:
+                            total_list.append(total)
+                        all_replies.append(f"【R{i+1}】{_get_toy_persona_name(target_api)}：{reply}")
+                        print(f"[TASK-EXEC] {case_code} R{i+1}{' (retry)' if is_retry else ''}: TTFB={ttfb}ms total={total}ms dialog_id={did or '-'}", flush=True)
 
-                # 逐轮发送
-                all_replies = []
-                dialog_ids = []
-                ttfb_list = []
-                total_list = []
-                has_error = False
-                for i, msg in enumerate(rounds):
-                    import requests as req
-                    headers = {}
-                    if CLI_TOKEN:
-                        headers["X-CLI-Token"] = CLI_TOKEN
-                    headers["X-User-Id"] = str(user_id)
-                    resp = req.post(
-                        "http://127.0.0.1:8080/api/test/chat",
-                        json={"persona_id": persona_id, "device_id": device_id, "message": msg, "extract_facts": True, "target_api": target_api},
-                        headers=headers,
-                        timeout=120
-                    )
-                    r = resp.json()
-                    if r.get("error"):
-                        print(f"[TASK-EXEC ERROR] {case_code} R{i+1}: {r.get('error')}", flush=True)
-                        has_error = True
-                        break
-                    reply = r.get("reply", "")
-                    ttfb = r.get("ttfb_ms")
-                    total = r.get("total_ms")
-                    did = r.get("dialog_id")
-                    if did:
-                        dialog_ids.append(did)
-                    if ttfb is not None:
-                        ttfb_list.append(ttfb)
-                    if total is not None:
-                        total_list.append(total)
-                    all_replies.append(f"【R{i+1}】{_get_toy_persona_name(target_api)}：{reply}")
-                    print(f"[TASK-EXEC] {case_code} R{i+1}: TTFB={ttfb}ms total={total}ms dialog_id={did or '-'}", flush=True)
+                    if not has_error and all_replies:
+                        actual_output = "\n".join(all_replies)
+                        dialog_ids_json = json.dumps(dialog_ids, ensure_ascii=False) if dialog_ids else None
+                        ttfb_json = json.dumps(ttfb_list, ensure_ascii=False) if ttfb_list else None
+                        total_json = json.dumps(total_list, ensure_ascii=False) if total_list else None
+                        execute_query(conn,
+                            "UPDATE test_results SET actual_output = %s, dialog_ids = %s, ttfb_ms = %s, total_ms = %s, executed_at = NOW(), status = 'executed' WHERE id = %s AND user_id = %s",
+                            (actual_output, dialog_ids_json, ttfb_json, total_json, result_row["id"], user_id))
+                        return (True, 0)
+                    else:
+                        return (False, 0)
+                except Exception as e:
+                    print(f"[TASK-EXEC ERROR] {case_code}{' (retry)' if is_retry else ''}: {e}", flush=True)
+                    execute_query(conn, "UPDATE test_results SET status = 'error' WHERE id = %s AND user_id = %s", (result_row["id"], user_id))
+                    return (False, 0)
 
-                if not has_error and all_replies:
-                    actual_output = "\n".join(all_replies)
-                    dialog_ids_json = json.dumps(dialog_ids, ensure_ascii=False) if dialog_ids else None
-                    ttfb_json = json.dumps(ttfb_list, ensure_ascii=False) if ttfb_list else None
-                    total_json = json.dumps(total_list, ensure_ascii=False) if total_list else None
-                    execute_query(conn,
-                        "UPDATE test_results SET actual_output = %s, dialog_ids = %s, ttfb_ms = %s, total_ms = %s, executed_at = NOW(), status = 'executed' WHERE id = %s AND user_id = %s",
-                        (actual_output, dialog_ids_json, ttfb_json, total_json, result["id"], user_id))
-                else:
-                    execute_query(conn, "UPDATE test_results SET status = 'error' WHERE id = %s AND user_id = %s", (result["id"], user_id))
+            success, _ = _execute_one_case(result)
+            if not success:
+                # 单条失败重试 1 次（延迟 3s）
+                print(f"[TASK-EXEC RETRY] {case_code} retry in {SINGLE_RETRY_DELAY}s...", flush=True)
+                time.sleep(SINGLE_RETRY_DELAY)
+                success, _ = _execute_one_case(result, is_retry=True)
 
-            except Exception as e:
-                print(f"[TASK-EXEC ERROR] {case_code}: {e}", flush=True)
+            if success:
+                consecutive_failures = 0
+            else:
                 execute_query(conn, "UPDATE test_results SET status = 'error' WHERE id = %s AND user_id = %s", (result["id"], user_id))
+                consecutive_failures += 1
+                fail_count += 1
+
+                # 熔断：连续失败 5 条 → 暂停 30s
+                if consecutive_failures >= CIRCUIT_BREAK_THRESHOLD:
+                    print(f"[TASK-EXEC CIRCUIT-BREAK] {case_code} {consecutive_failures} consecutive failures, pause {CIRCUIT_BREAK_PAUSE}s...", flush=True)
+                    time.sleep(CIRCUIT_BREAK_PAUSE)
+                    consecutive_failures = 0  # 重置计数，给一次恢复机会
+
+                # partial_failed 判定：失败率 > 50% 且至少 10 条已执行
+                if done + 1 >= PARTIAL_FAIL_MIN_DONE and fail_count / (done + 1) > PARTIAL_FAIL_RATIO:
+                    print(f"[TASK-EXEC ABORT] {task_id} fail_rate={fail_count}/{done+1} > {PARTIAL_FAIL_RATIO}, abort remaining {len(results) - done - 1} cases", flush=True)
+                    # 剩余未执行的标记为 skipped（区别于 error，便于人工识别）
+                    for remaining in results[done + 1:]:
+                        if remaining.get("case_code"):
+                            execute_query(conn, "UPDATE test_results SET status = 'skipped' WHERE id = %s AND user_id = %s AND status = 'pending'", (remaining["id"], user_id))
+                    circuit_broken = True
+                    done += 1
+                    execute_query(conn, "UPDATE test_tasks SET progress_done = %s WHERE id = %s AND user_id = %s", (done, task_id, user_id))
+                    conn.commit()
+                    break
 
             done += 1
             execute_query(conn, "UPDATE test_tasks SET progress_done = %s WHERE id = %s AND user_id = %s", (done, task_id, user_id))
@@ -5402,12 +5450,13 @@ def _execute_task_worker(task_id, user_id=None, slot_type=None):
             "SELECT COUNT(*) AS cnt FROM test_results WHERE task_id = %s AND status != 'skipped' AND user_id = %s",
             (task_id, user_id), fetch_one=True)
         actual_total = actual_total["cnt"] if actual_total else done
-        execute_query(conn, "UPDATE test_tasks SET status = 'executed', progress_total = %s, progress_done = %s, completed_at = NOW() WHERE id = %s AND user_id = %s",
-            (actual_total, done, task_id, user_id))
+        final_status = 'partial_failed' if circuit_broken else 'executed'
+        execute_query(conn, "UPDATE test_tasks SET status = %s, progress_total = %s, progress_done = %s, completed_at = NOW() WHERE id = %s AND user_id = %s",
+            (final_status, actual_total, done, task_id, user_id))
         conn.commit()
         conn.close()
         skipped = sum(1 for r in results if not r.get("case_code"))
-        print(f"[TASK-EXEC] {task_id} completed (executed={done - skipped}, skipped_orphan={skipped}, total={actual_total})", flush=True)
+        print(f"[TASK-EXEC] {task_id} completed (status={final_status}, executed={done - skipped}, skipped_orphan={skipped}, failed={fail_count}, total={actual_total})", flush=True)
 
     except Exception as e:
         import traceback
@@ -5437,7 +5486,7 @@ def evaluate_test_task(task_id):
         return jsonify({"error": "task not found"}), 404
 
     row = row_to_dict(row)
-    if row["status"] not in ("executed", "completed", "failed"):
+    if row["status"] not in ("executed", "completed", "failed", "partial_failed"):
         conn.close()
         return jsonify({"error": f"task status is {row['status']}, need executed status to evaluate"}), 400
 
