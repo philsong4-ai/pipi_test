@@ -5298,6 +5298,7 @@ def _execute_task_worker(task_id, user_id=None, slot_type=None):
     user_id: 路由启动时传入；scheduled_task 从 task 行反查。None 时回退 1。
     slot_type: 用户级并发槽标识，worker 完成时释放（路由层 acquire）。
     """
+    import time  # 熔断/重试需要 sleep
     if user_id is None:
         user_id = 1
     try:
