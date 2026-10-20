@@ -13,12 +13,13 @@ DID="${4:-}"
 ROLE_ID="${5:-}"
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-# 指定 did 时访问 token/$did，否则访问默认 token 接口
-if [ -n "$DID" ]; then
-    TOKEN_URL="https://<AIVS_DOMAIN>/v1/chat/config/token/$DID"
-else
-    TOKEN_URL="https://<AIVS_DOMAIN>/v1/chat/config/token"
+# 必须指定 DID，走 /v1/chat/config/token/$DID 路径
+# 默认 token 接口已废弃（返回的 deviceId 与预期不一致），不再使用
+if [ -z "$DID" ]; then
+    echo "错误: 必须指定 DID 参数（第 4 个位置参数）" >&2
+    exit 1
 fi
+TOKEN_URL="https://<AIVS_DOMAIN>/v1/chat/config/token/$DID"
 TMP_OUT=$(mktemp)
 
 echo "=== 拉取 token 配置 ===" >&2
