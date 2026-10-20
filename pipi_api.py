@@ -660,14 +660,6 @@ def call_aivs_stream(
         stdout = (proc.stdout or b"").decode("utf-8", errors="replace")
         stderr = (proc.stderr or b"").decode("utf-8", errors="replace")
 
-        # 调试用：打印 ask.sh 实际传入 SDK 的 ROLE_ID（stdout 里 ask.sh 输出了 [roleId] xxx）
-        m_role = re.search(r"\[roleId\]\s*(.*)", stdout)
-        actual_role_id = m_role.group(1).strip() if m_role else "<unknown>"
-        try:
-            print(f"[AIVS ROLE_ID] user_id={user_id!r} => ask.sh ROLE_ID={actual_role_id!r}", flush=True)
-        except Exception:
-            pass
-
         reply_lines = re.findall(r"\[回复\]\s*(.*)", stdout)
         full_text = reply_lines[-1].strip() if reply_lines else ""
 
