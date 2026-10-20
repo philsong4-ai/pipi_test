@@ -101,6 +101,9 @@ REVIEW_LLM_MODEL = os.environ.get("REVIEW_LLM_MODEL", "deepseek-v4-pro")
 AIVS_PROJECT_DIR = os.environ.get("AIVS_PROJECT_DIR", "/opt/code/aivs_java_mac")
 AIVS_JAVA_HOME = os.environ.get("AIVS_JAVA_HOME", "/usr/lib/jvm/jre-11")
 AIVS_DEFAULT_ENV = os.environ.get("AIVS_ENV", "preview")
+# 固定 DID：调用 token 接口时走 /v1/chat/config/token/{DID} 指定路径，而非默认接口
+# 避免默认接口返回的 deviceId 与预期不一致
+AIVS_FIXED_DID = os.environ.get("AIVS_FIXED_DID", "998149091")
 
 
 # ─── SSE 解析 ─────────────────────────────────────
@@ -645,9 +648,10 @@ def call_aivs_stream(
         env["LC_ALL"] = "en_US.UTF-8"
 
         # ask.sh 5 位置参数: $1 INPUT_TEXT, $2 AIVS_ENV, $3 IS_STRANGER(空走 false),
-        # $4 DID(空走 env AIVS_DEVICE_ID), $5 ROLE_ID(空走 DEVICE_ID×20 公式)
+        # $4 DID(空走默认 token 接口), $5 ROLE_ID(空走 DEVICE_ID×20 公式)
         # 用 persona_id (user_id) 作为 ROLE_ID,让不同用户走不同 AIVS 会话隔离
-        cmd = ["bash", "demo/ask.sh", user_text, AIVS_DEFAULT_ENV, "", "", user_id or ""]
+        # DID 固定为 AIVS_FIXED_DID,走 /v1/chat/config/token/{DID} 指定路径
+        cmd = ["bash", "demo/ask.sh", user_text, AIVS_DEFAULT_ENV, "", AIVS_FIXED_DID, user_id or ""]
         proc = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
