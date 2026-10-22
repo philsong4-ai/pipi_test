@@ -5676,15 +5676,10 @@ def _eval_case_core(result_row: Dict, conn, chat_corrections: List[Dict] = None,
              result_row["id"]))
         conn.commit()
 
+        # standby 分歧已在 pipi_api._run_judges_test_case 内通过丢弃最低分 judge 消化
+        # 这里不再标记 needs_review，避免人工复核负担
         judges_std = eval_result.get("judges_std", 0) or 0
-        needs_review = 1 if (judges_std and float(judges_std) >= JUDGE_DISAGREEMENT_THRESHOLD) else 0
-        if needs_review and target_table == "test_results":
-            execute_query(conn,
-                "UPDATE test_results SET needs_review = " + ("%s" if USE_MYSQL else "?") +
-                " WHERE id = " + ("%s" if USE_MYSQL else "?"),
-                (needs_review, result_row["id"]))
-            conn.commit()
-            print(f"[EVAL-CORE STANDBY] {case_code} marked needs_review (std={judges_std})", flush=True)
+        needs_review = 0
 
         return {"success": True, "score": standby_level, "standby_level": standby_level,
                 "status": standby_status, "reason": standby_deduction,

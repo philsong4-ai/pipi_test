@@ -105,6 +105,11 @@ AIVS_DEFAULT_ENV = os.environ.get("AIVS_ENV", "preview")
 # 避免默认接口返回的 deviceId 与预期不一致
 AIVS_FIXED_DID = os.environ.get("AIVS_FIXED_DID", "998149091")
 
+# ─── 评测分歧阈值 ──────────────────────────────────
+# standby 评分（0-4 档）下，多 judge 的 std ≥ 此值时丢弃最低分 judge 后重新聚合
+# chat 1-10 分制仍用此阈值标记 needs_review（web_admin.py 内）
+JUDGE_DISAGREEMENT_THRESHOLD = 2.0
+
 
 # ─── SSE 解析 ─────────────────────────────────────
 
@@ -2324,6 +2329,22 @@ def _run_judges_test_case(system_prompt: str, user_prompt: str, judges: List[Dic
 
     if is_standby:
         # 5 档 0-4 聚合：mean 四舍五入到档位；任一 judge 命中 0 分硬规则 → level=0
+        # 分歧消解：judge ≥3 且 std ≥ 阈值时，丢弃最低分 judge 后重新计算
+        # Why: 单个 judge 误判打 0 分会拉低均值，丢弃后剩余 judge 更能反映真实质量
+        if len(valid_results) >= 3 and len(scores) >= 3:
+            avg_pre = sum(scores) / len(scores)
+            std_pre = (sum((s - avg_pre) ** 2 for s in scores) / (len(scores) - 1)) ** 0.5
+            if std_pre >= JUDGE_DISAGREEMENT_THRESHOLD:
+                dropped_idx = min(range(len(scores)), key=lambda i: scores[i])
+                dropped_judge = valid_results[dropped_idx]
+                for jd in judges_detail:
+                    if jd.get("model") == dropped_judge.get("model") and jd.get("score") == dropped_judge.get("score"):
+                        jd["dropped_lowest"] = True
+                        break
+                valid_results = [r for i, r in enumerate(valid_results) if i != dropped_idx]
+                scores = [r.get("score", 0) for r in valid_results]
+                print(f"[EVAL ENSEMBLE STANDBY] dropped lowest judge (idx={dropped_idx}, score={dropped_judge.get('score')}, model={dropped_judge.get('model')}), remaining scores={scores}", flush=True)
+
         mean = round(sum(scores) / len(scores), 2) if scores else 0.0
         level = int(round(mean))
         hard_rule_hits = [r.get("hard_rule_hit", "none") for r in valid_results
