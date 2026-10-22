@@ -2053,6 +2053,21 @@ def api_set_llm_config():
                 "max_tokens": int(entry.get("max_tokens", DEFAULT_LLM_CONFIG[k]["max_tokens"])),
                 "timeout": int(entry.get("timeout", DEFAULT_LLM_CONFIG[k]["timeout"])),
             }
+            # judges 字段：多评测员集成配置
+            # 显式传 judges（含 null/空列表）→ 用传入值（null/空表示禁用 ensemble）
+            # 未传 judges → 保持 DEFAULT 默认
+            if "judges" in entry:
+                jval = entry["judges"]
+                if jval is None or (isinstance(jval, list) and len(jval) <= 1):
+                    config[k]["judges"] = jval
+                elif isinstance(jval, list):
+                    config[k]["judges"] = [
+                        {
+                            "model": str(j.get("model", "")).strip(),
+                            "temperature": float(j.get("temperature", 0)),
+                        }
+                        for j in jval if isinstance(j, dict) and j.get("model")
+                    ]
         else:
             config[k] = dict(DEFAULT_LLM_CONFIG[k])
     if USE_MYSQL:
