@@ -2,15 +2,18 @@
 # AIVS 文本对话脚本
 # 通过 token 接口拉取初始化参数，发送 AIVS_INPUT_TEXT 并输出回复内容
 #
-# 用法: ./ask.sh "今天天气怎么样" [AIVS_ENV] [is_stranger] [did] [roleId]
+# 用法: ./ask.sh "今天天气怎么样" [AIVS_ENV] [is_stranger] [did] [roleId] [isNewSession] [AIVS_PLAY_TTS]
 # roleId 不传时默认 = deviceId × 20
+# isNewSession 不传时默认 false（沿用当前 session）；true 时携带 RenewSession 开新对话
 # 输出: [回复] 内容
 
-INPUT_TEXT="${1:?用法: $0 \"要问的问题\" [preview|p4t|staging|production] [true|false] [did] [roleId]}"
+INPUT_TEXT="${1:?用法: $0 \"要问的问题\" [preview|p4t|staging|production] [true|false] [did] [roleId] [isNewSession] [true|false]}"
 AIVS_ENV="${2:-preview}"
 AIVS_IS_STRANGER="${3:-false}"
 DID="${4:-}"
 ROLE_ID="${5:-}"
+IS_NEW_SESSION="${6:-false}"
+AIVS_PLAY_TTS="${7:-${AIVS_PLAY_TTS:-false}}"
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # 必须指定 DID，走 /v1/chat/config/token/$DID 路径
@@ -43,6 +46,8 @@ echo "  deviceId: $DEVICE_ID" >&2
 echo "  sessionId: $SESSION_ID" >&2
 echo "  token: $TOKEN" >&2
 echo "  roleId: $ROLE_ID" >&2
+echo "  isNewSession: $IS_NEW_SESSION" >&2
+echo "  playTts: $AIVS_PLAY_TTS" >&2
 echo "=== 发送文本: $INPUT_TEXT ===" >&2
 
 # 跨平台检测 JDK 11（Gradle 6.5 不支持 JDK 16+）
@@ -82,7 +87,9 @@ LIBS="$PROJECT_DIR/libs"
            AIVS_MIOT_SID="$SESSION_ID" \
            AIVS_INPUT_TEXT="$INPUT_TEXT" \
            AIVS_IS_STRANGER="$AIVS_IS_STRANGER" \
-           AIVS_ROLE_ID="$ROLE_ID"
+           AIVS_ROLE_ID="$ROLE_ID" \
+           AIVS_IS_NEW_SESSION="$IS_NEW_SESSION" \
+           AIVS_PLAY_TTS="$AIVS_PLAY_TTS"
 
     # 优先直接用已编译 class 运行（跳过 gradle 编译，更快）
     if [ -d "$CLASSES_DIR" ] && [ -f "$SDK_JAR" ]; then

@@ -11225,6 +11225,39 @@ def _run_scheduled_task(task):
 
     print(f"[SCHEDULER] Starting scheduled task {task_id}: {task_type}", flush=True)
 
+    # full_flow 任务开始前：向玩偶发一条「开始新对话」消息，传 IS_NEW_SESSION=true
+    # 让 AIVS 后端 RenewSession，清空上下文，避免上次任务残留记忆污染本次评测
+    if task_type == "full_flow":
+        try:
+            persona_id_pre = config.get("persona_id")
+            sched_uid_pre = task.get("user_id") or 1
+            if persona_id_pre:
+                conn = get_db_connection()
+                prow = execute_query(conn, "SELECT id, name, device_id, target_api FROM personas WHERE id=? AND user_id=?",
+                                     (persona_id_pre, sched_uid_pre), fetch_one=True)
+                conn.close()
+                if prow:
+                    p_device_id = prow["device_id"]
+                    p_target_api = prow.get("target_api") or "pipi"
+                    api_url, api_key, api_headers, _protocol = get_api_config_by_code(p_target_api)
+                    sys_prompt = pipi_api.build_system_prompt(prow, p_device_id, target_api=p_target_api)
+                    pre_messages = [
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": "开始新对话"},
+                    ]
+                    pre_result = pipi_api.call_pipi_stream(
+                        pre_messages, device_id=p_device_id, api_url=api_url, api_key=api_key,
+                        extra_headers=api_headers, protocol=_protocol, user_id=persona_id_pre,
+                        is_new_session=True,
+                    )
+                    if pre_result.get("full_text"):
+                        save_chat_msg(persona_id_pre, "user", prow.get("name") or persona_id_pre, "开始新对话", user_id=sched_uid_pre)
+                        save_chat_msg(persona_id_pre, "pipi", _get_toy_persona_name(p_target_api), pre_result["full_text"],
+                                      user_id=sched_uid_pre, ttfb_ms=pre_result.get("ttfb_ms"), total_ms=pre_result.get("response_time_ms"))
+                    print(f"[SCHED PRE-MSG] task={task_id} persona={persona_id_pre} new_session=true reply_len={len(pre_result.get('full_text', ''))} error={pre_result.get('error')}", flush=True)
+        except Exception as e:
+            print(f"[SCHED PRE-MSG ERROR] task={task_id}: {e}", flush=True)
+
     try:
         result_ids = []
 

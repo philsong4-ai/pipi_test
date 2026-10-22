@@ -167,6 +167,7 @@ def call_pipi_stream(
     extra_headers: dict = None,
     protocol: str = "openai",
     user_id: str = None,
+    is_new_session: bool = False,
 ) -> Dict:
     """
     调用皮皮流式 API，返回完整响应。
@@ -198,7 +199,7 @@ def call_pipi_stream(
             pass
 
     try:
-        return _call_pipi_stream_inner(messages, device_id, timeout, api_url, api_key, extra_headers, protocol, user_id)
+        return _call_pipi_stream_inner(messages, device_id, timeout, api_url, api_key, extra_headers, protocol, user_id, is_new_session)
     finally:
         if slot_acquired:
             try:
@@ -208,7 +209,7 @@ def call_pipi_stream(
                 print(f"[SLOT RELEASE] api_global failed: {e}", flush=True)
 
 
-def _call_pipi_stream_inner(messages, device_id, timeout, api_url, api_key, extra_headers, protocol, user_id):
+def _call_pipi_stream_inner(messages, device_id, timeout, api_url, api_key, extra_headers, protocol, user_id, is_new_session=False):
     """实际调用皮皮流式 API 的内部实现（已被 call_pipi_stream 包装限流）"""
     # OHO 协议分发：单轮一次性创建会话+流+结束
     if protocol and protocol.lower() == "oho":
@@ -242,6 +243,7 @@ def _call_pipi_stream_inner(messages, device_id, timeout, api_url, api_key, extr
             api_key=api_key,
             extra_headers=extra_headers,
             user_id=user_id,
+            is_new_session=is_new_session,
         )
         return {
             "full_text": result.get("full_text", ""),
@@ -608,6 +610,7 @@ def call_aivs_stream(
     api_key: str = None,
     extra_headers: dict = None,
     user_id: str = None,
+    is_new_session: bool = False,
 ) -> Dict:
     """
     调用 AIVS Java SDK 文本模式:subprocess 调 /opt/code/aivs_java_mac/demo/ask.sh
@@ -648,11 +651,13 @@ def call_aivs_stream(
         env["LANG"] = "en_US.UTF-8"
         env["LC_ALL"] = "en_US.UTF-8"
 
-        # ask.sh 5 位置参数: $1 INPUT_TEXT, $2 AIVS_ENV, $3 IS_STRANGER(空走 false),
-        # $4 DID(空走默认 token 接口), $5 ROLE_ID(空走 DEVICE_ID×20 公式)
+        # ask.sh 位置参数: $1 INPUT_TEXT, $2 AIVS_ENV, $3 IS_STRANGER(空走 false),
+        # $4 DID(必填), $5 ROLE_ID(空走 DEVICE_ID×20 公式),
+        # $6 IS_NEW_SESSION(空走 false), $7 AIVS_PLAY_TTS(空走 false)
         # 用 persona_id (user_id) 作为 ROLE_ID,让不同用户走不同 AIVS 会话隔离
         # DID 固定为 AIVS_FIXED_DID,走 /v1/chat/config/token/{DID} 指定路径
-        cmd = ["bash", "demo/ask.sh", user_text, AIVS_DEFAULT_ENV, "", AIVS_FIXED_DID, user_id or ""]
+        # is_new_session=True 时传 "true",触发 AIVS RenewSession 开新会话
+        cmd = ["bash", "demo/ask.sh", user_text, AIVS_DEFAULT_ENV, "", AIVS_FIXED_DID, user_id or "", "true" if is_new_session else ""]
         proc = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
