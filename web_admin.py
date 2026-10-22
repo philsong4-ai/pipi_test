@@ -1656,6 +1656,7 @@ def test_chat():
         "ttfb_ms": result.get("ttfb_ms"),
         "total_ms": result.get("response_time_ms"),
         "dialog_id": result.get("dialog_id"),
+        "role_id": result.get("role_id"),
         "error": result.get("error")
     })
 

@@ -248,6 +248,7 @@ def _call_pipi_stream_inner(messages, device_id, timeout, api_url, api_key, extr
             "response_time_ms": result.get("response_time_ms", -1),
             "ttfb_ms": result.get("ttfb_ms"),
             "dialog_id": result.get("dialog_id"),
+            "role_id": result.get("role_id"),
             "error": result.get("error"),
         }
     # 确保 system message 中有 device_id
@@ -680,6 +681,10 @@ def call_aivs_stream(
 
         elapsed_ms = round((time.time() - start_time) * 1000, 2)
 
+        # ask.sh stdout 输出 [roleId] xxx，抓取实际传给 SDK 的 ROLE_ID
+        m_role = re.search(r"\[roleId\]\s*(.*)", stdout)
+        role_id = m_role.group(1).strip() if m_role else ""
+
         if not full_text:
             tail = (stderr or stdout)[-500:]
             return {
@@ -687,6 +692,7 @@ def call_aivs_stream(
                 "response_time_ms": elapsed_ms,
                 "ttfb_ms": ttfb_ms,
                 "dialog_id": dialog_id,
+                "role_id": role_id,
                 "error": f"AIVS 未返回回复(returncode={proc.returncode}): {tail}"
             }
 
@@ -695,6 +701,7 @@ def call_aivs_stream(
             "response_time_ms": elapsed_ms,
             "ttfb_ms": ttfb_ms,
             "dialog_id": dialog_id,
+            "role_id": role_id,
             "error": None,
         }
 
