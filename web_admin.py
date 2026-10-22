@@ -5308,6 +5308,38 @@ def execute_test_task(task_id):
     return jsonify({"status": "running", "task_id": task_id})
 
 
+def _send_new_session_msg(persona_id, device_id, target_api, task_id, dim_code, user_id):
+    """维度切换时向玩偶发一条「开始新对话」消息，携带 IS_NEW_SESSION=true。
+    让 AIVS 后端 RenewSession，清空上一维度残留的上下文，避免污染本次评测。
+    """
+    conn = get_db_connection()
+    try:
+        prow = execute_query(conn, "SELECT id, name, device_id, target_api FROM personas WHERE id=? AND user_id=?",
+                             (persona_id, user_id), fetch_one=True)
+    finally:
+        conn.close()
+    if not prow:
+        print(f"[TASK-EXEC NEW-SESSION] task={task_id} dim={dim_code} persona={persona_id} not found", flush=True)
+        return
+    p_target = prow.get("target_api") or target_api or "pipi"
+    api_url, api_key, api_headers, _protocol = get_api_config_by_code(p_target)
+    sys_prompt = pipi_api.build_system_prompt(prow, device_id, target_api=p_target)
+    msgs = [
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": "开始新对话"},
+    ]
+    res = pipi_api.call_pipi_stream(
+        msgs, device_id=device_id, api_url=api_url, api_key=api_key,
+        extra_headers=api_headers, protocol=_protocol, user_id=persona_id,
+        is_new_session=True,
+    )
+    if res.get("full_text"):
+        save_chat_msg(persona_id, "user", prow.get("name") or persona_id, "开始新对话", user_id=user_id)
+        save_chat_msg(persona_id, "pipi", _get_toy_persona_name(p_target), res["full_text"],
+                      user_id=user_id, ttfb_ms=res.get("ttfb_ms"), total_ms=res.get("response_time_ms"))
+    print(f"[TASK-EXEC NEW-SESSION] task={task_id} dim={dim_code} persona={persona_id} new_session=true reply_len={len(res.get('full_text', ''))} error={res.get('error')}", flush=True)
+
+
 def _execute_task_worker(task_id, user_id=None, slot_type=None):
     """后台执行测试任务。
 
@@ -5332,7 +5364,7 @@ def _execute_task_worker(task_id, user_id=None, slot_type=None):
 
         # 获取待执行的结果记录（LEFT JOIN：用例被 REGEN 删除时显式标记 skipped，不再静默过滤导致进度卡住）
         results = execute_query(conn,
-            "SELECT r.id, r.case_id, c.case_id as case_code, c.input_text FROM test_results r "
+            "SELECT r.id, r.case_id, c.case_id as case_code, c.input_text, c.dimension_code FROM test_results r "
             "LEFT JOIN test_cases c ON r.case_id = c.id WHERE r.task_id = %s AND r.user_id = %s ORDER BY c.dimension_code, c.case_id",
             (task_id, user_id), fetch_all=True)
         results = [row_to_dict(r) for r in results]
@@ -5349,6 +5381,7 @@ def _execute_task_worker(task_id, user_id=None, slot_type=None):
         PARTIAL_FAIL_MIN_DONE = 10
         PARTIAL_FAIL_RATIO = 0.5
         circuit_broken = False  # 是否已熔断（退出标记）
+        last_dim = None  # 上一个执行的维度代码，用于检测维度切换
         for result in results:
             # orphan: 用例已被删除（REGEN 重生成或人工删除），跳过执行并标记 skipped
             if not result.get("case_code"):
@@ -5360,6 +5393,15 @@ def _execute_task_worker(task_id, user_id=None, slot_type=None):
                 continue
 
             case_code = result["case_code"]
+            cur_dim = result.get("dimension_code") or ""
+            # 维度切换：发一条「开始新对话」消息，传 IS_NEW_SESSION=true，让 AIVS 后端 RenewSession
+            # Why: 同维度内多轮用例需要会话连续，维度间清空上下文避免上次维度残留影响本次评测
+            if cur_dim and cur_dim != last_dim:
+                try:
+                    _send_new_session_msg(persona_id, device_id, target_api, task_id, cur_dim, user_id)
+                except Exception as _e:
+                    print(f"[TASK-EXEC NEW-SESSION ERROR] task={task_id} dim={cur_dim}: {_e}", flush=True)
+                last_dim = cur_dim
             print(f"[TASK-EXEC] {task_id} executing {case_code}...", flush=True)
 
             # 单条执行封装：返回 (success, retries_used)
@@ -11219,39 +11261,6 @@ def _run_scheduled_task(task):
     config = json.loads(task["config_json"]) if task["config_json"] else {}
 
     print(f"[SCHEDULER] Starting scheduled task {task_id}: {task_type}", flush=True)
-
-    # full_flow 任务开始前：向玩偶发一条「开始新对话」消息，传 IS_NEW_SESSION=true
-    # 让 AIVS 后端 RenewSession，清空上下文，避免上次任务残留记忆污染本次评测
-    if task_type == "full_flow":
-        try:
-            persona_id_pre = config.get("persona_id")
-            sched_uid_pre = task.get("user_id") or 1
-            if persona_id_pre:
-                conn = get_db_connection()
-                prow = execute_query(conn, "SELECT id, name, device_id, target_api FROM personas WHERE id=? AND user_id=?",
-                                     (persona_id_pre, sched_uid_pre), fetch_one=True)
-                conn.close()
-                if prow:
-                    p_device_id = prow["device_id"]
-                    p_target_api = prow.get("target_api") or "pipi"
-                    api_url, api_key, api_headers, _protocol = get_api_config_by_code(p_target_api)
-                    sys_prompt = pipi_api.build_system_prompt(prow, p_device_id, target_api=p_target_api)
-                    pre_messages = [
-                        {"role": "system", "content": sys_prompt},
-                        {"role": "user", "content": "开始新对话"},
-                    ]
-                    pre_result = pipi_api.call_pipi_stream(
-                        pre_messages, device_id=p_device_id, api_url=api_url, api_key=api_key,
-                        extra_headers=api_headers, protocol=_protocol, user_id=persona_id_pre,
-                        is_new_session=True,
-                    )
-                    if pre_result.get("full_text"):
-                        save_chat_msg(persona_id_pre, "user", prow.get("name") or persona_id_pre, "开始新对话", user_id=sched_uid_pre)
-                        save_chat_msg(persona_id_pre, "pipi", _get_toy_persona_name(p_target_api), pre_result["full_text"],
-                                      user_id=sched_uid_pre, ttfb_ms=pre_result.get("ttfb_ms"), total_ms=pre_result.get("response_time_ms"))
-                    print(f"[SCHED PRE-MSG] task={task_id} persona={persona_id_pre} new_session=true reply_len={len(pre_result.get('full_text', ''))} error={pre_result.get('error')}", flush=True)
-        except Exception as e:
-            print(f"[SCHED PRE-MSG ERROR] task={task_id}: {e}", flush=True)
 
     try:
         result_ids = []
