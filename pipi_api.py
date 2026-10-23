@@ -11,6 +11,7 @@ import uuid
 import unicodedata
 import subprocess
 import requests
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Optional, Any
 
@@ -2205,17 +2206,18 @@ def _run_judges_test_case(system_prompt: str, user_prompt: str, judges: List[Dic
                            timeout: int = 60, max_tokens: int = 8192,
                            memory_check: Dict = None,
                            eval_mode: str = "chat") -> Dict:
-    """多评测员顺序调用 + 聚合。
+    """多评测员并行调用 + 聚合。
 
-    - timeout 重试 1 次（5s 间隔），其他异常/parse_failed/no_response 不重试
+    - 各 judge 并行调 LLM（ThreadPoolExecutor），timeout 重试 1 次（5s 间隔）
+    - 其他异常/parse_failed/no_response 不重试
     - 聚合前剔除异常 judge（error_kind 非空），全部异常时退化用全部
     - judges_detail 保留全部 judge 透传 error_kind；额外记 judges_valid_count
     - eval_mode='standby' 走 5 档 0-4 聚合（mean 四舍五入到档位，hard_rule_hit 任一命中→0）
     """
     is_standby = eval_mode == "standby"
-    judges_detail = []
-    results = []
-    for j in judges:
+
+    def _call_one_judge(j):
+        """单 judge 调用：返回 (judge_entry, parsed)"""
         parsed = None
         last_err_kind = None
         last_err_msg = ""
@@ -2317,8 +2319,17 @@ def _run_judges_test_case(system_prompt: str, user_prompt: str, judges: List[Dic
             }
         if parsed.get("error_kind"):
             judge_entry["error_kind"] = parsed["error_kind"]
-        judges_detail.append(judge_entry)
-        results.append(parsed)
+        return judge_entry, parsed
+
+    # 并行调用所有 judge（保留顺序：按 judges 原顺序收集结果）
+    judges_detail = []
+    results = []
+    if judges:
+        max_workers = min(len(judges), 8)
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="eval-judge") as ex:
+            for judge_entry, parsed in ex.map(_call_one_judge, judges):
+                judges_detail.append(judge_entry)
+                results.append(parsed)
 
     # 异常 judge 剔除：聚合只在 valid_results 上算；judges_detail 仍保留全部
     valid_results = [r for r in results if not r.get("error_kind")]
@@ -2881,15 +2892,16 @@ def _parse_chat_eval_raw_text(result_text: str, memory_check: Dict = None) -> Di
 def _run_judges_chat_reply(system_prompt: str, user_prompt: str, judges: List[Dict],
                              timeout: int = 90, max_tokens: int = 8192,
                              memory_check: Dict = None) -> Dict:
-    """多评测员顺序调用 + 聚合（chat 4 维度分别聚合）。
+    """多评测员并行调用 + 聚合（chat 4 维度分别聚合）。
 
-    - timeout 重试 1 次（5s 间隔），其他异常/parse_failed/no_response 不重试
+    - 各 judge 并行调 LLM（ThreadPoolExecutor），timeout 重试 1 次（5s 间隔）
+    - 其他异常/parse_failed/no_response 不重试
     - 聚合前剔除异常 judge（error_kind 非空），全部异常时退化用全部
     - judges_detail 保留全部 judge 透传 error_kind；额外记 judges_valid_count
     """
-    judges_detail = []
-    results = []
-    for j in judges:
+
+    def _call_one_chat_judge(j):
+        """单 judge 调用：返回 (judge_entry, parsed)"""
         parsed = None
         last_err_kind = None
         last_err_msg = ""
@@ -2945,8 +2957,17 @@ def _run_judges_chat_reply(system_prompt: str, user_prompt: str, judges: List[Di
         }
         if parsed.get("error_kind"):
             judge_entry["error_kind"] = parsed["error_kind"]
-        judges_detail.append(judge_entry)
-        results.append(parsed)
+        return judge_entry, parsed
+
+    # 并行调用所有 judge（保留顺序：按 judges 原顺序收集结果）
+    judges_detail = []
+    results = []
+    if judges:
+        max_workers = min(len(judges), 8)
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="chat-eval-judge") as ex:
+            for judge_entry, parsed in ex.map(_call_one_chat_judge, judges):
+                judges_detail.append(judge_entry)
+                results.append(parsed)
 
     # 异常 judge 剔除
     valid_results = [r for r in results if not r.get("error_kind")]
