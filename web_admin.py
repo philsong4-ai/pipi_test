@@ -230,14 +230,14 @@ def _ensure_tables():
         conn = get_db_connection()
         execute_query(conn, "SELECT 1 FROM personas LIMIT 1", fetch_one=True)
 
-        # 启动时清理 aivs_global 槽:上次崩溃可能有 worker 被 SIGKILL,
-        # finally 块未执行导致槽泄漏,current_count 卡在 1,所有 AIVS 请求被锁死
+        # 启动时清理 aivs_global 和 growth_session 槽:上次崩溃可能有 worker 被 SIGKILL,
+        # finally 块未执行导致槽泄漏,current_count 卡在 1,所有请求被锁死
         try:
             execute_query(conn,
-                "UPDATE concurrency_slots SET current_count=0, updated_at=NOW() WHERE slot_type='aivs_global' AND current_count>0")
+                "UPDATE concurrency_slots SET current_count=0, updated_at=NOW() WHERE slot_type IN ('aivs_global','growth_session') AND current_count>0")
             conn.commit()
         except Exception as e:
-            print(f"[STARTUP] Could not reset aivs_global slot: {e}", flush=True)
+            print(f"[STARTUP] Could not reset aivs_global/growth_session slot: {e}", flush=True)
 
         # 检查并添加 persona_score 和 persona_reason 列（如果不存在）
         try:
@@ -4786,6 +4786,26 @@ def _growth_worker(task_id, user_id=None, slot_type=None):
         user_id = 1
     import time as time_module
 
+    # growth_session 串行槽：AIVS 固定 DID 共享 session,并行 auto_fill 会串扰短期记忆
+    # 每个 growth worker 持有该槽整个生命周期,确保同一时刻只有一个 persona 在和玩偶对话
+    # 配合首条消息 is_new_session=True 清空上一 persona 残留 context
+    slot_acquired = False
+    try:
+        if not _acquire_slot('growth_session', 1, ttl_seconds=14400, wait=True, timeout=3600):
+            execute_query_db = lambda q, args=None: None
+            conn_err = get_db_connection()
+            execute_query(conn_err,
+                "UPDATE growth_tasks SET status=?, error_message=? WHERE id=? AND user_id=?",
+                ("failed", "growth_session slot acquire timeout", task_id, user_id))
+            conn_err.commit()
+            conn_err.close()
+            print(f"[GROWTH] task {task_id} growth_session slot acquire timeout", flush=True)
+            return
+        slot_acquired = True
+        print(f"[GROWTH] task {task_id} acquired growth_session slot", flush=True)
+    except Exception as e:
+        print(f"[GROWTH] task {task_id} slot acquire error: {e}", flush=True)
+
     try:
         conn = get_db_connection()
 
@@ -4847,6 +4867,8 @@ def _growth_worker(task_id, user_id=None, slot_type=None):
                 save_chat_msg(persona_id, "user", name, user_message, user_id=user_id)
 
                 # 2. 调用玩偶接口
+                # 首条消息传 is_new_session=True：RenewSession 清空上一 persona 残留 context
+                # 后续消息 is_new_session=False：沿用当前 persona 的 session context
                 target_api = persona_data.get("target_api") or "pipi"
                 api_url, api_key, api_headers, _protocol = get_api_config_by_code(target_api)
                 system_prompt = pipi_api.build_system_prompt(persona_data, device_id, target_api=target_api)
@@ -4854,7 +4876,14 @@ def _growth_worker(task_id, user_id=None, slot_type=None):
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_message},
                 ]
-                result = pipi_api.call_pipi_stream(api_messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers, protocol=_protocol, user_id=persona_id)
+                is_new_session_for_msg = (msg_index == 0)
+                result = pipi_api.call_pipi_stream(
+                    api_messages, device_id=device_id, api_url=api_url, api_key=api_key,
+                    extra_headers=api_headers, protocol=_protocol, user_id=persona_id,
+                    is_new_session=is_new_session_for_msg,
+                )
+                if is_new_session_for_msg:
+                    print(f"[GROWTH NEW-SESSION] task={task_id} persona={persona_id} idx=0 renew_session=true reply_len={len(result.get('full_text', ''))}", flush=True)
                 reply_text = result.get("full_text", "")
                 api_error = result.get("error") or ""
 
@@ -4969,6 +4998,12 @@ def _growth_worker(task_id, user_id=None, slot_type=None):
                 _release_slot(slot_type)
             except Exception as e:
                 print(f"[SLOT RELEASE] {slot_type} failed: {e}", flush=True)
+        if slot_acquired:
+            try:
+                _release_slot('growth_session')
+                print(f"[GROWTH] task {task_id} released growth_session slot", flush=True)
+            except Exception as e:
+                print(f"[SLOT RELEASE] growth_session failed: {e}", flush=True)
 
 
 # ─── 测试用例管理 API ─────────────────────────────────────
