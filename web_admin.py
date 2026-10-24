@@ -12217,13 +12217,7 @@ def async_review_cases(case_ids, auto_regenerate=True, regen_depth=0, user_id=No
                     continue
                 case = row_to_dict(row)
 
-                # 获取维度信息
-                dim_row = execute_query(conn,
-                    "SELECT * FROM test_dimensions WHERE dimension_code = %s AND target_api = %s" if USE_MYSQL else "SELECT * FROM test_dimensions WHERE dimension_code = ? AND target_api = ?",
-                    (case.get("dimension_code"), persona_target_api), fetch_one=True)
-                dim_info = row_to_dict(dim_row) if dim_row else {}
-
-                # 获取用户事实
+                # 获取用户事实 + persona target_api（必须先于 dim_row 查询）
                 persona_id = case.get("persona_id") or case.get("device_id")
                 user_facts = []
                 persona_target_api = "pipi"
@@ -12234,13 +12228,18 @@ def async_review_cases(case_ids, auto_regenerate=True, regen_depth=0, user_id=No
                         (persona_id, user_id), fetch_all=True)
                     if fact_rows:
                         user_facts = [row_to_dict(r) for r in fact_rows]
-                    # 取 persona 的 target_api 以查对应玩偶人设
                     prow = execute_query(conn,
                         "SELECT target_api FROM personas WHERE id = %s AND user_id = %s" if USE_MYSQL else
                         "SELECT target_api FROM personas WHERE id = ? AND user_id = ?",
                         (persona_id, user_id), fetch_one=True)
                     if prow:
                         persona_target_api = row_to_dict(prow).get("target_api") or "pipi"
+
+                # 获取维度信息
+                dim_row = execute_query(conn,
+                    "SELECT * FROM test_dimensions WHERE dimension_code = %s AND target_api = %s" if USE_MYSQL else "SELECT * FROM test_dimensions WHERE dimension_code = ? AND target_api = ?",
+                    (case.get("dimension_code"), persona_target_api), fetch_one=True)
+                dim_info = row_to_dict(dim_row) if dim_row else {}
 
                 # 获取玩偶人设（按用户绑定的 target_api 查）
                 toy_persona = _get_toy_persona_by_target(persona_target_api)
