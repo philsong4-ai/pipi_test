@@ -1559,6 +1559,7 @@ def test_chat():
     message = data.get("message", "").strip()
     extract_facts = data.get("extract_facts", True)
     override_target_api = data.get("target_api")  # 可选：覆盖 persona 的 target_api
+    is_new_session = bool(data.get("is_new_session", False))  # 维度切换首条用例首轮传 true,SDK RenewSession 清空上维度 context
 
     if not persona_id:
         return jsonify({"error": "persona_id is required"}), 400
@@ -1591,7 +1592,7 @@ def test_chat():
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": message},
     ]
-    result = pipi_api.call_pipi_stream(api_messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers, protocol=_protocol, user_id=persona_id)
+    result = pipi_api.call_pipi_stream(api_messages, device_id=device_id, api_url=api_url, api_key=api_key, extra_headers=api_headers, protocol=_protocol, user_id=persona_id, is_new_session=is_new_session)
     _ttfb = result.get("ttfb_ms")
     _total = result.get("response_time_ms")
     print(f"[TIMING] {persona_id} SE-web: TTFB={_ttfb}ms total={_total}ms", flush=True)
@@ -5343,38 +5344,6 @@ def execute_test_task(task_id):
     return jsonify({"status": "running", "task_id": task_id})
 
 
-def _send_new_session_msg(persona_id, device_id, target_api, task_id, dim_code, user_id):
-    """维度切换时向玩偶发一条「开始新对话」消息，携带 IS_NEW_SESSION=true。
-    让 AIVS 后端 RenewSession，清空上一维度残留的上下文，避免污染本次评测。
-    """
-    conn = get_db_connection()
-    try:
-        prow = execute_query(conn, "SELECT id, name, device_id, target_api FROM personas WHERE id=? AND user_id=?",
-                             (persona_id, user_id), fetch_one=True)
-    finally:
-        conn.close()
-    if not prow:
-        print(f"[TASK-EXEC NEW-SESSION] task={task_id} dim={dim_code} persona={persona_id} not found", flush=True)
-        return
-    p_target = prow.get("target_api") or target_api or "pipi"
-    api_url, api_key, api_headers, _protocol = get_api_config_by_code(p_target)
-    sys_prompt = pipi_api.build_system_prompt(prow, device_id, target_api=p_target)
-    msgs = [
-        {"role": "system", "content": sys_prompt},
-        {"role": "user", "content": "开始新对话"},
-    ]
-    res = pipi_api.call_pipi_stream(
-        msgs, device_id=device_id, api_url=api_url, api_key=api_key,
-        extra_headers=api_headers, protocol=_protocol, user_id=persona_id,
-        is_new_session=True,
-    )
-    if res.get("full_text"):
-        save_chat_msg(persona_id, "user", prow.get("name") or persona_id, "开始新对话", user_id=user_id)
-        save_chat_msg(persona_id, "pipi", _get_toy_persona_name(p_target), res["full_text"],
-                      user_id=user_id, ttfb_ms=res.get("ttfb_ms"), total_ms=res.get("response_time_ms"))
-    print(f"[TASK-EXEC NEW-SESSION] task={task_id} dim={dim_code} persona={persona_id} new_session=true reply_len={len(res.get('full_text', ''))} error={res.get('error')}", flush=True)
-
-
 def _execute_task_worker(task_id, user_id=None, slot_type=None):
     """后台执行测试任务。
 
@@ -5429,18 +5398,18 @@ def _execute_task_worker(task_id, user_id=None, slot_type=None):
 
             case_code = result["case_code"]
             cur_dim = result.get("dimension_code") or ""
-            # 维度切换：发一条「开始新对话」消息，传 IS_NEW_SESSION=true，让 AIVS 后端 RenewSession
-            # Why: 同维度内多轮用例需要会话连续，维度间清空上下文避免上次维度残留影响本次评测
-            if cur_dim and cur_dim != last_dim:
-                try:
-                    _send_new_session_msg(persona_id, device_id, target_api, task_id, cur_dim, user_id)
-                except Exception as _e:
-                    print(f"[TASK-EXEC NEW-SESSION ERROR] task={task_id} dim={cur_dim}: {_e}", flush=True)
+            # 维度切换：本条用例的第一轮对话传 is_new_session=true,SDK RenewSession 清空上维度 context
+            # Why: 同维度内多轮用例需要会话连续,维度间清空上下文避免上次维度残留影响本次评测
+            # 不再额外发"开始新对话"消息:之前发会被 AIVS 当用户输入触发 intent(如闹钟),污染后续对话
+            is_new_session_for_case = bool(cur_dim and cur_dim != last_dim)
+            if is_new_session_for_case:
+                print(f"[TASK-EXEC NEW-SESSION] task={task_id} dim={cur_dim} persona={persona_id} will renew session on first round", flush=True)
                 last_dim = cur_dim
             print(f"[TASK-EXEC] {task_id} executing {case_code}...", flush=True)
 
             # 单条执行封装：返回 (success, retries_used)
-            def _execute_one_case(result_row, is_retry=False):
+            # is_first_round_new_session: 维度切换后首条用例的第一轮传 is_new_session=true
+            def _execute_one_case(result_row, is_retry=False, is_first_round_new_session=False):
                 try:
                     rounds = _parse_input_rounds(result_row.get("input_text", ""))
                     if not rounds:
@@ -5460,7 +5429,11 @@ def _execute_task_worker(task_id, user_id=None, slot_type=None):
                         try:
                             resp = req.post(
                                 "http://127.0.0.1:8080/api/test/chat",
-                                json={"persona_id": persona_id, "device_id": device_id, "message": msg, "extract_facts": True, "target_api": target_api},
+                                json={
+                                    "persona_id": persona_id, "device_id": device_id, "message": msg,
+                                    "extract_facts": True, "target_api": target_api,
+                                    "is_new_session": is_first_round_new_session and i == 0,
+                                },
                                 headers=headers,
                                 timeout=120
                             )
@@ -5502,12 +5475,12 @@ def _execute_task_worker(task_id, user_id=None, slot_type=None):
                     execute_query(conn, "UPDATE test_results SET status = 'error' WHERE id = %s AND user_id = %s", (result_row["id"], user_id))
                     return (False, 0)
 
-            success, _ = _execute_one_case(result)
+            success, _ = _execute_one_case(result, is_first_round_new_session=is_new_session_for_case)
             if not success:
                 # 单条失败重试 1 次（延迟 3s）
                 print(f"[TASK-EXEC RETRY] {case_code} retry in {SINGLE_RETRY_DELAY}s...", flush=True)
                 time.sleep(SINGLE_RETRY_DELAY)
-                success, _ = _execute_one_case(result, is_retry=True)
+                success, _ = _execute_one_case(result, is_retry=True, is_first_round_new_session=is_new_session_for_case)
 
             if success:
                 consecutive_failures = 0
