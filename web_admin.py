@@ -11185,6 +11185,12 @@ def create_scheduled_task():
     if task_type != "full_flow":
         eval_mode = "chat"
 
+    # aivs_env：默认 pd（production）。允许 pd/pv 简写或完整环境名。
+    aivs_env_raw = (config.get("aivs_env") or "pd").strip().lower()
+    if aivs_env_raw not in ("pd", "pv", "production", "preview", "staging", "p4t"):
+        return jsonify({"error": "config.aivs_env must be pd/pv/production/preview/staging/p4t"}), 400
+    config["aivs_env"] = aivs_env_raw
+
     if task_type not in ("generate", "execute", "evaluate", "full_flow"):
         return jsonify({"error": "task_type must be generate/execute/evaluate/full_flow"}), 400
 
@@ -11268,7 +11274,13 @@ def _run_scheduled_task(task):
     task_type = task["task_type"]
     config = json.loads(task["config_json"]) if task["config_json"] else {}
 
-    print(f"[SCHEDULER] Starting scheduled task {task_id}: {task_type}", flush=True)
+    # AIVS 环境选择（pv/pd），默认 pd（production）。线程级隔离避免多 worker 互相干扰。
+    aivs_env_raw = (config.get("aivs_env") or "pd").strip().lower()
+    aivs_env_map = {"pd": "production", "pv": "preview", "production": "production", "preview": "preview", "staging": "staging", "p4t": "p4t"}
+    aivs_env = aivs_env_map.get(aivs_env_raw, "production")
+    pipi_api.set_aivs_env(aivs_env)
+
+    print(f"[SCHEDULER] Starting scheduled task {task_id}: {task_type} (aivs_env={aivs_env})", flush=True)
 
     try:
         result_ids = []
@@ -11434,6 +11446,10 @@ def _run_scheduled_task(task):
         """, (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), str(e), task_id))
         conn.commit()
         conn.close()
+
+    finally:
+        # 恢复全局默认，避免线程池复用时残留
+        pipi_api.set_aivs_env(None)
 
 
 def _scheduler_loop():

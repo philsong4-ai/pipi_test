@@ -5055,6 +5055,14 @@ function showScheduleModal() {
   h += '<label style="display:flex;align-items:center;gap:4px;font-size:13px"><input type="radio" name="sched-eval-mode" value="standby"> Standby（5档 0-4）</label>';
   h += '</div></div>';
 
+  // AIVS 环境（pv/pd），默认 pd
+  h += '<div class="form-group" style="margin-bottom:12px">';
+  h += '<label>AIVS 环境</label>';
+  h += '<div style="display:flex;gap:16px;padding:6px 0">';
+  h += '<label style="display:flex;align-items:center;gap:4px;font-size:13px"><input type="radio" name="sched-aivs-env" value="pd" checked> PD（生产环境）</label>';
+  h += '<label style="display:flex;align-items:center;gap:4px;font-size:13px"><input type="radio" name="sched-aivs-env" value="pv"> PV（预览环境）</label>';
+  h += '</div></div>';
+
   h += '<div style="margin-top:16px;display:flex;gap:8px">';
   h += '<button class="btn btn-primary" onclick="createScheduledTask()">创建预约</button>';
   h += '<button class="btn btn-secondary" onclick="closeModal()">取消</button>';
@@ -5147,11 +5155,13 @@ function createScheduledTask() {
   var clearExisting = document.getElementById('sched-clear').checked;
 
   var targetApi = document.getElementById('sched-endpoint').value || 'pipi';
+  var aivsEnvRadio = document.querySelector('input[name="sched-aivs-env"]:checked');
   var config = {
     persona_id: personaId,
     count_per_dimension: count,
     clear_existing: clearExisting,
-    target_api: targetApi
+    target_api: targetApi,
+    aivs_env: aivsEnvRadio ? aivsEnvRadio.value : 'pd'
   };
   if (selectedDims.length > 0) {
     config.dimension_codes = selectedDims;

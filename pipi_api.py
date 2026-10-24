@@ -106,6 +106,22 @@ AIVS_DEFAULT_ENV = os.environ.get("AIVS_ENV", "production")
 # 避免默认接口返回的 deviceId 与预期不一致
 AIVS_FIXED_DID = os.environ.get("AIVS_FIXED_DID", "998149091")
 
+# 线程级 AIVS 环境上下文：scheduled task 执行前 set，worker 线程独立不互相干扰
+import threading as _threading
+_aivs_ctx = _threading.local()
+
+
+def set_aivs_env(env):
+    """设置当前线程的 AIVS 环境（pd/pv/production/preview/staging/p4t）。
+    scheduled task 执行前调用。传 None 或空字符串恢复全局默认。
+    """
+    _aivs_ctx.env = env or None
+
+
+def get_aivs_env():
+    """获取当前线程的 AIVS 环境，未设置时回退全局 AIVS_DEFAULT_ENV。"""
+    return getattr(_aivs_ctx, "env", None) or AIVS_DEFAULT_ENV
+
 # ─── 评测分歧阈值 ──────────────────────────────────
 # standby 评分（0-4 档）下，多 judge 的 std ≥ 此值时丢弃最低分 judge 后重新聚合
 # chat 1-10 分制仍用此阈值标记 needs_review（web_admin.py 内）
@@ -663,7 +679,7 @@ def call_aivs_stream(
         # 用 persona_id (user_id) 作为 ROLE_ID,让不同用户走不同 AIVS 会话隔离
         # DID 固定为 AIVS_FIXED_DID,走 /v1/chat/config/token/{DID} 指定路径
         # is_new_session=True 时传 "true",触发 AIVS RenewSession 开新会话
-        cmd = ["bash", "demo/ask.sh", user_text, AIVS_DEFAULT_ENV, "", AIVS_FIXED_DID, user_id or "", "true" if is_new_session else ""]
+        cmd = ["bash", "demo/ask.sh", user_text, get_aivs_env(), "", AIVS_FIXED_DID, user_id or "", "true" if is_new_session else ""]
         proc = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
