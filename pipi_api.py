@@ -101,7 +101,7 @@ REVIEW_LLM_MODEL = os.environ.get("REVIEW_LLM_MODEL", "deepseek-v4-pro")
 # ─── AIVS 配置（小米 AIVS Java SDK 文本模式）─────────────
 AIVS_PROJECT_DIR = os.environ.get("AIVS_PROJECT_DIR", "/opt/code/aivs_java_mac")
 AIVS_JAVA_HOME = os.environ.get("AIVS_JAVA_HOME", "/usr/lib/jvm/jre-11")
-AIVS_DEFAULT_ENV = os.environ.get("AIVS_ENV", "preview")
+AIVS_DEFAULT_ENV = os.environ.get("AIVS_ENV", "production")
 # 固定 DID：调用 token 接口时走 /v1/chat/config/token/{DID} 指定路径，而非默认接口
 # 避免默认接口返回的 deviceId 与预期不一致
 AIVS_FIXED_DID = os.environ.get("AIVS_FIXED_DID", "998149091")
