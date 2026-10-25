@@ -12201,84 +12201,105 @@ def _reset_retry_count(persona_id, task_id=None):
 def async_review_cases(case_ids, auto_regenerate=True, regen_depth=0, user_id=None):
     """异步 LLM 复核用例质量，不合格自动重生成（最多2次）"""
     import threading
-    def _review_worker():
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _review_one_case(case_id):
+        """单条用例审核：独立 DB 连接 + 独立 LLM 调用，线程安全。
+        返回 reviewed_case dict 或 None（用例不存在/异常）。
+        """
+        if not case_id:
+            return None
+        conn = None
         try:
             conn = get_db_connection()
-            reviewed_cases = []  # 记录审核结果
+            row = execute_query(conn,
+                "SELECT * FROM test_cases WHERE id = %s AND user_id = %s" if USE_MYSQL else "SELECT * FROM test_cases WHERE id = ? AND user_id = ?",
+                (case_id, user_id), fetch_one=True)
+            if not row:
+                return None
+            case = row_to_dict(row)
 
-            for case_id in case_ids:
-                if not case_id:
-                    continue
-                # 获取用例数据
-                row = execute_query(conn,
-                    "SELECT * FROM test_cases WHERE id = %s AND user_id = %s" if USE_MYSQL else "SELECT * FROM test_cases WHERE id = ? AND user_id = ?",
-                    (case_id, user_id), fetch_one=True)
-                if not row:
-                    continue
-                case = row_to_dict(row)
+            # 获取用户事实 + persona target_api（必须先于 dim_row 查询）
+            persona_id = case.get("persona_id") or case.get("device_id")
+            user_facts = []
+            persona_target_api = "pipi"
+            if persona_id:
+                fact_rows = execute_query(conn,
+                    "SELECT category, fact_key, fact_value FROM user_facts WHERE persona_id = %s AND is_active = 1 AND user_id = %s ORDER BY id DESC" if USE_MYSQL else
+                    "SELECT category, fact_key, fact_value FROM user_facts WHERE persona_id = ? AND is_active = 1 AND user_id = ? ORDER BY id DESC",
+                    (persona_id, user_id), fetch_all=True)
+                if fact_rows:
+                    user_facts = [row_to_dict(r) for r in fact_rows]
+                prow = execute_query(conn,
+                    "SELECT target_api FROM personas WHERE id = %s AND user_id = %s" if USE_MYSQL else
+                    "SELECT target_api FROM personas WHERE id = ? AND user_id = ?",
+                    (persona_id, user_id), fetch_one=True)
+                if prow:
+                    persona_target_api = row_to_dict(prow).get("target_api") or "pipi"
 
-                # 获取用户事实 + persona target_api（必须先于 dim_row 查询）
-                persona_id = case.get("persona_id") or case.get("device_id")
-                user_facts = []
-                persona_target_api = "pipi"
-                if persona_id:
-                    fact_rows = execute_query(conn,
-                        "SELECT category, fact_key, fact_value FROM user_facts WHERE persona_id = %s AND is_active = 1 AND user_id = %s ORDER BY id DESC" if USE_MYSQL else
-                        "SELECT category, fact_key, fact_value FROM user_facts WHERE persona_id = ? AND is_active = 1 AND user_id = ? ORDER BY id DESC",
-                        (persona_id, user_id), fetch_all=True)
-                    if fact_rows:
-                        user_facts = [row_to_dict(r) for r in fact_rows]
-                    prow = execute_query(conn,
-                        "SELECT target_api FROM personas WHERE id = %s AND user_id = %s" if USE_MYSQL else
-                        "SELECT target_api FROM personas WHERE id = ? AND user_id = ?",
-                        (persona_id, user_id), fetch_one=True)
-                    if prow:
-                        persona_target_api = row_to_dict(prow).get("target_api") or "pipi"
+            # 获取维度信息
+            dim_row = execute_query(conn,
+                "SELECT * FROM test_dimensions WHERE dimension_code = %s AND target_api = %s" if USE_MYSQL else "SELECT * FROM test_dimensions WHERE dimension_code = ? AND target_api = ?",
+                (case.get("dimension_code"), persona_target_api), fetch_one=True)
+            dim_info = row_to_dict(dim_row) if dim_row else {}
 
-                # 获取维度信息
-                dim_row = execute_query(conn,
-                    "SELECT * FROM test_dimensions WHERE dimension_code = %s AND target_api = %s" if USE_MYSQL else "SELECT * FROM test_dimensions WHERE dimension_code = ? AND target_api = ?",
-                    (case.get("dimension_code"), persona_target_api), fetch_one=True)
-                dim_info = row_to_dict(dim_row) if dim_row else {}
+            # 获取玩偶人设（按用户绑定的 target_api 查）
+            toy_persona = _get_toy_persona_by_target(persona_target_api)
 
-                # 获取玩偶人设（按用户绑定的 target_api 查）
-                toy_persona = _get_toy_persona_by_target(persona_target_api)
+            # 审核前置 pending：让 _wait_for_quality_review 能区分"已开始审核"vs"草稿未触达"
+            execute_query(conn,
+                "UPDATE test_cases SET quality_status = 'pending' WHERE id = %s AND user_id = %s" if USE_MYSQL else
+                "UPDATE test_cases SET quality_status = 'pending' WHERE id = ? AND user_id = ?",
+                (case_id, user_id))
+            conn.commit()
 
-                # 审核前置 pending：让 _wait_for_quality_review 能区分"已开始审核"vs"草稿未触达"
-                # Why: 否则审核线程刚启动还未逐条处理时，draft>0 会让轮询误判"生成未触发审核"
-                execute_query(conn,
-                    "UPDATE test_cases SET quality_status = 'pending' WHERE id = %s AND user_id = %s" if USE_MYSQL else
-                    "UPDATE test_cases SET quality_status = 'pending' WHERE id = ? AND user_id = ?",
-                    (case_id, user_id))
-                conn.commit()
+            # LLM 复核
+            llm_config = get_llm_config()
+            result = pipi_api.review_case_quality(case, dim_info, user_facts, toy_persona, target_api=persona_target_api, **llm_config["case_review"])
 
-                # LLM 复核
-                llm_config = get_llm_config()
-                result = pipi_api.review_case_quality(case, dim_info, user_facts, toy_persona, target_api=persona_target_api, **llm_config["case_review"])
+            # 更新数据库
+            execute_query(conn,
+                "UPDATE test_cases SET quality_status = %s, quality_score = %s, quality_issues = %s WHERE id = %s AND user_id = %s" if USE_MYSQL else
+                "UPDATE test_cases SET quality_status = ?, quality_score = ?, quality_issues = ? WHERE id = ? AND user_id = ?",
+                (result["status"], result.get("score"), json.dumps(result.get("issues", []), ensure_ascii=False), case_id, user_id))
+            conn.commit()
+            print(f"[QUALITY REVIEW] case {case_id}: score={result.get('score')} status={result['status']}", flush=True)
 
-                # 更新数据库
-                execute_query(conn,
-                    "UPDATE test_cases SET quality_status = %s, quality_score = %s, quality_issues = %s WHERE id = %s AND user_id = %s" if USE_MYSQL else
-                    "UPDATE test_cases SET quality_status = ?, quality_score = ?, quality_issues = ? WHERE id = ? AND user_id = ?",
-                    (result["status"], result.get("score"), json.dumps(result.get("issues", []), ensure_ascii=False), case_id, user_id))
-                conn.commit()
-                print(f"[QUALITY REVIEW] case {case_id}: score={result.get('score')} status={result['status']}", flush=True)
+            return {
+                "id": case_id,
+                "case_id": case.get("case_id"),
+                "persona_id": persona_id,
+                "dimension_code": case.get("dimension_code"),
+                "status": result["status"],
+                "score": result.get("score"),
+                "issues": result.get("issues", [])
+            }
+        except Exception as e:
+            print(f"[QUALITY REVIEW ERROR] case {case_id}: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return None
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
-                # 记录审核结果
-                reviewed_cases.append({
-                    "id": case_id,
-                    "case_id": case.get("case_id"),
-                    "persona_id": persona_id,
-                    "dimension_code": case.get("dimension_code"),
-                    "status": result["status"],
-                    "score": result.get("score"),
-                    "issues": result.get("issues", [])
-                })
+    def _review_worker():
+        try:
+            valid_case_ids = [cid for cid in case_ids if cid]
+            reviewed_cases = []
 
-            conn.close()
+            if valid_case_ids:
+                max_workers = min(len(valid_case_ids), 8)
+                with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="review") as ex:
+                    for reviewed in ex.map(_review_one_case, valid_case_ids):
+                        if reviewed:
+                            reviewed_cases.append(reviewed)
 
-            # 审核完成后，检查不合格用例并自动重生成
-            if auto_regenerate:
+            # 审核完成后，检查不合格用例并自动重生成（保持串行，涉及 DB 计数器）
+            if auto_regenerate and reviewed_cases:
                 _auto_regenerate_failed_cases(reviewed_cases, regen_depth=regen_depth, user_id=user_id)
 
         except Exception as e:
