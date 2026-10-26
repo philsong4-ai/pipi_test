@@ -7837,6 +7837,252 @@ def export_standby_report_excel():
     }
 
 
+@app.route("/api/standby_report_summary_excel", methods=["GET"])
+def export_standby_report_summary_excel():
+    """导出 Standby 5档汇总评测报告 Excel（跨 task,最近 N 条已评分用例）。
+    参数: limit=600, target_api=pipi
+    """
+    from io import BytesIO
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    limit = int(request.args.get("limit", 600))
+    report_target_api = request.args.get("target_api", "pipi")
+
+    conn = get_db_connection()
+    results = execute_query(conn,
+        """SELECT r.id, r.case_id, r.task_id, r.actual_output, r.executed_at,
+                  r.eval_method, r.standby_score, r.standby_level, r.standby_deduction,
+                  r.standby_eval_detail, r.standby_status, r.human_score, r.human_note,
+                  c.case_id as case_code, c.dimension_code, c.title, c.test_point,
+                  c.input_text, c.expected_output,
+                  t.persona_id, t.task_id as task_code, t.name as task_name
+           FROM test_results r
+           JOIN test_cases c ON r.case_id = c.id
+           JOIN test_tasks t ON r.task_id = t.id
+           WHERE r.standby_score IS NOT NULL AND r.eval_method = 'standby'
+           ORDER BY r.id DESC LIMIT %s""" if USE_MYSQL else
+        """SELECT r.id, r.case_id, r.task_id, r.actual_output, r.executed_at,
+                  r.eval_method, r.standby_score, r.standby_level, r.standby_deduction,
+                  r.standby_eval_detail, r.standby_status, r.human_score, r.human_note,
+                  c.case_id as case_code, c.dimension_code, c.title, c.test_point,
+                  c.input_text, c.expected_output,
+                  t.persona_id, t.task_id as task_code, t.name as task_name
+           FROM test_results r
+           JOIN test_cases c ON r.case_id = c.id
+           JOIN test_tasks t ON r.task_id = t.id
+           WHERE r.standby_score IS NOT NULL AND r.eval_method = 'standby'
+           ORDER BY r.id DESC LIMIT ?""",
+        (limit,), fetch_all=True)
+    results = [row_to_dict(r) for r in results]
+    conn.close()
+
+    for r in results:
+        sd = r.get("standby_eval_detail")
+        if sd and isinstance(sd, str):
+            try:
+                r["_sd"] = json.loads(sd)
+            except Exception:
+                r["_sd"] = {}
+        else:
+            r["_sd"] = sd or {}
+
+    total = len(results)
+    if total == 0:
+        return jsonify({"error": "no scored results found"}), 404
+    evaluated = [r for r in results if r.get("standby_level") is not None]
+    satisfied = [r for r in evaluated if (r.get("standby_level") or 0) >= 4]
+    usable = [r for r in evaluated if (r.get("standby_level") or 0) >= 3]
+    failed = [r for r in evaluated if (r.get("standby_level") or 0) < 3]
+    levels = [int(r["standby_level"]) for r in evaluated if r.get("standby_level") is not None]
+    scores = [float(r["standby_score"]) for r in evaluated if r.get("standby_score") is not None]
+    avg_level = round(sum(levels) / len(levels), 2) if levels else 0
+    avg_score = round(sum(scores) / len(scores), 2) if scores else 0
+    satisfy_rate = round(len(satisfied) / len(evaluated) * 100, 1) if evaluated else 0
+    usable_rate = round(len(usable) / len(evaluated) * 100, 1) if evaluated else 0
+    satisfy_threshold = 60.0
+    usable_threshold = 80.0
+    satisfy_met = satisfy_rate >= satisfy_threshold
+    usable_met = usable_rate >= usable_threshold
+
+    level_dist = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0}
+    for r in evaluated:
+        lvl = r.get("standby_level")
+        if lvl is not None:
+            level_dist[int(lvl)] = level_dist.get(int(lvl), 0) + 1
+
+    hard_rule_dist = {k: 0 for k in STANDBY_HARD_RULE_NAMES}
+    for r in evaluated:
+        hit = (r.get("_sd") or {}).get("hard_rule_hit", "none") or "none"
+        hard_rule_dist[hit] = hard_rule_dist.get(hit, 0) + 1
+
+    strategy_dist = {k: 0 for k in STANDBY_STRATEGY_NAMES}
+    for r in evaluated:
+        st = (r.get("_sd") or {}).get("strategy", "") or ""
+        if st:
+            strategy_dist[st] = strategy_dist.get(st, 0) + 1
+
+    tag_freq = {}
+    for r in evaluated:
+        for t in (r.get("_sd") or {}).get("deduction_tags", []) or []:
+            tag_freq[t] = tag_freq.get(t, 0) + 1
+    top_tags = sorted(tag_freq.items(), key=lambda x: -x[1])[:10]
+
+    task_ids_seen = sorted({r.get("task_id") for r in results if r.get("task_id")})
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "汇总统计"
+
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="5856D6", end_color="5856D6", fill_type="solid")
+    thin = Border(left=Side(style='thin'), right=Side(style='thin'),
+                  top=Side(style='thin'), bottom=Side(style='thin'))
+
+    ws["A1"] = "Standby 5档汇总评测报告"
+    ws["A1"].font = Font(bold=True, size=16)
+    ws.merge_cells("A1:D1")
+
+    ws["A3"] = "统计范围"; ws["B3"] = f"最近 {total} 条已评分用例（limit={limit}）"
+    ws["A4"] = "测试接口"; ws["B4"] = report_target_api
+    ws["A5"] = "覆盖任务数"; ws["B5"] = len(task_ids_seen)
+    ws["A6"] = "报告生成时间"; ws["B6"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    ws["A8"] = "核心达标指标"; ws["A8"].font = Font(bold=True, size=12)
+    rows = [
+        ("满足率（≥4档）", f"{satisfy_rate}%"),
+        ("满足率目标", f"{satisfy_threshold:.0f}%"),
+        ("满足率达标", "✓ 达标" if satisfy_met else "✗ 未达标"),
+        ("可用率（≥3档）", f"{usable_rate}%"),
+        ("可用率目标", f"{usable_threshold:.0f}%"),
+        ("可用率达标", "✓ 达标" if usable_met else "✗ 未达标"),
+    ]
+    for i, (k, v) in enumerate(rows, start=9):
+        ws.cell(row=i, column=1, value=k).font = Font(bold=True)
+        ws.cell(row=i, column=2, value=v)
+
+    ws["A16"] = "其他指标"; ws["A16"].font = Font(bold=True, size=12)
+    other_rows = [
+        ("总用例数", total),
+        ("已评测", len(evaluated)),
+        ("满足（≥4档）", len(satisfied)),
+        ("可用（≥3档）", len(usable)),
+        ("失败（<3档）", len(failed)),
+        ("平均档位（/4）", avg_level),
+        ("平均均值分（/4）", avg_score),
+    ]
+    for i, (k, v) in enumerate(other_rows, start=17):
+        ws.cell(row=i, column=1, value=k).font = Font(bold=True)
+        ws.cell(row=i, column=2, value=v)
+
+    ws["A25"] = "档位分布"; ws["A25"].font = Font(bold=True, size=12)
+    ws.cell(row=26, column=1, value="档位").font = header_font
+    ws.cell(row=26, column=1).fill = header_fill
+    ws.cell(row=26, column=2, value="数量").font = header_font
+    ws.cell(row=26, column=2).fill = header_fill
+    ws.cell(row=26, column=3, value="占比").font = header_font
+    ws.cell(row=26, column=3).fill = header_fill
+    for i, lvl in enumerate([0, 1, 2, 3, 4], start=27):
+        cnt = level_dist.get(lvl, 0)
+        pct = round(cnt / len(evaluated) * 100, 1) if evaluated else 0
+        ws.cell(row=i, column=1, value=STANDBY_LEVEL_NAMES[lvl])
+        ws.cell(row=i, column=2, value=cnt)
+        ws.cell(row=i, column=3, value=f"{pct}%")
+
+    ws["A34"] = "0分硬规则命中分布"; ws["A34"].font = Font(bold=True, size=12)
+    ws.cell(row=35, column=1, value="规则").font = header_font
+    ws.cell(row=35, column=1).fill = header_fill
+    ws.cell(row=35, column=2, value="数量").font = header_font
+    ws.cell(row=35, column=2).fill = header_fill
+    ws.cell(row=35, column=3, value="占比").font = header_font
+    ws.cell(row=35, column=3).fill = header_fill
+    for i, code in enumerate(["none", "fact_wrong", "hallucination", "safety", "brand"], start=36):
+        cnt = hard_rule_dist.get(code, 0)
+        pct = round(cnt / len(evaluated) * 100, 1) if evaluated else 0
+        ws.cell(row=i, column=1, value=STANDBY_HARD_RULE_NAMES[code])
+        ws.cell(row=i, column=2, value=cnt)
+        ws.cell(row=i, column=3, value=f"{pct}%")
+
+    ws["A43"] = "策略组合分布"; ws["A43"].font = Font(bold=True, size=12)
+    ws.cell(row=44, column=1, value="策略").font = header_font
+    ws.cell(row=44, column=1).fill = header_fill
+    ws.cell(row=44, column=2, value="数量").font = header_font
+    ws.cell(row=44, column=2).fill = header_fill
+    ws.cell(row=44, column=3, value="占比").font = header_font
+    ws.cell(row=44, column=3).fill = header_fill
+    for i, s in enumerate(STANDBY_STRATEGY_NAMES, start=45):
+        cnt = strategy_dist.get(s, 0)
+        pct = round(cnt / len(evaluated) * 100, 1) if evaluated else 0
+        ws.cell(row=i, column=1, value=s)
+        ws.cell(row=i, column=2, value=cnt)
+        ws.cell(row=i, column=3, value=f"{pct}%")
+
+    ws["A53"] = "扣分标签 Top 10"; ws["A53"].font = Font(bold=True, size=12)
+    ws.cell(row=54, column=1, value="#").font = header_font
+    ws.cell(row=54, column=1).fill = header_fill
+    ws.cell(row=54, column=2, value="标签").font = header_font
+    ws.cell(row=54, column=2).fill = header_fill
+    ws.cell(row=54, column=3, value="次数").font = header_font
+    ws.cell(row=54, column=3).fill = header_fill
+    for i, (t, c) in enumerate(top_tags, start=55):
+        ws.cell(row=i, column=1, value=i - 54)
+        ws.cell(row=i, column=2, value=t)
+        ws.cell(row=i, column=3, value=c)
+
+    ws.column_dimensions["A"].width = 22
+    ws.column_dimensions["B"].width = 30
+    ws.column_dimensions["C"].width = 12
+
+    ws2 = wb.create_sheet("用例明细")
+    headers = ["用例ID", "维度", "标题", "档位", "均值", "硬规则", "策略", "状态", "扣分原因", "用户输入", "玩偶回复", "任务ID", "画像ID"]
+    for i, h in enumerate(headers, start=1):
+        c = ws2.cell(row=1, column=i, value=h)
+        c.font = header_font
+        c.fill = header_fill
+        c.border = thin
+
+    import re as _re
+    def _clean(s):
+        if not s:
+            return ""
+        return _re.sub(r'<[^>]+>', '', str(s)).replace("&nbsp;", " ").strip()[:5000]
+
+    for i, r in enumerate(results, start=2):
+        sd = r.get("_sd") or {}
+        hit = sd.get("hard_rule_hit", "none") or "none"
+        strategy = sd.get("strategy", "") or ""
+        ws2.cell(row=i, column=1, value=r.get("case_code", "")).border = thin
+        ws2.cell(row=i, column=2, value=r.get("dimension_code", "")).border = thin
+        ws2.cell(row=i, column=3, value=r.get("title", "")).border = thin
+        ws2.cell(row=i, column=4, value=r.get("standby_level")).border = thin
+        ws2.cell(row=i, column=5, value=r.get("standby_score")).border = thin
+        ws2.cell(row=i, column=6, value=STANDBY_HARD_RULE_NAMES.get(hit, hit)).border = thin
+        ws2.cell(row=i, column=7, value=strategy).border = thin
+        ws2.cell(row=i, column=8, value=r.get("standby_status", "")).border = thin
+        c = ws2.cell(row=i, column=9, value=r.get("standby_deduction", ""))
+        c.border = thin; c.alignment = Alignment(wrap_text=True, vertical="top")
+        c = ws2.cell(row=i, column=10, value=_clean(r.get("input_text", "")))
+        c.border = thin; c.alignment = Alignment(wrap_text=True, vertical="top")
+        c = ws2.cell(row=i, column=11, value=_clean(r.get("actual_output", "")))
+        c.border = thin; c.alignment = Alignment(wrap_text=True, vertical="top")
+        ws2.cell(row=i, column=12, value=r.get("task_code", "")).border = thin
+        ws2.cell(row=i, column=13, value=r.get("persona_id", "")).border = thin
+
+    widths = [12, 10, 28, 8, 8, 14, 12, 10, 32, 40, 40, 22, 10]
+    for i, w in enumerate(widths, start=1):
+        ws2.column_dimensions[get_column_letter(i)].width = w
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    filename = f"standby_summary_{limit}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return output.getvalue(), 200, {
+        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Content-Disposition": f"attachment; filename={filename}"
+    }
+
+
 @app.route("/api/async_tasks", methods=["GET"])
 def list_async_tasks():
     """

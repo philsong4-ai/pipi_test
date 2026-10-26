@@ -6431,7 +6431,11 @@ function viewStandbySummaryReport() {
   var limit = prompt('统计最近多少条已评分用例？', '600');
   if (limit === null) return;
   limit = parseInt(limit) || 600;
-  window.open('/api/standby_report_summary?limit=' + limit + '&format=html', '_blank');
+  var w = window.open('/api/standby_report_summary?limit=' + limit + '&format=html', '_blank');
+  // 同时触发 Excel 下载
+  setTimeout(function(){
+    window.location.href = '/api/standby_report_summary_excel?limit=' + limit;
+  }, 800);
 }
 
 // 加载评测页面的任务下拉
