@@ -7336,20 +7336,22 @@ td {{ padding: 8px 10px; border-bottom: 1px solid #e8e8ed; }}
 
 @app.route("/api/standby_report_summary", methods=["GET"])
 def generate_standby_report_summary():
-    """Standby 汇总报告（跨 task，最近 N 条已评分用例）。参数: limit=600, format=html/json"""
+    """Standby 5 档汇总报告（跨 task，最近 N 条已评分用例）。
+    格式与 standby_report_v2 完全一致,区别在于跨任务聚合。
+    参数: limit=600, format=html/json, target_api=pipi
+    """
     limit = int(request.args.get("limit", 600))
     output_format = request.args.get("format", "html")
     report_target_api = request.args.get("target_api", "pipi")
 
     conn = get_db_connection()
-
     results = execute_query(conn,
         """SELECT r.id, r.case_id, r.task_id, r.actual_output, r.executed_at, r.status,
                   r.eval_method, r.standby_score, r.standby_level, r.standby_deduction,
                   r.standby_eval_detail, r.standby_status, r.human_score, r.human_note,
                   c.case_id as case_code, c.dimension_code, c.title, c.test_point,
                   c.input_text, c.expected_output,
-                  t.persona_id, t.task_id as task_code
+                  t.persona_id, t.task_id as task_code, t.name as task_name, t.target_api
            FROM test_results r
            JOIN test_cases c ON r.case_id = c.id
            JOIN test_tasks t ON r.task_id = t.id
@@ -7360,7 +7362,7 @@ def generate_standby_report_summary():
                   r.standby_eval_detail, r.standby_status, r.human_score, r.human_note,
                   c.case_id as case_code, c.dimension_code, c.title, c.test_point,
                   c.input_text, c.expected_output,
-                  t.persona_id, t.task_id as task_code
+                  t.persona_id, t.task_id as task_code, t.name as task_name, t.target_api
            FROM test_results r
            JOIN test_cases c ON r.case_id = c.id
            JOIN test_tasks t ON r.task_id = t.id
@@ -7368,240 +7370,252 @@ def generate_standby_report_summary():
            ORDER BY r.id DESC LIMIT ?""",
         (limit,), fetch_all=True)
     results = [row_to_dict(r) for r in results]
-
-    dims = execute_query(conn,
-        "SELECT dimension_code, dimension_name, cluster_code, cluster_name FROM test_dimensions WHERE target_api = %s" if USE_MYSQL else
-        "SELECT dimension_code, dimension_name, cluster_code, cluster_name FROM test_dimensions WHERE target_api = ?",
-        (report_target_api,), fetch_all=True)
-    dim_map = {row_to_dict(d)["dimension_code"]: row_to_dict(d) for d in dims}
     conn.close()
 
-    import json as _json
     for r in results:
-        detail = r.get("standby_eval_detail")
-        if isinstance(detail, str) and detail:
+        sd = r.get("standby_eval_detail")
+        if sd and isinstance(sd, str):
             try:
-                r["standby_eval_detail"] = _json.loads(detail)
+                r["_standby_detail"] = json.loads(sd)
             except Exception:
-                pass
+                r["_standby_detail"] = {}
+        else:
+            r["_standby_detail"] = sd or {}
 
     total = len(results)
     if total == 0:
         return jsonify({"error": "no scored results found"}), 404
+    evaluated = [r for r in results if r.get("standby_level") is not None]
+    passed = [r for r in evaluated if r.get("standby_status") == "passed" or (r.get("standby_level") or 0) >= 3]
+    failed = [r for r in evaluated if r not in passed]
+    satisfied = [r for r in evaluated if (r.get("standby_level") or 0) >= 4]
+    usable = [r for r in evaluated if (r.get("standby_level") or 0) >= 3]
+    levels = [int(r["standby_level"]) for r in evaluated if r.get("standby_level") is not None]
+    scores = [float(r["standby_score"]) for r in evaluated if r.get("standby_score") is not None]
+    avg_level = round(sum(levels) / len(levels), 2) if levels else 0
+    avg_score = round(sum(scores) / len(scores), 2) if scores else 0
+    satisfy_rate = round(len(satisfied) / len(evaluated) * 100, 1) if evaluated else 0
+    usable_rate = round(len(usable) / len(evaluated) * 100, 1) if evaluated else 0
+    satisfy_threshold = 60.0
+    usable_threshold = 80.0
 
-    scores = [float(r["standby_score"]) for r in results if r.get("standby_score") is not None]
-    avg_score = sum(scores) / len(scores) if scores else 0
-    import statistics as _stats
-    std = _stats.pstdev(scores) if len(scores) > 1 else 0
-    pass_count = sum(1 for s in scores if s >= 3)
-    pass_rate = round(pass_count / total * 100, 1)
+    level_dist = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0}
+    for r in evaluated:
+        lvl = r.get("standby_level")
+        if lvl is not None:
+            level_dist[int(lvl)] = level_dist.get(int(lvl), 0) + 1
 
-    score_dist = {4: 0, 3: 0, 2: 0, 1: 0, 0: 0}
-    for s in scores:
-        score_dist[int(round(s))] = score_dist.get(int(round(s)), 0) + 1
+    hard_rule_dist = {k: 0 for k in STANDBY_HARD_RULE_NAMES}
+    for r in evaluated:
+        hit = (r.get("_standby_detail") or {}).get("hard_rule_hit", "none") or "none"
+        hard_rule_dist[hit] = hard_rule_dist.get(hit, 0) + 1
 
-    hard_rules = {"none": 0, "hallucination": 0, "fact_wrong": 0, "safety": 0}
-    for r in results:
-        detail = r.get("standby_eval_detail") or {}
-        hr = detail.get("hard_rule_hit") if isinstance(detail, dict) else None
-        hr = hr or "none"
-        hard_rules[hr] = hard_rules.get(hr, 0) + 1
+    strategy_dist = {k: 0 for k in STANDBY_STRATEGY_NAMES}
+    for r in evaluated:
+        st = (r.get("_standby_detail") or {}).get("strategy", "") or ""
+        if st:
+            strategy_dist[st] = strategy_dist.get(st, 0) + 1
 
-    by_dim = {}
-    for r in results:
-        dim = r.get("dimension_code") or "?"
-        if dim not in by_dim:
-            by_dim[dim] = {
-                "dimension_name": dim_map.get(dim, {}).get("dimension_name", dim),
-                "cluster_code": dim_map.get(dim, {}).get("cluster_code", ""),
-                "cluster_name": dim_map.get(dim, {}).get("cluster_name", ""),
-                "total": 0, "scores": [], "zero": 0, "four": 0,
-            }
-        s = float(r["standby_score"]) if r.get("standby_score") is not None else None
-        by_dim[dim]["total"] += 1
-        if s is not None:
-            by_dim[dim]["scores"].append(s)
-            if s == 0:
-                by_dim[dim]["zero"] += 1
-            if s == 4:
-                by_dim[dim]["four"] += 1
+    tag_freq = {}
+    for r in evaluated:
+        for t in (r.get("_standby_detail") or {}).get("deduction_tags", []) or []:
+            tag_freq[t] = tag_freq.get(t, 0) + 1
+    top_tags = sorted(tag_freq.items(), key=lambda x: -x[1])[:10]
 
-    by_persona = {}
-    for r in results:
-        pid = r.get("persona_id") or "?"
-        if pid not in by_persona:
-            by_persona[pid] = {"total": 0, "scores": []}
-        s = float(r["standby_score"]) if r.get("standby_score") is not None else None
-        by_persona[pid]["total"] += 1
-        if s is not None:
-            by_persona[pid]["scores"].append(s)
+    stds = [float((r.get("_standby_detail") or {}).get("judges_std", 0) or 0) for r in evaluated]
+    avg_std = round(sum(stds) / len(stds), 2) if stds else 0
 
-    failed_cases = [r for r in results if r.get("standby_score") is not None and float(r["standby_score"]) <= 1]
-    failed_cases.sort(key=lambda x: (float(x["standby_score"]), x.get("dimension_code", "")))
+    task_ids_seen = sorted({r.get("task_id") for r in results if r.get("task_id")})
 
     if output_format == "json":
         return jsonify({
             "summary": {
-                "total": total, "avg_score": round(avg_score, 2), "std": round(std, 2),
-                "pass_rate": pass_rate, "pass_count": pass_count,
-                "score_dist": score_dist, "hard_rules": hard_rules,
+                "scope": "cross_task", "limit": limit, "total": total,
+                "evaluated": len(evaluated), "passed": len(usable), "failed": len(failed),
+                "satisfied_count": len(satisfied), "usable_count": len(usable),
+                "satisfy_rate": satisfy_rate, "usable_rate": usable_rate,
+                "satisfy_threshold": satisfy_threshold, "usable_threshold": usable_threshold,
+                "satisfy_met": satisfy_rate >= satisfy_threshold,
+                "usable_met": usable_rate >= usable_threshold,
+                "avg_level": avg_level, "avg_score": avg_score, "avg_judges_std": avg_std,
+                "task_count": len(task_ids_seen),
             },
-            "by_dimension": by_dim,
-            "by_persona": by_persona,
-            "failed_cases": failed_cases,
-            "results": results,
+            "level_distribution": level_dist,
+            "hard_rule_distribution": hard_rule_dist,
+            "strategy_distribution": strategy_dist,
+            "top_deduction_tags": top_tags,
+            "task_ids": task_ids_seen,
         })
 
     report_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    first_created = min((r.get("executed_at") for r in results if r.get("executed_at")), default=None)
-    last_created = max((r.get("executed_at") for r in results if r.get("executed_at")), default=None)
-
-    def _fmt(t):
+    executed_ats = [r.get("executed_at") for r in results if r.get("executed_at")]
+    first_exec = min(executed_ats) if executed_ats else None
+    last_exec = max(executed_ats) if executed_ats else None
+    def _fmt_dt(t):
         return t.strftime("%Y-%m-%d %H:%M:%S") if hasattr(t, "strftime") else (str(t) if t else "")
 
-    clusters = {}
-    for dim, stats in sorted(by_dim.items()):
-        c = stats["cluster_code"] or "X"
-        if c not in clusters:
-            clusters[c] = {"name": stats["cluster_name"] or "未知", "dims": []}
-        c_scores = stats["scores"]
-        c_pass = sum(1 for s in c_scores if s >= 3)
-        clusters[c]["dims"].append({
-            "code": dim, "name": stats["dimension_name"], "total": stats["total"],
-            "avg": round(sum(c_scores) / len(c_scores), 2) if c_scores else 0,
-            "std": round(_stats.pstdev(c_scores), 2) if len(c_scores) > 1 else 0,
-            "zero": stats["zero"], "four": stats["four"],
-            "pass_rate": round(c_pass / len(c_scores) * 100, 1) if c_scores else 0,
-        })
+    _ta = (report_target_api or "pipi").lower()
+    target_api_label = {"oho": "OHO", "pipi": "皮皮"}.get(_ta, _ta)
 
-    persona_rows = []
-    for pid, stats in sorted(by_persona.items(), key=lambda x: -sum(x[1]["scores"]) / len(x[1]["scores"]) if x[1]["scores"] else 0):
-        p_scores = stats["scores"]
-        persona_rows.append({
-            "persona_id": pid, "total": stats["total"],
-            "avg": round(sum(p_scores) / len(p_scores), 2) if p_scores else 0,
-            "pass_rate": round(sum(1 for s in p_scores if s >= 3) / len(p_scores) * 100, 1) if p_scores else 0,
-        })
+    level_colors = {0: "#ff3b30", 1: "#ff6b00", 2: "#ff9500", 3: "#34c759", 4: "#007aff"}
+    level_labels = {0: "0-有害", 1: "1-无用", 2: "2-瑕疵", 3: "3-可用", 4: "4-满足"}
+    max_level = max(level_dist.values()) if level_dist.values() else 1
+    level_bars = ""
+    for lvl in [4, 3, 2, 1, 0]:
+        cnt = level_dist.get(lvl, 0)
+        pct = round(cnt / len(evaluated) * 100) if evaluated else 0
+        w = round(cnt / max_level * 100) if max_level > 0 else 0
+        level_bars += f"""
+        <div style="display:flex;align-items:center;margin-bottom:8px">
+            <div style="width:100px;font-size:13px">{level_labels[lvl]}</div>
+            <div style="flex:1;background:#f5f5f7;border-radius:4px;height:24px;margin:0 12px">
+                <div style="width:{w}%;background:{level_colors[lvl]};height:100%;border-radius:4px"></div>
+            </div>
+            <div style="width:80px;text-align:right;font-size:13px">{cnt} ({pct}%)</div>
+        </div>"""
+
+    hard_rule_rows = ""
+    for code in ["none", "fact_wrong", "hallucination", "safety", "brand"]:
+        cnt = hard_rule_dist.get(code, 0)
+        pct = round(cnt / len(evaluated) * 100) if evaluated else 0
+        color = "#34c759" if code == "none" else "#ff3b30"
+        hard_rule_rows += f"""
+        <tr>
+            <td>{STANDBY_HARD_RULE_NAMES[code]}</td>
+            <td>{cnt}</td>
+            <td>{pct}%</td>
+            <td style="color:{color};font-weight:600">{'✓' if code == 'none' else '✗'}</td>
+        </tr>"""
+
+    strategy_rows = ""
+    for s in STANDBY_STRATEGY_NAMES:
+        cnt = strategy_dist.get(s, 0)
+        pct = round(cnt / len(evaluated) * 100) if evaluated else 0
+        strategy_rows += f"<tr><td>{s}</td><td>{cnt}</td><td>{pct}%</td></tr>"
+
+    tag_rows = ""
+    for i, (t, c) in enumerate(top_tags, 1):
+        tag_rows += f"<tr><td>{i}</td><td>{_html.escape(str(t))}</td><td>{c}</td></tr>"
+
+    failed.sort(key=lambda r: (int(r.get("standby_level") or 0), r.get("dimension_code", "")))
+    failed_details = ""
+    for r in failed:
+        sd = r.get("_standby_detail") or {}
+        hit = sd.get("hard_rule_hit", "none")
+        strategy = sd.get("strategy", "")
+        hit_badge = f'<span style="color:#ff3b30;font-weight:600">{STANDBY_HARD_RULE_NAMES.get(hit, hit)}</span>' if hit != "none" else '<span style="color:#86868b">未命中</span>'
+        failed_details += f"""
+        <div class="case-card">
+            <div style="font-weight:600;margin-bottom:6px">{_html.escape(str(r.get('case_code','')))} - {_html.escape(str(r.get('title','')))}</div>
+            <div style="color:#86868b;font-size:12px">档位: <b style="color:{level_colors.get(int(r.get('standby_level') or 0))}">{r.get('standby_level')}</b> · 均值 {r.get('standby_score')} · 策略 {_html.escape(str(strategy))} · 硬规则 {hit_badge} · 任务 {r.get('task_code','')}</div>
+            <div style="color:#86868b;font-size:12px;margin-top:6px">用户输入: {_html.escape(str(r.get('input_text',''))[:200])}</div>
+            <div style="color:#86868b;font-size:12px;margin-top:4px">玩偶回复: {_html.escape(str(r.get('actual_output',''))[:300])}</div>
+            <div style="color:#ff3b30;font-size:12px;margin-top:4px">扣分原因: {_html.escape(str(r.get('standby_deduction','')))}</div>
+        </div>"""
+
+    satisfy_met = satisfy_rate >= satisfy_threshold
+    usable_met = usable_rate >= usable_threshold
+    summary_text = (
+        f"满足率（≥4档）{satisfy_rate}% / 目标 {satisfy_threshold:.0f}%，"
+        + ("达标" if satisfy_met else "未达标") + "；"
+        f"可用率（≥3档）{usable_rate}% / 目标 {usable_threshold:.0f}%，"
+        + ("达标" if usable_met else "未达标") + "。"
+        f"平均档位 {avg_level}/4，平均均值分 {avg_score}/4。"
+    )
+
+    satisfy_color = "#34c759" if satisfy_met else "#ff3b30"
+    usable_color = "#34c759" if usable_met else "#ff3b30"
+    satisfy_tag = "✓ 达标" if satisfy_met else "✗ 未达标"
+    usable_tag = "✓ 达标" if usable_met else "✗ 未达标"
 
     html = f"""<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="UTF-8">
-<title>Standby 汇总测试报告（最近 {total} 条）</title>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Standby 5档汇总评测报告 - 最近 {total} 条</title>
 <style>
-body {{ font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f7fa; color: #2c3e50; margin: 0; padding: 20px; line-height: 1.6; }}
-.container {{ max-width: 1200px; margin: 0 auto; background: #fff; padding: 32px; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.06); }}
-h1 {{ color: #1a73e8; border-bottom: 3px solid #1a73e8; padding-bottom: 12px; font-size: 24px; }}
-h2 {{ color: #2c3e50; margin-top: 36px; font-size: 18px; border-left: 4px solid #1a73e8; padding-left: 12px; }}
-.meta {{ color: #6b7280; font-size: 13px; margin-bottom: 24px; }}
-.kpi-grid {{ display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; margin: 20px 0; }}
-.kpi {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #fff; padding: 20px; border-radius: 10px; text-align: center; }}
-.kpi.green {{ background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); }}
-.kpi.orange {{ background: linear-gradient(135deg, #f6d365 0%, #fda085 100%); }}
-.kpi.red {{ background: linear-gradient(135deg, #ff6e7f 0%, #bfe9ff 100%); }}
-.kpi.blue {{ background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); }}
-.kpi-value {{ font-size: 28px; font-weight: bold; }}
-.kpi-label {{ font-size: 12px; opacity: 0.9; }}
-table {{ width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }}
-th, td {{ padding: 10px 12px; text-align: left; border-bottom: 1px solid #e5e7eb; }}
-th {{ background: #f9fafb; color: #374151; font-weight: 600; }}
-tr:hover {{ background: #f9fafb; }}
-.badge {{ display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }}
-.badge-4 {{ background: #d1fae5; color: #065f46; }}
-.badge-3 {{ background: #dbeafe; color: #1e40af; }}
-.badge-2 {{ background: #fef3c7; color: #92400e; }}
-.badge-1 {{ background: #fee2e2; color: #991b1b; }}
-.badge-0 {{ background: #fee2e2; color: #7f1d1d; }}
-.dim-good {{ color: #10b981; font-weight: 600; }}
-.dim-bad {{ color: #ef4444; font-weight: 600; }}
-.dist-bar {{ background: #1a73e8; height: 24px; border-radius: 3px; display: inline-flex; align-items: center; justify-content: center; color: #fff; font-size: 12px; min-width: 30px; }}
-.note {{ background: #fff3cd; border-left: 4px solid #f59e0b; padding: 12px 16px; margin: 12px 0; border-radius: 4px; font-size: 13px; }}
-.safety {{ background: #fee2e2; border-left: 4px solid #ef4444; padding: 12px 16px; margin: 12px 0; border-radius: 4px; font-size: 13px; }}
-</style></head><body><div class="container">
-<h1>皮皮玩偶 Standby 汇总测试报告</h1>
-<div class="meta">
-  统计范围：最近 {total} 条已评分用例（limit={limit}）<br>
-  时间跨度：{_fmt(first_created)} ~ {_fmt(last_created)}<br>
-  覆盖：{len(by_persona)} 个用户画像 / {len(by_dim)} 个维度 / {len(set(r.get('task_id') for r in results))} 个测试任务
+body {{ font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; background:#f5f5f7; margin:0; padding:20px; color:#1d1d1f; }}
+.container {{ max-width: 1100px; margin: 0 auto; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }}
+h1 {{ color: #1f3a5f; border-bottom: 3px solid #5856d6; padding-bottom: 10px; font-size: 24px; }}
+h2 {{ color: #1f3a5f; margin-top: 32px; font-size: 18px; border-left: 4px solid #5856d6; padding-left: 10px; }}
+.kpi-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin: 24px 0; }}
+.kpi {{ background: #f5f5f7; padding: 16px; border-radius: 8px; text-align: center; }}
+.kpi-value {{ font-size: 28px; font-weight: 700; color: #1f3a5f; }}
+.kpi-label {{ font-size: 12px; color: #86868b; margin-top: 4px; }}
+.kpi-main {{ background: linear-gradient(135deg, #eef2ff 0%, #f5f5f7 100%); padding: 20px; border-radius: 10px; text-align: center; border: 2px solid #5856d6; }}
+.kpi-main-value {{ font-size: 36px; font-weight: 800; }}
+.kpi-tag {{ display: inline-block; margin-top: 6px; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }}
+.tag-met {{ background: #34c759; color: white; }}
+.tag-miss {{ background: #ff3b30; color: white; }}
+.kpi-pass {{ color: #34c759; }}
+.kpi-fail {{ color: #ff3b30; }}
+table {{ width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 13px; }}
+th {{ background: #f5f5f7; padding: 10px; text-align: left; font-weight: 600; border-bottom: 2px solid #d2d2d7; }}
+td {{ padding: 8px 10px; border-bottom: 1px solid #e8e8ed; }}
+.case-card {{ background: #fafafa; padding: 12px; border-radius: 6px; margin-bottom: 12px; border-left: 3px solid #ff3b30; }}
+.meta {{ color: #86868b; font-size: 12px; margin: 4px 0; }}
+.badge-standby {{ background: #5856d6; color: white; padding: 2px 10px; border-radius: 10px; font-size: 11px; margin-left: 10px; }}
+</style>
+</head>
+<body>
+<div class="container">
+    <h1>Standby 5档汇总评测报告 <span class="badge-standby">5档</span></h1>
+    <div class="meta">统计范围: 最近 {total} 条已评分用例（limit={limit}） · 接口: {target_api_label} · 覆盖 {len(task_ids_seen)} 个测试任务 · 执行时间: {_fmt_dt(first_exec)} ~ {_fmt_dt(last_exec)} · 报告生成: {report_time}</div>
+
+    <h2>核心达标指标</h2>
+    <div class="kpi-grid" style="grid-template-columns: repeat(2, 1fr); margin-bottom: 12px">
+        <div class="kpi-main">
+            <div class="kpi-main-value" style="color:{satisfy_color}">{satisfy_rate}%</div>
+            <div class="kpi-label">满足率（≥4档 / 满足）· 目标 {satisfy_threshold:.0f}% · {len(satisfied)}/{len(evaluated)} 条</div>
+            <span class="kpi-tag {'tag-met' if satisfy_met else 'tag-miss'}">{satisfy_tag}</span>
+        </div>
+        <div class="kpi-main">
+            <div class="kpi-main-value" style="color:{usable_color}">{usable_rate}%</div>
+            <div class="kpi-label">可用率（≥3档 / 可用）· 目标 {usable_threshold:.0f}% · {len(usable)}/{len(evaluated)} 条</div>
+            <span class="kpi-tag {'tag-met' if usable_met else 'tag-miss'}">{usable_tag}</span>
+        </div>
+    </div>
+    <div class="meta" style="font-size:13px;color:#1d1d1f;margin-bottom:24px">{summary_text}</div>
+
+    <h2>其他指标</h2>
+    <div class="kpi-grid">
+        <div class="kpi"><div class="kpi-value">{total}</div><div class="kpi-label">总用例数</div></div>
+        <div class="kpi"><div class="kpi-value kpi-pass">{len(usable)}</div><div class="kpi-label">可用（≥3档）</div></div>
+        <div class="kpi"><div class="kpi-value kpi-fail">{len(failed)}</div><div class="kpi-label">失败（&lt;3档）</div></div>
+        <div class="kpi"><div class="kpi-value">{len(satisfied)}</div><div class="kpi-label">满足（≥4档）</div></div>
+        <div class="kpi"><div class="kpi-value">{avg_level}</div><div class="kpi-label">平均档位（/4）</div></div>
+        <div class="kpi"><div class="kpi-value">{avg_score}</div><div class="kpi-label">平均均值分（/4）</div></div>
+        <div class="kpi"><div class="kpi-value">{avg_std}</div><div class="kpi-label">裁判一致性 std</div></div>
+        <div class="kpi"><div class="kpi-value">{hard_rule_dist.get('fact_wrong',0)+hard_rule_dist.get('hallucination',0)+hard_rule_dist.get('safety',0)+hard_rule_dist.get('brand',0)}</div><div class="kpi-label">命中0分硬规则</div></div>
+    </div>
+
+    <h2>档位分布</h2>
+    {level_bars}
+
+    <h2>0 分硬规则命中分布</h2>
+    <table>
+        <thead><tr><th>规则</th><th>数量</th><th>占比</th><th>状态</th></tr></thead>
+        <tbody>{hard_rule_rows}</tbody>
+    </table>
+
+    <h2>策略组合分布</h2>
+    <table>
+        <thead><tr><th>策略</th><th>数量</th><th>占比</th></tr></thead>
+        <tbody>{strategy_rows}</tbody>
+    </table>
+
+    <h2>扣分标签 Top 10</h2>
+    <table>
+        <thead><tr><th>#</th><th>标签</th><th>次数</th></tr></thead>
+        <tbody>{tag_rows if tag_rows else '<tr><td colspan=3 style=text-align:center;color:#aeaeb2>无扣分标签</td></tr>'}</tbody>
+    </table>
+
+    <h2>失败用例详情（{len(failed)} 个）</h2>
+    {failed_details if failed_details else '<div style="color:#aeaeb2;text-align:center;padding:20px">无失败用例</div>'}
 </div>
-
-<h2>总体指标</h2>
-<div class="kpi-grid">
-  <div class="kpi blue"><div class="kpi-value">{total}</div><div class="kpi-label">总用例数</div></div>
-  <div class="kpi green"><div class="kpi-value">{round(avg_score, 2)}</div><div class="kpi-label">平均分 / 4.0</div></div>
-  <div class="kpi green"><div class="kpi-value">{pass_rate}%</div><div class="kpi-label">通过率 (≥3 分)</div></div>
-  <div class="kpi orange"><div class="kpi-value">{score_dist[4]}</div><div class="kpi-label">满分用例</div></div>
-  <div class="kpi red"><div class="kpi-value">{score_dist[0]}</div><div class="kpi-label">0 分用例</div></div>
-</div>
-
-<h2>分数分布</h2>
-<table>
-<tr><th>档位</th><th>含义</th><th>条数</th><th>占比</th><th>分布</th></tr>
-<tr><td><span class="badge badge-4">4 分</span></td><td>完全达标</td><td>{score_dist[4]}</td><td>{round(score_dist[4]/total*100, 1)}%</td><td><span class="dist-bar" style="width:{score_dist[4]/total*100*1.5}px">{score_dist[4]}</span></td></tr>
-<tr><td><span class="badge badge-3">3 分</span></td><td>基本达标</td><td>{score_dist[3]}</td><td>{round(score_dist[3]/total*100, 1)}%</td><td><span class="dist-bar" style="width:{score_dist[3]/total*100*1.5}px; background:#3b82f6">{score_dist[3]}</span></td></tr>
-<tr><td><span class="badge badge-2">2 分</span></td><td>部分达标</td><td>{score_dist[2]}</td><td>{round(score_dist[2]/total*100, 1)}%</td><td><span class="dist-bar" style="width:{score_dist[2]/total*100*1.5}px; background:#f59e0b">{score_dist[2]}</span></td></tr>
-<tr><td><span class="badge badge-1">1 分</span></td><td>未达标</td><td>{score_dist[1]}</td><td>{round(score_dist[1]/total*100, 1)}%</td><td><span class="dist-bar" style="width:{score_dist[1]/total*100*1.5}px; background:#ef4444">{score_dist[1]}</span></td></tr>
-<tr><td><span class="badge badge-0">0 分</span></td><td>硬规则违反</td><td>{score_dist[0]}</td><td>{round(score_dist[0]/total*100, 1)}%</td><td><span class="dist-bar" style="width:{score_dist[0]/total*100*1.5}px; background:#991b1b">{score_dist[0]}</span></td></tr>
-</table>
-
-<h2>硬规则命中分布</h2>
-<table>
-<tr><th>规则</th><th>命中数</th><th>占比</th><th>说明</th></tr>
-<tr><td>none</td><td>{hard_rules.get('none', 0)}</td><td>{round(hard_rules.get('none', 0)/total*100, 1)}%</td><td>无硬规则违反</td></tr>
-<tr><td class="dim-bad">hallucination</td><td>{hard_rules.get('hallucination', 0)}</td><td>{round(hard_rules.get('hallucination', 0)/total*100, 1)}%</td><td>幻觉（编造不存在事实）</td></tr>
-<tr><td class="dim-bad">fact_wrong</td><td>{hard_rules.get('fact_wrong', 0)}</td><td>{round(hard_rules.get('fact_wrong', 0)/total*100, 1)}%</td><td>事实错误</td></tr>
-<tr><td class="dim-bad">safety</td><td>{hard_rules.get('safety', 0)}</td><td>{round(hard_rules.get('safety', 0)/total*100, 1)}%</td><td>安全违规（高危）</td></tr>
-</table>
-"""
-    if hard_rules.get('safety', 0) > 0:
-        html += f"""<div class="safety"><strong>⚠ 安全违规</strong><br>共 {hard_rules.get('safety', 0)} 条用例命中 safety 硬规则，需立即排查并修复。</div>"""
-
-    html += f"""
-<h2>按维度统计（{len(by_dim)} 个维度）</h2>
-<table>
-<tr><th>维度</th><th>名称</th><th>能力簇</th><th>用例数</th><th>均分</th><th>标准差</th><th>满分</th><th>0 分</th><th>通过率</th><th>评级</th></tr>
-"""
-    for c_code, c_data in sorted(clusters.items()):
-        for d in c_data["dims"]:
-            rate = d["pass_rate"]
-            grade = "⭐ 优秀" if rate >= 90 else ("良好" if rate >= 80 else "⚠ 较差")
-            cls = "dim-good" if rate >= 90 else ("dim-bad" if rate < 80 else "")
-            html += f"<tr><td>{d['code']}</td><td>{d['name']}</td><td>{c_data['name']}</td><td>{d['total']}</td><td>{d['avg']}</td><td>{d['std']}</td><td>{d['four']}</td><td>{d['zero']}</td><td class='{cls}'>{rate}%</td><td>{grade}</td></tr>"
-
-    html += f"""
-</table>
-
-<h2>按用户画像统计</h2>
-<table>
-<tr><th>用户画像</th><th>用例数</th><th>均分</th><th>通过率</th></tr>
-"""
-    for p in persona_rows:
-        cls_avg = "dim-good" if p["avg"] >= 3.5 else ("dim-bad" if p["avg"] < 3.2 else "")
-        cls_rate = "dim-good" if p["pass_rate"] >= 90 else ("dim-bad" if p["pass_rate"] < 80 else "")
-        html += f"<tr><td>{p['persona_id']}</td><td>{p['total']}</td><td class='{cls_avg}'>{p['avg']}</td><td class='{cls_rate}'>{p['pass_rate']}%</td></tr>"
-
-    html += f"""
-</table>
-
-<h2>失败用例详情（score ≤ 1，共 {len(failed_cases)} 条）</h2>
-<table>
-<tr><th>case_id</th><th>维度</th><th>标题</th><th>分数</th><th>硬规则</th><th>用户</th></tr>
-"""
-    for r in failed_cases[:50]:
-        s = float(r["standby_score"])
-        bcls = f"badge-{int(round(s))}"
-        detail = r.get("standby_eval_detail") or {}
-        hr = detail.get("hard_rule_hit") if isinstance(detail, dict) else None
-        hr = hr or "none"
-        hr_cls = "dim-bad" if hr != "none" else ""
-        html += f"<tr><td>{r.get('case_code', '')}</td><td>{r.get('dimension_code', '')}</td><td>{r.get('title', '')}</td><td><span class='badge {bcls}'>{s}</span></td><td class='{hr_cls}'>{hr}</td><td>{r.get('persona_id', '')}</td></tr>"
-
-    html += f"""
-</table>
-
-<div class="meta" style="margin-top: 32px; text-align: center;">
-报告生成时间：{report_time} · 评测方式：3 judge 并行 + standby 5 档
-</div>
-</div></body></html>"""
-    return html
+</body>
+</html>"""
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
 @app.route("/api/standby_report_excel", methods=["GET"])
