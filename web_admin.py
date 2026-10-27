@@ -7382,26 +7382,49 @@ def generate_standby_report_summary():
     # UNION 合并 test_results(动态用例) + fixed_test_results(固定垂类用例)
     # Why: 汇总报告需覆盖全部已评分用例,固定用例也按 standby 5 档评测
     # 排序: 按 executed_at DESC(对话执行时间倒序),最新在前
+    # MySQL: UNION 时两表字符列 collation 不一致会报 1271,用 CONVERT(... USING utf8mb4) 强制统一
     if USE_MYSQL:
         results = execute_query(conn,
-            """(SELECT r.id, r.case_id, r.task_id, r.actual_output, r.executed_at, r.status,
-                      r.eval_method, r.standby_score, r.standby_level, r.standby_deduction,
-                      r.standby_eval_detail, r.standby_status, r.human_score, r.human_note,
-                      c.case_id as case_code, c.dimension_code, c.title, c.test_point,
-                      c.input_text, c.expected_output,
-                      t.persona_id, t.task_id as task_code, t.name as task_name, t.target_api,
+            """(SELECT r.id, r.case_id, r.task_id,
+                      CONVERT(r.actual_output USING utf8mb4) as actual_output, r.executed_at,
+                      CONVERT(r.status USING utf8mb4) as status, CONVERT(r.eval_method USING utf8mb4) as eval_method,
+                      r.standby_score, r.standby_level,
+                      CONVERT(r.standby_deduction USING utf8mb4) as standby_deduction,
+                      CONVERT(r.standby_eval_detail USING utf8mb4) as standby_eval_detail,
+                      CONVERT(r.standby_status USING utf8mb4) as standby_status, r.human_score,
+                      CONVERT(r.human_note USING utf8mb4) as human_note,
+                      CONVERT(c.case_id USING utf8mb4) as case_code,
+                      CONVERT(c.dimension_code USING utf8mb4) as dimension_code,
+                      CONVERT(c.title USING utf8mb4) as title,
+                      CONVERT(c.test_point USING utf8mb4) as test_point,
+                      CONVERT(c.input_text USING utf8mb4) as input_text,
+                      CONVERT(c.expected_output USING utf8mb4) as expected_output,
+                      t.persona_id, CONVERT(t.task_id USING utf8mb4) as task_code,
+                      CONVERT(t.name USING utf8mb4) as task_name,
+                      CONVERT(t.target_api USING utf8mb4) as target_api,
                       'dynamic' as source_table
                FROM test_results r
                JOIN test_cases c ON r.case_id = c.id
                JOIN test_tasks t ON r.task_id = t.id
                WHERE r.standby_score IS NOT NULL AND r.eval_method = 'standby')
               UNION ALL
-              (SELECT r.id, r.case_id, r.task_id, r.actual_output, r.executed_at, r.status,
-                      r.eval_method, r.standby_score, r.standby_level, r.standby_deduction,
-                      r.standby_eval_detail, r.standby_status, r.human_score, r.human_note,
-                      c.case_id as case_code, c.domain as dimension_code, c.title, c.sub_domain as test_point,
-                      c.input_text, c.expected_output,
-                      NULL as persona_id, t.task_id as task_code, t.name as task_name, t.target_api,
+              (SELECT r.id, r.case_id, r.task_id,
+                      CONVERT(r.actual_output USING utf8mb4) as actual_output, r.executed_at,
+                      CONVERT(r.status USING utf8mb4) as status, CONVERT(r.eval_method USING utf8mb4) as eval_method,
+                      r.standby_score, r.standby_level,
+                      CONVERT(r.standby_deduction USING utf8mb4) as standby_deduction,
+                      CONVERT(r.standby_eval_detail USING utf8mb4) as standby_eval_detail,
+                      CONVERT(r.standby_status USING utf8mb4) as standby_status, r.human_score,
+                      CONVERT(r.human_note USING utf8mb4) as human_note,
+                      CONVERT(c.case_id USING utf8mb4) as case_code,
+                      CONVERT(c.domain USING utf8mb4) as dimension_code,
+                      CONVERT(c.title USING utf8mb4) as title,
+                      CONVERT(c.sub_domain USING utf8mb4) as test_point,
+                      CONVERT(c.input_text USING utf8mb4) as input_text,
+                      CONVERT(c.expected_output USING utf8mb4) as expected_output,
+                      NULL as persona_id, CONVERT(t.task_id USING utf8mb4) as task_code,
+                      CONVERT(t.name USING utf8mb4) as task_name,
+                      CONVERT(t.target_api USING utf8mb4) as target_api,
                       'fixed' as source_table
                FROM fixed_test_results r
                JOIN fixed_test_cases c ON r.case_id = c.id
@@ -7945,26 +7968,47 @@ def export_standby_report_summary_excel():
     report_target_api = request.args.get("target_api", "pipi")
 
     conn = get_db_connection()
+    # MySQL: UNION 时两表字符列 collation 不一致会报 1271,用 CONVERT(... USING utf8mb4) 强制统一
     if USE_MYSQL:
         results = execute_query(conn,
-            """(SELECT r.id, r.case_id, r.task_id, r.actual_output, r.executed_at,
-                      r.eval_method, r.standby_score, r.standby_level, r.standby_deduction,
-                      r.standby_eval_detail, r.standby_status, r.human_score, r.human_note,
-                      c.case_id as case_code, c.dimension_code, c.title, c.test_point,
-                      c.input_text, c.expected_output,
-                      t.persona_id, t.task_id as task_code, t.name as task_name,
+            """(SELECT r.id, r.case_id, r.task_id,
+                      CONVERT(r.actual_output USING utf8mb4) as actual_output, r.executed_at,
+                      CONVERT(r.eval_method USING utf8mb4) as eval_method,
+                      r.standby_score, r.standby_level,
+                      CONVERT(r.standby_deduction USING utf8mb4) as standby_deduction,
+                      CONVERT(r.standby_eval_detail USING utf8mb4) as standby_eval_detail,
+                      CONVERT(r.standby_status USING utf8mb4) as standby_status, r.human_score,
+                      CONVERT(r.human_note USING utf8mb4) as human_note,
+                      CONVERT(c.case_id USING utf8mb4) as case_code,
+                      CONVERT(c.dimension_code USING utf8mb4) as dimension_code,
+                      CONVERT(c.title USING utf8mb4) as title,
+                      CONVERT(c.test_point USING utf8mb4) as test_point,
+                      CONVERT(c.input_text USING utf8mb4) as input_text,
+                      CONVERT(c.expected_output USING utf8mb4) as expected_output,
+                      t.persona_id, CONVERT(t.task_id USING utf8mb4) as task_code,
+                      CONVERT(t.name USING utf8mb4) as task_name,
                       'dynamic' as source_table
                FROM test_results r
                JOIN test_cases c ON r.case_id = c.id
                JOIN test_tasks t ON r.task_id = t.id
                WHERE r.standby_score IS NOT NULL AND r.eval_method = 'standby')
               UNION ALL
-              (SELECT r.id, r.case_id, r.task_id, r.actual_output, r.executed_at,
-                      r.eval_method, r.standby_score, r.standby_level, r.standby_deduction,
-                      r.standby_eval_detail, r.standby_status, r.human_score, r.human_note,
-                      c.case_id as case_code, c.domain as dimension_code, c.title, c.sub_domain as test_point,
-                      c.input_text, c.expected_output,
-                      NULL as persona_id, t.task_id as task_code, t.name as task_name,
+              (SELECT r.id, r.case_id, r.task_id,
+                      CONVERT(r.actual_output USING utf8mb4) as actual_output, r.executed_at,
+                      CONVERT(r.eval_method USING utf8mb4) as eval_method,
+                      r.standby_score, r.standby_level,
+                      CONVERT(r.standby_deduction USING utf8mb4) as standby_deduction,
+                      CONVERT(r.standby_eval_detail USING utf8mb4) as standby_eval_detail,
+                      CONVERT(r.standby_status USING utf8mb4) as standby_status, r.human_score,
+                      CONVERT(r.human_note USING utf8mb4) as human_note,
+                      CONVERT(c.case_id USING utf8mb4) as case_code,
+                      CONVERT(c.domain USING utf8mb4) as dimension_code,
+                      CONVERT(c.title USING utf8mb4) as title,
+                      CONVERT(c.sub_domain USING utf8mb4) as test_point,
+                      CONVERT(c.input_text USING utf8mb4) as input_text,
+                      CONVERT(c.expected_output USING utf8mb4) as expected_output,
+                      NULL as persona_id, CONVERT(t.task_id USING utf8mb4) as task_code,
+                      CONVERT(t.name USING utf8mb4) as task_name,
                       'fixed' as source_table
                FROM fixed_test_results r
                JOIN fixed_test_cases c ON r.case_id = c.id
