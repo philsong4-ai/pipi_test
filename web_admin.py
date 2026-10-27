@@ -7075,12 +7075,17 @@ def generate_standby_report_v2():
             r["_standby_detail"] = sd or {}
 
     total = len(results)
-    evaluated = [r for r in results if r.get("standby_level") is not None]
-    passed = [r for r in evaluated if r.get("standby_status") == "passed" or (r.get("standby_level") or 0) >= 3]
+    # effective_level: 人工纠正(human_score)优先,否则用 standby_level
+    # Why: 报告应反映人工纠正后的结果,不能只看自动评测分
+    for r in results:
+        hs = r.get("human_score")
+        r["_effective_level"] = hs if (isinstance(hs, int) and 0 <= hs <= 4) else r.get("standby_level")
+    evaluated = [r for r in results if r.get("_effective_level") is not None]
+    passed = [r for r in evaluated if r.get("standby_status") == "passed" or (r.get("_effective_level") or 0) >= 3]
     failed = [r for r in evaluated if r not in passed]
-    satisfied = [r for r in evaluated if (r.get("standby_level") or 0) >= 4]
-    usable = [r for r in evaluated if (r.get("standby_level") or 0) >= 3]
-    levels = [int(r["standby_level"]) for r in evaluated if r.get("standby_level") is not None]
+    satisfied = [r for r in evaluated if (r.get("_effective_level") or 0) >= 4]
+    usable = [r for r in evaluated if (r.get("_effective_level") or 0) >= 3]
+    levels = [int(r["_effective_level"]) for r in evaluated if r.get("_effective_level") is not None]
     scores = [float(r["standby_score"]) for r in evaluated if r.get("standby_score") is not None]
     avg_level = round(sum(levels) / len(levels), 2) if levels else 0
     avg_score = round(sum(scores) / len(scores), 2) if scores else 0
@@ -7090,12 +7095,14 @@ def generate_standby_report_v2():
     satisfy_threshold = 60.0
     usable_threshold = 80.0
 
-    # 档位分布
+    # 档位分布(用 effective_level,反映人工纠正)
     level_dist = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0}
     for r in evaluated:
-        lvl = r.get("standby_level")
+        lvl = r.get("_effective_level")
         if lvl is not None:
             level_dist[int(lvl)] = level_dist.get(int(lvl), 0) + 1
+    # 人工纠正统计
+    human_corrected = [r for r in evaluated if r.get("human_score") is not None]
 
     # 硬规则命中分布
     hard_rule_dist = {k: 0 for k in STANDBY_HARD_RULE_NAMES}
@@ -7141,6 +7148,7 @@ def generate_standby_report_v2():
                 "usable_met": usable_rate >= usable_threshold,
                 "avg_level": avg_level, "avg_score": avg_score,
                 "avg_judges_std": avg_std,
+                "human_corrected_count": len(human_corrected),
             },
             "level_distribution": level_dist,
             "hard_rule_distribution": hard_rule_dist,
@@ -7151,6 +7159,9 @@ def generate_standby_report_v2():
                 "dimension_code": r.get("dimension_code"),
                 "title": r.get("title"),
                 "level": r.get("standby_level"),
+                "effective_level": r.get("_effective_level"),
+                "human_score": r.get("human_score"),
+                "human_note": r.get("human_note"),
                 "score": r.get("standby_score"),
                 "hard_rule_hit": (r.get("_standby_detail") or {}).get("hard_rule_hit", "none"),
                 "strategy": (r.get("_standby_detail") or {}).get("strategy", ""),
@@ -7220,13 +7231,24 @@ def generate_standby_report_v2():
         hit = sd.get("hard_rule_hit", "none")
         strategy = sd.get("strategy", "")
         hit_badge = f'<span style="color:#ff3b30;font-weight:600">{STANDBY_HARD_RULE_NAMES.get(hit, hit)}</span>' if hit != "none" else '<span style="color:#86868b">未命中</span>'
+        eff_lvl = r.get("_effective_level")
+        auto_lvl = r.get("standby_level")
+        is_corrected = r.get("human_score") is not None
+        # 档位显示: 人工纠正过显示「auto→eff」, 否则只显示 eff
+        if is_corrected and auto_lvl is not None and auto_lvl != eff_lvl:
+            lvl_html = f'<b style="color:{level_colors.get(int(eff_lvl or 0))}">{eff_lvl}</b> <span style="color:#86868b;text-decoration:line-through">({auto_lvl})</span> <span style="color:#5856d6">✏️人工纠正</span>'
+        elif is_corrected:
+            lvl_html = f'<b style="color:{level_colors.get(int(eff_lvl or 0))}">{eff_lvl}</b> <span style="color:#5856d6">✏️人工纠正</span>'
+        else:
+            lvl_html = f'<b style="color:{level_colors.get(int(eff_lvl or 0))}">{eff_lvl}</b>'
         failed_details += f"""
         <div class="case-card">
             <div style="font-weight:600;margin-bottom:6px">{_html.escape(str(r.get('case_code','')))} - {_html.escape(str(r.get('title','')))}</div>
-            <div style="color:#86868b;font-size:12px">档位: <b style="color:{level_colors.get(int(r.get('standby_level') or 0))}">{r.get('standby_level')}</b> · 均值 {r.get('standby_score')} · 策略 {_html.escape(str(strategy))} · 硬规则 {hit_badge}</div>
+            <div style="color:#86868b;font-size:12px">档位: {lvl_html} · 均值 {r.get('standby_score')} · 策略 {_html.escape(str(strategy))} · 硬规则 {hit_badge}</div>
             <div style="color:#86868b;font-size:12px;margin-top:6px">用户输入: {_html.escape(str(r.get('input_text',''))[:200])}</div>
             <div style="color:#86868b;font-size:12px;margin-top:4px">玩偶回复: {_html.escape(str(r.get('actual_output',''))[:300])}</div>
             <div style="color:#ff3b30;font-size:12px;margin-top:4px">扣分原因: {_html.escape(str(r.get('standby_deduction','')))}</div>
+            {f'<div style="color:#5856d6;font-size:12px;margin-top:4px">人工纠正备注: {_html.escape(str(r.get("human_note","")))}</div>' if is_corrected and r.get('human_note') else ''}
         </div>"""
 
     satisfy_met = satisfy_rate >= satisfy_threshold
@@ -7303,6 +7325,7 @@ td {{ padding: 8px 10px; border-bottom: 1px solid #e8e8ed; }}
         <div class="kpi"><div class="kpi-value">{avg_score}</div><div class="kpi-label">平均均值分（/4）</div></div>
         <div class="kpi"><div class="kpi-value">{avg_std}</div><div class="kpi-label">裁判一致性 std</div></div>
         <div class="kpi"><div class="kpi-value">{hard_rule_dist.get('fact_wrong',0)+hard_rule_dist.get('hallucination',0)+hard_rule_dist.get('safety',0)+hard_rule_dist.get('brand',0)}</div><div class="kpi-label">命中0分硬规则</div></div>
+        <div class="kpi"><div class="kpi-value" style="color:#5856d6">{len(human_corrected)}</div><div class="kpi-label">人工纠正</div></div>
     </div>
 
     <h2>档位分布</h2>
@@ -7385,12 +7408,16 @@ def generate_standby_report_summary():
     total = len(results)
     if total == 0:
         return jsonify({"error": "no scored results found"}), 404
-    evaluated = [r for r in results if r.get("standby_level") is not None]
-    passed = [r for r in evaluated if r.get("standby_status") == "passed" or (r.get("standby_level") or 0) >= 3]
+    # effective_level: 人工纠正(human_score)优先,否则用 standby_level
+    for r in results:
+        hs = r.get("human_score")
+        r["_effective_level"] = hs if (isinstance(hs, int) and 0 <= hs <= 4) else r.get("standby_level")
+    evaluated = [r for r in results if r.get("_effective_level") is not None]
+    passed = [r for r in evaluated if r.get("standby_status") == "passed" or (r.get("_effective_level") or 0) >= 3]
     failed = [r for r in evaluated if r not in passed]
-    satisfied = [r for r in evaluated if (r.get("standby_level") or 0) >= 4]
-    usable = [r for r in evaluated if (r.get("standby_level") or 0) >= 3]
-    levels = [int(r["standby_level"]) for r in evaluated if r.get("standby_level") is not None]
+    satisfied = [r for r in evaluated if (r.get("_effective_level") or 0) >= 4]
+    usable = [r for r in evaluated if (r.get("_effective_level") or 0) >= 3]
+    levels = [int(r["_effective_level"]) for r in evaluated if r.get("_effective_level") is not None]
     scores = [float(r["standby_score"]) for r in evaluated if r.get("standby_score") is not None]
     avg_level = round(sum(levels) / len(levels), 2) if levels else 0
     avg_score = round(sum(scores) / len(scores), 2) if scores else 0
@@ -7398,10 +7425,11 @@ def generate_standby_report_summary():
     usable_rate = round(len(usable) / len(evaluated) * 100, 1) if evaluated else 0
     satisfy_threshold = 60.0
     usable_threshold = 80.0
+    human_corrected = [r for r in evaluated if r.get("human_score") is not None]
 
     level_dist = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0}
     for r in evaluated:
-        lvl = r.get("standby_level")
+        lvl = r.get("_effective_level")
         if lvl is not None:
             level_dist[int(lvl)] = level_dist.get(int(lvl), 0) + 1
 
@@ -7497,20 +7525,30 @@ def generate_standby_report_summary():
     for i, (t, c) in enumerate(top_tags, 1):
         tag_rows += f"<tr><td>{i}</td><td>{_html.escape(str(t))}</td><td>{c}</td></tr>"
 
-    failed.sort(key=lambda r: (int(r.get("standby_level") or 0), r.get("dimension_code", "")))
+    failed.sort(key=lambda r: (int(r.get("_effective_level") or 0), r.get("dimension_code", "")))
     failed_details = ""
     for r in failed:
         sd = r.get("_standby_detail") or {}
         hit = sd.get("hard_rule_hit", "none")
         strategy = sd.get("strategy", "")
         hit_badge = f'<span style="color:#ff3b30;font-weight:600">{STANDBY_HARD_RULE_NAMES.get(hit, hit)}</span>' if hit != "none" else '<span style="color:#86868b">未命中</span>'
+        eff_lvl = r.get("_effective_level")
+        auto_lvl = r.get("standby_level")
+        is_corrected = r.get("human_score") is not None
+        if is_corrected and auto_lvl is not None and auto_lvl != eff_lvl:
+            lvl_html = f'<b style="color:{level_colors.get(int(eff_lvl or 0))}">{eff_lvl}</b> <span style="color:#86868b;text-decoration:line-through">({auto_lvl})</span> <span style="color:#5856d6">✏️人工纠正</span>'
+        elif is_corrected:
+            lvl_html = f'<b style="color:{level_colors.get(int(eff_lvl or 0))}">{eff_lvl}</b> <span style="color:#5856d6">✏️人工纠正</span>'
+        else:
+            lvl_html = f'<b style="color:{level_colors.get(int(eff_lvl or 0))}">{eff_lvl}</b>'
         failed_details += f"""
         <div class="case-card">
             <div style="font-weight:600;margin-bottom:6px">{_html.escape(str(r.get('case_code','')))} - {_html.escape(str(r.get('title','')))}</div>
-            <div style="color:#86868b;font-size:12px">档位: <b style="color:{level_colors.get(int(r.get('standby_level') or 0))}">{r.get('standby_level')}</b> · 均值 {r.get('standby_score')} · 策略 {_html.escape(str(strategy))} · 硬规则 {hit_badge} · 任务 {r.get('task_code','')}</div>
+            <div style="color:#86868b;font-size:12px">档位: {lvl_html} · 均值 {r.get('standby_score')} · 策略 {_html.escape(str(strategy))} · 硬规则 {hit_badge} · 任务 {r.get('task_code','')}</div>
             <div style="color:#86868b;font-size:12px;margin-top:6px">用户输入: {_html.escape(str(r.get('input_text',''))[:200])}</div>
             <div style="color:#86868b;font-size:12px;margin-top:4px">玩偶回复: {_html.escape(str(r.get('actual_output',''))[:300])}</div>
             <div style="color:#ff3b30;font-size:12px;margin-top:4px">扣分原因: {_html.escape(str(r.get('standby_deduction','')))}</div>
+            {f'<div style="color:#5856d6;font-size:12px;margin-top:4px">人工纠正备注: {_html.escape(str(r.get("human_note","")))}</div>' if is_corrected and r.get('human_note') else ''}
         </div>"""
 
     satisfy_met = satisfy_rate >= satisfy_threshold
@@ -7587,6 +7625,7 @@ td {{ padding: 8px 10px; border-bottom: 1px solid #e8e8ed; }}
         <div class="kpi"><div class="kpi-value">{avg_score}</div><div class="kpi-label">平均均值分（/4）</div></div>
         <div class="kpi"><div class="kpi-value">{avg_std}</div><div class="kpi-label">裁判一致性 std</div></div>
         <div class="kpi"><div class="kpi-value">{hard_rule_dist.get('fact_wrong',0)+hard_rule_dist.get('hallucination',0)+hard_rule_dist.get('safety',0)+hard_rule_dist.get('brand',0)}</div><div class="kpi-label">命中0分硬规则</div></div>
+        <div class="kpi"><div class="kpi-value" style="color:#5856d6">{len(human_corrected)}</div><div class="kpi-label">人工纠正</div></div>
     </div>
 
     <h2>档位分布</h2>
@@ -7662,11 +7701,14 @@ def export_standby_report_excel():
             r["_sd"] = sd or {}
 
     total = len(results)
-    evaluated = [r for r in results if r.get("standby_level") is not None]
-    satisfied = [r for r in evaluated if (r.get("standby_level") or 0) >= 4]
-    usable = [r for r in evaluated if (r.get("standby_level") or 0) >= 3]
-    failed = [r for r in evaluated if (r.get("standby_level") or 0) < 3]
-    levels = [int(r["standby_level"]) for r in evaluated if r.get("standby_level") is not None]
+    for r in results:
+        hs = r.get("human_score")
+        r["_effective_level"] = hs if (isinstance(hs, int) and 0 <= hs <= 4) else r.get("standby_level")
+    evaluated = [r for r in results if r.get("_effective_level") is not None]
+    satisfied = [r for r in evaluated if (r.get("_effective_level") or 0) >= 4]
+    usable = [r for r in evaluated if (r.get("_effective_level") or 0) >= 3]
+    failed = [r for r in evaluated if (r.get("_effective_level") or 0) < 3]
+    levels = [int(r["_effective_level"]) for r in evaluated if r.get("_effective_level") is not None]
     scores = [float(r["standby_score"]) for r in evaluated if r.get("standby_score") is not None]
     avg_level = round(sum(levels) / len(levels), 2) if levels else 0
     avg_score = round(sum(scores) / len(scores), 2) if scores else 0
@@ -7674,10 +7716,11 @@ def export_standby_report_excel():
     usable_rate = round(len(usable) / len(evaluated) * 100, 1) if evaluated else 0
     satisfy_threshold = 60.0
     usable_threshold = 80.0
+    human_corrected = [r for r in evaluated if r.get("human_score") is not None]
 
     level_dist = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0}
     for r in evaluated:
-        lvl = r.get("standby_level")
+        lvl = r.get("_effective_level")
         if lvl is not None:
             level_dist[int(lvl)] = level_dist.get(int(lvl), 0) + 1
 
@@ -7734,6 +7777,7 @@ def export_standby_report_excel():
         ("失败（<3档）", len(failed)),
         ("平均档位（/4）", avg_level),
         ("平均均值分（/4）", avg_score),
+        ("人工纠正数", len(human_corrected)),
     ]
     for i, (k, v) in enumerate(other_rows, start=17):
         ws.cell(row=i, column=1, value=k).font = Font(bold=True)
@@ -7791,7 +7835,7 @@ def export_standby_report_excel():
 
     # Sheet 2: 用例明细
     ws2 = wb.create_sheet("用例明细")
-    headers = ["用例ID", "维度", "标题", "档位", "均值", "硬规则", "策略", "状态", "扣分原因", "用户输入", "玩偶回复"]
+    headers = ["用例ID", "维度", "标题", "档位", "有效档位", "人工纠正", "均值", "硬规则", "策略", "状态", "扣分原因", "用户输入", "玩偶回复", "人工备注"]
     for i, h in enumerate(headers, start=1):
         c = ws2.cell(row=1, column=i, value=h)
         c.font = header_font
@@ -7808,22 +7852,28 @@ def export_standby_report_excel():
         sd = r.get("_sd") or {}
         hit = sd.get("hard_rule_hit", "none") or "none"
         strategy = sd.get("strategy", "") or ""
+        hs = r.get("human_score")
+        eff_lvl = hs if (isinstance(hs, int) and 0 <= hs <= 4) else r.get("standby_level")
         ws2.cell(row=i, column=1, value=r.get("case_code", "")).border = thin
         ws2.cell(row=i, column=2, value=r.get("dimension_code", "")).border = thin
         ws2.cell(row=i, column=3, value=r.get("title", "")).border = thin
         ws2.cell(row=i, column=4, value=r.get("standby_level")).border = thin
-        ws2.cell(row=i, column=5, value=r.get("standby_score")).border = thin
-        ws2.cell(row=i, column=6, value=STANDBY_HARD_RULE_NAMES.get(hit, hit)).border = thin
-        ws2.cell(row=i, column=7, value=strategy).border = thin
-        ws2.cell(row=i, column=8, value=r.get("standby_status", "")).border = thin
-        c = ws2.cell(row=i, column=9, value=r.get("standby_deduction", ""))
+        ws2.cell(row=i, column=5, value=eff_lvl).border = thin
+        ws2.cell(row=i, column=6, value="是" if hs is not None else "").border = thin
+        ws2.cell(row=i, column=7, value=r.get("standby_score")).border = thin
+        ws2.cell(row=i, column=8, value=STANDBY_HARD_RULE_NAMES.get(hit, hit)).border = thin
+        ws2.cell(row=i, column=9, value=strategy).border = thin
+        ws2.cell(row=i, column=10, value=r.get("standby_status", "")).border = thin
+        c = ws2.cell(row=i, column=11, value=r.get("standby_deduction", ""))
         c.border = thin; c.alignment = Alignment(wrap_text=True, vertical="top")
-        c = ws2.cell(row=i, column=10, value=_clean(r.get("input_text", "")))
+        c = ws2.cell(row=i, column=12, value=_clean(r.get("input_text", "")))
         c.border = thin; c.alignment = Alignment(wrap_text=True, vertical="top")
-        c = ws2.cell(row=i, column=11, value=_clean(r.get("actual_output", "")))
+        c = ws2.cell(row=i, column=13, value=_clean(r.get("actual_output", "")))
+        c.border = thin; c.alignment = Alignment(wrap_text=True, vertical="top")
+        c = ws2.cell(row=i, column=14, value=r.get("human_note", "") or "")
         c.border = thin; c.alignment = Alignment(wrap_text=True, vertical="top")
 
-    widths = [12, 10, 28, 8, 8, 14, 12, 10, 32, 40, 40]
+    widths = [12, 10, 28, 8, 8, 8, 8, 14, 12, 10, 32, 40, 40, 24]
     for i, w in enumerate(widths, start=1):
         ws2.column_dimensions[get_column_letter(i)].width = w
 
@@ -7891,11 +7941,14 @@ def export_standby_report_summary_excel():
     total = len(results)
     if total == 0:
         return jsonify({"error": "no scored results found"}), 404
-    evaluated = [r for r in results if r.get("standby_level") is not None]
-    satisfied = [r for r in evaluated if (r.get("standby_level") or 0) >= 4]
-    usable = [r for r in evaluated if (r.get("standby_level") or 0) >= 3]
-    failed = [r for r in evaluated if (r.get("standby_level") or 0) < 3]
-    levels = [int(r["standby_level"]) for r in evaluated if r.get("standby_level") is not None]
+    for r in results:
+        hs = r.get("human_score")
+        r["_effective_level"] = hs if (isinstance(hs, int) and 0 <= hs <= 4) else r.get("standby_level")
+    evaluated = [r for r in results if r.get("_effective_level") is not None]
+    satisfied = [r for r in evaluated if (r.get("_effective_level") or 0) >= 4]
+    usable = [r for r in evaluated if (r.get("_effective_level") or 0) >= 3]
+    failed = [r for r in evaluated if (r.get("_effective_level") or 0) < 3]
+    levels = [int(r["_effective_level"]) for r in evaluated if r.get("_effective_level") is not None]
     scores = [float(r["standby_score"]) for r in evaluated if r.get("standby_score") is not None]
     avg_level = round(sum(levels) / len(levels), 2) if levels else 0
     avg_score = round(sum(scores) / len(scores), 2) if scores else 0
@@ -7905,10 +7958,11 @@ def export_standby_report_summary_excel():
     usable_threshold = 80.0
     satisfy_met = satisfy_rate >= satisfy_threshold
     usable_met = usable_rate >= usable_threshold
+    human_corrected = [r for r in evaluated if r.get("human_score") is not None]
 
     level_dist = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0}
     for r in evaluated:
-        lvl = r.get("standby_level")
+        lvl = r.get("_effective_level")
         if lvl is not None:
             level_dist[int(lvl)] = level_dist.get(int(lvl), 0) + 1
 
@@ -7971,6 +8025,7 @@ def export_standby_report_summary_excel():
         ("失败（<3档）", len(failed)),
         ("平均档位（/4）", avg_level),
         ("平均均值分（/4）", avg_score),
+        ("人工纠正数", len(human_corrected)),
     ]
     for i, (k, v) in enumerate(other_rows, start=17):
         ws.cell(row=i, column=1, value=k).font = Font(bold=True)
@@ -8035,7 +8090,7 @@ def export_standby_report_summary_excel():
     ws.column_dimensions["C"].width = 12
 
     ws2 = wb.create_sheet("用例明细")
-    headers = ["用例ID", "维度", "标题", "档位", "均值", "硬规则", "策略", "状态", "扣分原因", "用户输入", "玩偶回复", "任务ID", "画像ID"]
+    headers = ["用例ID", "维度", "标题", "档位", "有效档位", "人工纠正", "均值", "硬规则", "策略", "状态", "扣分原因", "用户输入", "玩偶回复", "任务ID", "画像ID", "人工备注"]
     for i, h in enumerate(headers, start=1):
         c = ws2.cell(row=1, column=i, value=h)
         c.font = header_font
@@ -8052,24 +8107,30 @@ def export_standby_report_summary_excel():
         sd = r.get("_sd") or {}
         hit = sd.get("hard_rule_hit", "none") or "none"
         strategy = sd.get("strategy", "") or ""
+        hs = r.get("human_score")
+        eff_lvl = hs if (isinstance(hs, int) and 0 <= hs <= 4) else r.get("standby_level")
         ws2.cell(row=i, column=1, value=r.get("case_code", "")).border = thin
         ws2.cell(row=i, column=2, value=r.get("dimension_code", "")).border = thin
         ws2.cell(row=i, column=3, value=r.get("title", "")).border = thin
         ws2.cell(row=i, column=4, value=r.get("standby_level")).border = thin
-        ws2.cell(row=i, column=5, value=r.get("standby_score")).border = thin
-        ws2.cell(row=i, column=6, value=STANDBY_HARD_RULE_NAMES.get(hit, hit)).border = thin
-        ws2.cell(row=i, column=7, value=strategy).border = thin
-        ws2.cell(row=i, column=8, value=r.get("standby_status", "")).border = thin
-        c = ws2.cell(row=i, column=9, value=r.get("standby_deduction", ""))
+        ws2.cell(row=i, column=5, value=eff_lvl).border = thin
+        ws2.cell(row=i, column=6, value="是" if hs is not None else "").border = thin
+        ws2.cell(row=i, column=7, value=r.get("standby_score")).border = thin
+        ws2.cell(row=i, column=8, value=STANDBY_HARD_RULE_NAMES.get(hit, hit)).border = thin
+        ws2.cell(row=i, column=9, value=strategy).border = thin
+        ws2.cell(row=i, column=10, value=r.get("standby_status", "")).border = thin
+        c = ws2.cell(row=i, column=11, value=r.get("standby_deduction", ""))
         c.border = thin; c.alignment = Alignment(wrap_text=True, vertical="top")
-        c = ws2.cell(row=i, column=10, value=_clean(r.get("input_text", "")))
+        c = ws2.cell(row=i, column=12, value=_clean(r.get("input_text", "")))
         c.border = thin; c.alignment = Alignment(wrap_text=True, vertical="top")
-        c = ws2.cell(row=i, column=11, value=_clean(r.get("actual_output", "")))
+        c = ws2.cell(row=i, column=13, value=_clean(r.get("actual_output", "")))
         c.border = thin; c.alignment = Alignment(wrap_text=True, vertical="top")
-        ws2.cell(row=i, column=12, value=r.get("task_code", "")).border = thin
-        ws2.cell(row=i, column=13, value=r.get("persona_id", "")).border = thin
+        ws2.cell(row=i, column=14, value=r.get("task_code", "")).border = thin
+        ws2.cell(row=i, column=15, value=r.get("persona_id", "")).border = thin
+        c = ws2.cell(row=i, column=16, value=r.get("human_note", "") or "")
+        c.border = thin; c.alignment = Alignment(wrap_text=True, vertical="top")
 
-    widths = [12, 10, 28, 8, 8, 14, 12, 10, 32, 40, 40, 22, 10]
+    widths = [12, 10, 28, 8, 8, 8, 8, 14, 12, 10, 32, 40, 40, 22, 10, 24]
     for i, w in enumerate(widths, start=1):
         ws2.column_dimensions[get_column_letter(i)].width = w
 
