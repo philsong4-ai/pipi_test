@@ -7379,30 +7379,61 @@ def generate_standby_report_summary():
     report_target_api = request.args.get("target_api", "pipi")
 
     conn = get_db_connection()
-    results = execute_query(conn,
-        """SELECT r.id, r.case_id, r.task_id, r.actual_output, r.executed_at, r.status,
-                  r.eval_method, r.standby_score, r.standby_level, r.standby_deduction,
-                  r.standby_eval_detail, r.standby_status, r.human_score, r.human_note,
-                  c.case_id as case_code, c.dimension_code, c.title, c.test_point,
-                  c.input_text, c.expected_output,
-                  t.persona_id, t.task_id as task_code, t.name as task_name, t.target_api
-           FROM test_results r
-           JOIN test_cases c ON r.case_id = c.id
-           JOIN test_tasks t ON r.task_id = t.id
-           WHERE r.standby_score IS NOT NULL AND r.eval_method = 'standby'
-           ORDER BY r.id DESC LIMIT %s""" if USE_MYSQL else
-        """SELECT r.id, r.case_id, r.task_id, r.actual_output, r.executed_at, r.status,
-                  r.eval_method, r.standby_score, r.standby_level, r.standby_deduction,
-                  r.standby_eval_detail, r.standby_status, r.human_score, r.human_note,
-                  c.case_id as case_code, c.dimension_code, c.title, c.test_point,
-                  c.input_text, c.expected_output,
-                  t.persona_id, t.task_id as task_code, t.name as task_name, t.target_api
-           FROM test_results r
-           JOIN test_cases c ON r.case_id = c.id
-           JOIN test_tasks t ON r.task_id = t.id
-           WHERE r.standby_score IS NOT NULL AND r.eval_method = 'standby'
-           ORDER BY r.id DESC LIMIT ?""",
-        (limit,), fetch_all=True)
+    # UNION 合并 test_results(动态用例) + fixed_test_results(固定垂类用例)
+    # Why: 汇总报告需覆盖全部已评分用例,固定用例也按 standby 5 档评测
+    # 排序: 按 executed_at DESC(对话执行时间倒序),最新在前
+    if USE_MYSQL:
+        results = execute_query(conn,
+            """(SELECT r.id, r.case_id, r.task_id, r.actual_output, r.executed_at, r.status,
+                      r.eval_method, r.standby_score, r.standby_level, r.standby_deduction,
+                      r.standby_eval_detail, r.standby_status, r.human_score, r.human_note,
+                      c.case_id as case_code, c.dimension_code, c.title, c.test_point,
+                      c.input_text, c.expected_output,
+                      t.persona_id, t.task_id as task_code, t.name as task_name, t.target_api,
+                      'dynamic' as source_table
+               FROM test_results r
+               JOIN test_cases c ON r.case_id = c.id
+               JOIN test_tasks t ON r.task_id = t.id
+               WHERE r.standby_score IS NOT NULL AND r.eval_method = 'standby')
+              UNION ALL
+              (SELECT r.id, r.case_id, r.task_id, r.actual_output, r.executed_at, r.status,
+                      r.eval_method, r.standby_score, r.standby_level, r.standby_deduction,
+                      r.standby_eval_detail, r.standby_status, r.human_score, r.human_note,
+                      c.case_id as case_code, c.domain as dimension_code, c.title, c.sub_domain as test_point,
+                      c.input_text, c.expected_output,
+                      NULL as persona_id, t.task_id as task_code, t.name as task_name, t.target_api,
+                      'fixed' as source_table
+               FROM fixed_test_results r
+               JOIN fixed_test_cases c ON r.case_id = c.id
+               JOIN fixed_test_tasks t ON r.task_id = t.id
+               WHERE r.standby_score IS NOT NULL AND r.eval_method = 'standby')
+              ORDER BY executed_at DESC LIMIT %s""", (limit,), fetch_all=True)
+    else:
+        results = execute_query(conn,
+            """(SELECT r.id, r.case_id, r.task_id, r.actual_output, r.executed_at, r.status,
+                      r.eval_method, r.standby_score, r.standby_level, r.standby_deduction,
+                      r.standby_eval_detail, r.standby_status, r.human_score, r.human_note,
+                      c.case_id as case_code, c.dimension_code, c.title, c.test_point,
+                      c.input_text, c.expected_output,
+                      t.persona_id, t.task_id as task_code, t.name as task_name, t.target_api,
+                      'dynamic' as source_table
+               FROM test_results r
+               JOIN test_cases c ON r.case_id = c.id
+               JOIN test_tasks t ON r.task_id = t.id
+               WHERE r.standby_score IS NOT NULL AND r.eval_method = 'standby')
+              UNION ALL
+              (SELECT r.id, r.case_id, r.task_id, r.actual_output, r.executed_at, r.status,
+                      r.eval_method, r.standby_score, r.standby_level, r.standby_deduction,
+                      r.standby_eval_detail, r.standby_status, r.human_score, r.human_note,
+                      c.case_id as case_code, c.domain as dimension_code, c.title, c.sub_domain as test_point,
+                      c.input_text, c.expected_output,
+                      NULL as persona_id, t.task_id as task_code, t.name as task_name, t.target_api,
+                      'fixed' as source_table
+               FROM fixed_test_results r
+               JOIN fixed_test_cases c ON r.case_id = c.id
+               JOIN fixed_test_tasks t ON r.task_id = t.id
+               WHERE r.standby_score IS NOT NULL AND r.eval_method = 'standby')
+              ORDER BY executed_at DESC LIMIT ?""", (limit,), fetch_all=True)
     results = [row_to_dict(r) for r in results]
     conn.close()
 
@@ -7552,9 +7583,11 @@ def generate_standby_report_summary():
             lvl_html = f'<b style="color:{level_colors.get(int(eff_lvl or 0))}">{eff_lvl}</b> <span style="color:#5856d6">✏️人工纠正</span>'
         else:
             lvl_html = f'<b style="color:{level_colors.get(int(eff_lvl or 0))}">{eff_lvl}</b>'
+        src = r.get("source_table") or "dynamic"
+        src_badge = '<span style="color:#5856d6;font-size:10px;border:1px solid #5856d6;padding:1px 5px;border-radius:3px;margin-left:6px">固定</span>' if src == "fixed" else '<span style="color:#86868b;font-size:10px;border:1px solid #d2d2d7;padding:1px 5px;border-radius:3px;margin-left:6px">动态</span>'
         failed_details += f"""
         <div class="case-card">
-            <div style="font-weight:600;margin-bottom:6px">{_html.escape(str(r.get('case_code','')))} - {_html.escape(str(r.get('title','')))}</div>
+            <div style="font-weight:600;margin-bottom:6px">{_html.escape(str(r.get('case_code','')))} - {_html.escape(str(r.get('title','')))}{src_badge}</div>
             <div style="color:#86868b;font-size:12px">档位: {lvl_html} · 均值 {r.get('standby_score')} · 策略 {_html.escape(str(strategy))} · 硬规则 {hit_badge} · 任务 {r.get('task_code','')}</div>
             <div style="color:#86868b;font-size:12px;margin-top:6px">用户输入: {_html.escape(str(r.get('input_text',''))[:200])}</div>
             <div style="color:#86868b;font-size:12px;margin-top:4px">玩偶回复: {_html.escape(str(r.get('actual_output',''))[:300])}</div>
@@ -7609,7 +7642,7 @@ td {{ padding: 8px 10px; border-bottom: 1px solid #e8e8ed; }}
 <body>
 <div class="container">
     <h1>Standby 5档汇总评测报告 <span class="badge-standby">5档</span></h1>
-    <div class="meta">统计范围: 最近 {total} 条已评分用例（limit={limit}） · 接口: {target_api_label} · 覆盖 {len(task_ids_seen)} 个测试任务 · 执行时间: {_fmt_dt(first_exec)} ~ {_fmt_dt(last_exec)} · 报告生成: {report_time}</div>
+    <div class="meta">统计范围: 最近 {total} 条已评分用例（limit={limit}） · 接口: {target_api_label} · 覆盖 {len(task_ids_seen)} 个测试任务 · 动态 {sum(1 for r in results if r.get('source_table')!='fixed')} 条 + 固定 {sum(1 for r in results if r.get('source_table')=='fixed')} 条 · 执行时间: {_fmt_dt(first_exec)} ~ {_fmt_dt(last_exec)} · 报告生成: {report_time}</div>
 
     <h2>核心达标指标</h2>
     <div class="kpi-grid" style="grid-template-columns: repeat(2, 1fr); margin-bottom: 12px">
@@ -7912,30 +7945,58 @@ def export_standby_report_summary_excel():
     report_target_api = request.args.get("target_api", "pipi")
 
     conn = get_db_connection()
-    results = execute_query(conn,
-        """SELECT r.id, r.case_id, r.task_id, r.actual_output, r.executed_at,
-                  r.eval_method, r.standby_score, r.standby_level, r.standby_deduction,
-                  r.standby_eval_detail, r.standby_status, r.human_score, r.human_note,
-                  c.case_id as case_code, c.dimension_code, c.title, c.test_point,
-                  c.input_text, c.expected_output,
-                  t.persona_id, t.task_id as task_code, t.name as task_name
-           FROM test_results r
-           JOIN test_cases c ON r.case_id = c.id
-           JOIN test_tasks t ON r.task_id = t.id
-           WHERE r.standby_score IS NOT NULL AND r.eval_method = 'standby'
-           ORDER BY r.id DESC LIMIT %s""" if USE_MYSQL else
-        """SELECT r.id, r.case_id, r.task_id, r.actual_output, r.executed_at,
-                  r.eval_method, r.standby_score, r.standby_level, r.standby_deduction,
-                  r.standby_eval_detail, r.standby_status, r.human_score, r.human_note,
-                  c.case_id as case_code, c.dimension_code, c.title, c.test_point,
-                  c.input_text, c.expected_output,
-                  t.persona_id, t.task_id as task_code, t.name as task_name
-           FROM test_results r
-           JOIN test_cases c ON r.case_id = c.id
-           JOIN test_tasks t ON r.task_id = t.id
-           WHERE r.standby_score IS NOT NULL AND r.eval_method = 'standby'
-           ORDER BY r.id DESC LIMIT ?""",
-        (limit,), fetch_all=True)
+    if USE_MYSQL:
+        results = execute_query(conn,
+            """(SELECT r.id, r.case_id, r.task_id, r.actual_output, r.executed_at,
+                      r.eval_method, r.standby_score, r.standby_level, r.standby_deduction,
+                      r.standby_eval_detail, r.standby_status, r.human_score, r.human_note,
+                      c.case_id as case_code, c.dimension_code, c.title, c.test_point,
+                      c.input_text, c.expected_output,
+                      t.persona_id, t.task_id as task_code, t.name as task_name,
+                      'dynamic' as source_table
+               FROM test_results r
+               JOIN test_cases c ON r.case_id = c.id
+               JOIN test_tasks t ON r.task_id = t.id
+               WHERE r.standby_score IS NOT NULL AND r.eval_method = 'standby')
+              UNION ALL
+              (SELECT r.id, r.case_id, r.task_id, r.actual_output, r.executed_at,
+                      r.eval_method, r.standby_score, r.standby_level, r.standby_deduction,
+                      r.standby_eval_detail, r.standby_status, r.human_score, r.human_note,
+                      c.case_id as case_code, c.domain as dimension_code, c.title, c.sub_domain as test_point,
+                      c.input_text, c.expected_output,
+                      NULL as persona_id, t.task_id as task_code, t.name as task_name,
+                      'fixed' as source_table
+               FROM fixed_test_results r
+               JOIN fixed_test_cases c ON r.case_id = c.id
+               JOIN fixed_test_tasks t ON r.task_id = t.id
+               WHERE r.standby_score IS NOT NULL AND r.eval_method = 'standby')
+              ORDER BY executed_at DESC LIMIT %s""", (limit,), fetch_all=True)
+    else:
+        results = execute_query(conn,
+            """(SELECT r.id, r.case_id, r.task_id, r.actual_output, r.executed_at,
+                      r.eval_method, r.standby_score, r.standby_level, r.standby_deduction,
+                      r.standby_eval_detail, r.standby_status, r.human_score, r.human_note,
+                      c.case_id as case_code, c.dimension_code, c.title, c.test_point,
+                      c.input_text, c.expected_output,
+                      t.persona_id, t.task_id as task_code, t.name as task_name,
+                      'dynamic' as source_table
+               FROM test_results r
+               JOIN test_cases c ON r.case_id = c.id
+               JOIN test_tasks t ON r.task_id = t.id
+               WHERE r.standby_score IS NOT NULL AND r.eval_method = 'standby')
+              UNION ALL
+              (SELECT r.id, r.case_id, r.task_id, r.actual_output, r.executed_at,
+                      r.eval_method, r.standby_score, r.standby_level, r.standby_deduction,
+                      r.standby_eval_detail, r.standby_status, r.human_score, r.human_note,
+                      c.case_id as case_code, c.domain as dimension_code, c.title, c.sub_domain as test_point,
+                      c.input_text, c.expected_output,
+                      NULL as persona_id, t.task_id as task_code, t.name as task_name,
+                      'fixed' as source_table
+               FROM fixed_test_results r
+               JOIN fixed_test_cases c ON r.case_id = c.id
+               JOIN fixed_test_tasks t ON r.task_id = t.id
+               WHERE r.standby_score IS NOT NULL AND r.eval_method = 'standby')
+              ORDER BY executed_at DESC LIMIT ?""", (limit,), fetch_all=True)
     results = [row_to_dict(r) for r in results]
     conn.close()
 
@@ -8101,7 +8162,7 @@ def export_standby_report_summary_excel():
     ws.column_dimensions["C"].width = 12
 
     ws2 = wb.create_sheet("用例明细")
-    headers = ["用例ID", "维度", "标题", "档位", "有效档位", "人工纠正", "均值", "硬规则", "策略", "状态", "扣分原因", "用户输入", "玩偶回复", "任务ID", "画像ID", "人工备注"]
+    headers = ["用例ID", "维度", "标题", "档位", "有效档位", "人工纠正", "均值", "硬规则", "策略", "状态", "扣分原因", "用户输入", "玩偶回复", "任务ID", "画像ID", "人工备注", "来源"]
     for i, h in enumerate(headers, start=1):
         c = ws2.cell(row=1, column=i, value=h)
         c.font = header_font
@@ -8120,6 +8181,7 @@ def export_standby_report_summary_excel():
         strategy = sd.get("strategy", "") or ""
         hs = r.get("human_score")
         eff_lvl = hs if (isinstance(hs, int) and 0 <= hs <= 4) else r.get("standby_level")
+        src = r.get("source_table") or "dynamic"
         ws2.cell(row=i, column=1, value=r.get("case_code", "")).border = thin
         ws2.cell(row=i, column=2, value=r.get("dimension_code", "")).border = thin
         ws2.cell(row=i, column=3, value=r.get("title", "")).border = thin
@@ -8140,8 +8202,9 @@ def export_standby_report_summary_excel():
         ws2.cell(row=i, column=15, value=r.get("persona_id", "")).border = thin
         c = ws2.cell(row=i, column=16, value=r.get("human_note", "") or "")
         c.border = thin; c.alignment = Alignment(wrap_text=True, vertical="top")
+        ws2.cell(row=i, column=17, value="固定" if src == "fixed" else "动态").border = thin
 
-    widths = [12, 10, 28, 8, 8, 8, 8, 14, 12, 10, 32, 40, 40, 22, 10, 24]
+    widths = [12, 10, 28, 8, 8, 8, 8, 14, 12, 10, 32, 40, 40, 22, 10, 24, 8]
     for i, w in enumerate(widths, start=1):
         ws2.column_dimensions[get_column_letter(i)].width = w
 
