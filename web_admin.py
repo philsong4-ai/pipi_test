@@ -6100,6 +6100,16 @@ def _parse_eval_detail(raw):
         return {}
 
 
+def _parse_json_field(raw):
+    """安全解析 JSON 数组/字段,失败返回 None"""
+    if not raw:
+        return None
+    try:
+        return json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
 @app.route("/api/test_results", methods=["GET"])
 def get_test_results():
     """
@@ -6127,7 +6137,7 @@ def get_test_results():
         return jsonify({"error": "task not found"}), 404
 
     sql = """SELECT r.id, r.task_id, r.case_id, r.actual_output, r.executed_at, r.score, r.deduction_reason, r.status, r.eval_detail,
-                   r.human_score, r.human_note, r.needs_review, r.ttfb_ms, r.total_ms, r.target_api,
+                   r.human_score, r.human_note, r.needs_review, r.ttfb_ms, r.total_ms, r.target_api, r.dialog_ids,
                    r.eval_method, r.standby_score, r.standby_level, r.standby_deduction, r.standby_eval_detail, r.standby_status,
                     c.case_id as case_code, c.dimension_code, c.title, c.test_point, c.input_text, c.expected_output, c.evaluation_points, c.failure_flags
              FROM test_results r
@@ -6174,6 +6184,7 @@ def get_test_results():
             "executed_at": str(row["executed_at"]) if row.get("executed_at") else None,
             "ttfb_ms": row.get("ttfb_ms"),
             "total_ms": row.get("total_ms"),
+            "dialog_ids": _parse_json_field(row.get("dialog_ids")),
             "target_api": row.get("target_api"),
             "test_point": row.get("test_point"),
             "failure_flags": row.get("failure_flags"),

@@ -5697,7 +5697,7 @@ function _showExecDetailV2(c, result) {
   content += '<p><b>标题:</b> ' + (c.title || '-') + '</p>';
   content += '<p><b>用户输入:</b></p><pre style="background:#f5f5f7;padding:8px;border-radius:4px;white-space:pre-wrap;font-size:12px;max-height:120px;overflow-y:auto">' + (c.input_text || '-') + '</pre>';
   content += '<p><b>期望输出:</b></p><pre style="background:#f5f5f7;padding:8px;border-radius:4px;white-space:pre-wrap;font-size:12px;max-height:100px;overflow-y:auto">' + (c.expected_output || '-') + '</pre>';
-  content += '<p><b>实际输出:</b></p><pre style="background:#e8f5e8;padding:8px;border-radius:4px;white-space:pre-wrap;font-size:12px;max-height:150px;overflow-y:auto">' + (result.actual_output || '(未执行)') + '</pre>';
+  content += _renderRoundsWithDialog(c, result);
   content += '</div>';
 
   var nav = '<div style="margin-top:16px;display:flex;justify-content:space-between;align-items:center">';
@@ -5710,6 +5710,63 @@ function _showExecDetailV2(c, result) {
 
   document.getElementById('modal-box').innerHTML = '<h3 style="margin-bottom:12px">执行结果详情</h3>' + content + nav;
   document.getElementById('modal-bg').style.display = 'flex';
+}
+
+// 按轮次渲染用户输入 + 玩偶回复 + dialog_id
+// 输入格式: 【R1】用户：xxx\n【R2】用户：yyy
+// actual_output 格式: 【R1】玩偶：xxx\n【R2】玩偶：yyy
+// dialog_ids: ["dialog_id_1","dialog_id_2",...] (JSON 数组,可缺失)
+function _renderRoundsWithDialog(c, result) {
+  if (!c || !c.input_text) return '';
+  var inputRounds = _splitRounds(c.input_text, '用户');
+  var replyRounds = result && result.actual_output ? _splitRounds(result.actual_output, null) : [];
+  var dialogIds = result && result.dialog_ids ? (typeof result.dialog_ids === 'string' ? JSON.parse(result.dialog_ids) : result.dialog_ids) : [];
+  var ttfbArr = result && result.ttfb_ms ? (typeof result.ttfb_ms === 'string' ? JSON.parse(result.ttfb_ms) : result.ttfb_ms) : [];
+  var totalArr = result && result.total_ms ? (typeof result.total_ms === 'string' ? JSON.parse(result.total_ms) : result.total_ms) : [];
+  var maxRounds = Math.max(inputRounds.length, replyRounds.length);
+  if (maxRounds === 0) return '';
+  var html = '<p style="margin-top:10px"><b>对话轮次（含 dialog_id）:</b></p>';
+  html += '<div style="border:1px solid #e8e8ed;border-radius:6px;max-height:220px;overflow-y:auto">';
+  for (var i = 0; i < maxRounds; i++) {
+    var rIdx = i + 1;
+    var u = inputRounds[i] || '';
+    var p = replyRounds[i] || '';
+    var d = dialogIds[i] || '';
+    var ttfb = ttfbArr[i] != null ? Math.round(ttfbArr[i]) + 'ms' : '';
+    var tot = totalArr[i] != null ? Math.round(totalArr[i]) + 'ms' : '';
+    var bg = i % 2 === 0 ? '#fafafa' : '#ffffff';
+    html += '<div style="padding:8px;border-bottom:1px solid #e8e8ed;background:' + bg + '">';
+    html += '<div style="font-size:11px;color:#5856d6;font-weight:600;margin-bottom:4px">R' + rIdx;
+    if (d) html += ' · dialog: <span style="font-family:monospace;font-size:10px;color:#1d1d1f">' + escapeHtml(d) + '</span>';
+    if (ttfb || tot) html += ' · <span style="color:#86868b">' + (ttfb ? 'TTFB ' + ttfb : '') + (ttfb && tot ? ' / ' : '') + (tot ? 'total ' + tot : '') + '</span>';
+    html += '</div>';
+    if (u) html += '<div style="font-size:12px;margin-bottom:4px"><b style="color:#0071e3">用户:</b> ' + escapeHtml(u) + '</div>';
+    if (p) html += '<div style="font-size:12px"><b style="color:#34c759">玩偶:</b> ' + escapeHtml(p) + '</div>';
+    if (!u && !p) html += '<div style="color:#aeaeb2;font-size:11px">(空)</div>';
+    html += '</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+// 拆分 input_text / actual_output 的多轮格式
+// marker='用户' 用于 input_text, marker=null 用于 actual_output (匹配 【Rn】玩偶：)
+function _splitRounds(text, marker) {
+  if (!text) return [];
+  var re = /【R(\d+)】\s*([^：:\n]+)[：:]\s*([\s\S]+?)(?=【R\d+】|$)/g;
+  var arr = [];
+  var m;
+  while ((m = re.exec(text)) !== null) {
+    var role = m[2].trim();
+    var body = m[3].trim();
+    if (marker && role !== marker) continue;
+    arr.push(body);
+  }
+  if (arr.length === 0) {
+    // 单轮 fallback: 整段当作一轮
+    arr.push(text.trim());
+  }
+  return arr;
 }
 
 function goPrevExecV2() {
@@ -5765,21 +5822,13 @@ function _showEvalDetailV2(c, result) {
     content += '<p><b>失败标记:</b> <span style="color:#c62828;font-size:12px">' + escapeHtml(c.failure_flags) + '</span></p>';
   }
   if (result && result.actual_output) {
-    content += '<p><b>实际输出:</b></p><pre style="background:#e8f5e8;padding:8px;border-radius:4px;white-space:pre-wrap;font-size:12px;max-height:140px;overflow-y:auto">' + escapeHtml(result.actual_output) + '</pre>';
+    content += _renderRoundsWithDialog(c, result);
   }
   // 执行元信息
   if (result) {
     var meta = [];
     if (result.executed_at) meta.push('执行时间: ' + result.executed_at);
     if (result.target_api) meta.push('目标API: ' + result.target_api);
-    if (result.ttfb_ms) {
-      var ttfb = typeof result.ttfb_ms === 'string' ? JSON.parse(result.ttfb_ms) : result.ttfb_ms;
-      if (Array.isArray(ttfb)) meta.push('首字延迟: ' + ttfb.map(function(x){return Math.round(x)+'ms';}).join(', '));
-    }
-    if (result.total_ms) {
-      var tm = typeof result.total_ms === 'string' ? JSON.parse(result.total_ms) : result.total_ms;
-      if (Array.isArray(tm)) meta.push('总耗时: ' + tm.map(function(x){return Math.round(x)+'ms';}).join(', '));
-    }
     if (meta.length) content += '<p style="color:#86868b;font-size:11px">' + meta.join(' · ') + '</p>';
   }
   content += '<hr style="margin:12px 0;border:none;border-top:1px solid #e8e8ed">';
