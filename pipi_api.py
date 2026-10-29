@@ -2645,9 +2645,16 @@ def evaluate_standby_test_case(
         corrections_section=corrections_text or "（暂无）",
     )
 
+    # standby 路径注入 test_point/evaluation_points/failure_flags,让判官知道本条考察意图
+    test_point = case_data.get("test_point", "")
+    evaluation_points = case_data.get("evaluation_points", "")
+    failure_flags = case_data.get("failure_flags", "")
     user_prompt = eval_prompts["user"].format(
         input_text=input_text,
         actual_output=actual_output,
+        test_point=test_point or "（未提供）",
+        evaluation_points=evaluation_points or "（未提供）",
+        failure_flags=failure_flags or "（未提供）",
     )
 
     try:
